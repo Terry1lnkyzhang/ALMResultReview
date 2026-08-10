@@ -17,8 +17,9 @@ def equipment(
     serial_number: str,
     *,
     description: str = "ECG simulator",
-    calibration_date: date = date(2025, 10, 29),
-    calibration_due_date: date = date(2026, 10, 28),
+    calibration_date: date | None = date(2025, 10, 29),
+    calibration_due_date: date | None = date(2026, 10, 28),
+    calibration_interval: str = "12",
     equipment_status: str = "使用中 In Use",
     equipment_pk: int = 1,
 ) -> EquipmentRegistry:
@@ -34,7 +35,7 @@ def equipment(
         calibration_date=calibration_date,
         calibration_due_date=calibration_due_date,
         received_date=date(2025, 10, 31),
-        calibration_interval="12",
+        calibration_interval=calibration_interval,
         subordinate_area="CT RD area",
         equipment_user="Tester",
         equipment_status=equipment_status,
@@ -80,6 +81,25 @@ def test_exact_equipment_id_and_calibration_range_pass() -> None:
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
     assert checks[0]["execution_date"] == "2026-08-01"
+
+
+def test_equipment_marked_no_calibration_required_passes_without_dates() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-0-0001",
+            "80508-2927",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+        )
+    ]
+    content = review_content("Equipment ID: PCCSY-RD-CT-0-0001")
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
 
 
 def test_required_equipment_without_actual_identifier_fails() -> None:

@@ -32,10 +32,15 @@ _DEVICE_HINT_RE = re.compile(
 )
 _PLACEHOLDER_RE = re.compile(r"^(?:_*|\.*|-*|n/?a|none|unknown|待填)$", re.IGNORECASE)
 _INVALID_SERIALS = {"", "na", "n/a", "none", "unknown", "待填"}
+_NO_CALIBRATION_INTERVALS = {"no calibration required", "no need calibration"}
 
 
 def _normalized(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _calibration_not_required(equipment: EquipmentRegistry) -> bool:
+    return equipment.calibration_interval.strip().casefold() in _NO_CALIBRATION_INTERVALS
 
 
 def _contains_identifier(text: str, identifier: str) -> bool:
@@ -343,6 +348,8 @@ def _evaluate_matches(
         snapshots.append(snapshot)
         if execution_date is None:
             manuals.append(f"{item.equipment_id} 缺少可解析的步骤执行日期")
+        elif _calibration_not_required(item):
+            pass
         elif item.calibration_date is None or item.calibration_due_date is None:
             manuals.append(f"{item.equipment_id} 台账缺少校准起止日期")
         elif not item.calibration_date <= execution_date <= item.calibration_due_date:
