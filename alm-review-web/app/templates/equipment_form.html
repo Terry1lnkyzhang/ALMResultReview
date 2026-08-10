@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ form_title }}{% endblock %}
+{% block content %}
+<a class="back-link" href="/ops/equipment">&larr; Equipment Registry</a>
+<section class="page-heading">
+  <div><p class="eyebrow">CONTROLLED EQUIPMENT</p><h1>{{ form_title }}</h1><p class="subtle">Maintain the canonical equipment record used for ALM review matching.</p></div>
+</section>
+<form class="equipment-editor" method="post">
+  <section>
+    <div class="section-intro"><span>01</span><div><h2>Identity</h2><p>Equipment ID is the unique import and update key.</p></div></div>
+    <div class="field-grid">
+      <label><span>Equipment ID</span><input name="equipment_id" value="{{ equipment.equipment_id if equipment else '' }}" required></label>
+      <label><span>Equipment name</span><input name="description" value="{{ equipment.description if equipment else '' }}" required></label>
+      <label><span>Manufacturer</span><input name="manufacturer" value="{{ equipment.manufacturer if equipment else '' }}"></label>
+      <label><span>Model number</span><input name="model_number" value="{{ equipment.model_number if equipment else '' }}"></label>
+      <label class="wide"><span>Serial number</span><input name="serial_number" value="{{ equipment.serial_number if equipment else '' }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>02</span><div><h2>Calibration</h2><p>Dates are compared with the ALM Run execution date.</p></div></div>
+    <div class="field-grid">
+      <label><span>Calibration date</span><input type="date" name="calibration_date" value="{{ equipment.calibration_date.isoformat() if equipment and equipment.calibration_date else '' }}"></label>
+      <label><span>Calibration due date</span><input type="date" name="calibration_due_date" value="{{ equipment.calibration_due_date.isoformat() if equipment and equipment.calibration_due_date else '' }}"></label>
+      <label><span>Received date</span><input type="date" name="received_date" value="{{ equipment.received_date.isoformat() if equipment and equipment.received_date else '' }}"></label>
+      <label><span>Calibration interval</span><input name="calibration_interval" value="{{ equipment.calibration_interval if equipment else '' }}"></label>
+      <label class="wide"><span>Accuracy / class</span><textarea name="accuracy_class" rows="3">{{ equipment.accuracy_class if equipment else '' }}</textarea></label>
+      <label class="wide"><span>Measurement range</span><textarea name="measurement_range" rows="3">{{ equipment.measurement_range if equipment else '' }}</textarea></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>03</span><div><h2>Ownership and status</h2><p>Operational context used to narrow device candidates.</p></div></div>
+    <div class="field-grid">
+      <label><span>Subordinate area</span><input name="subordinate_area" value="{{ equipment.subordinate_area if equipment else '' }}"></label>
+      <label><span>Equipment user</span><input name="equipment_user" value="{{ equipment.equipment_user if equipment else '' }}"></label>
+      <label><span>Equipment status</span><input name="equipment_status" value="{{ equipment.equipment_status if equipment else '' }}"></label>
+      <label><span>Calibration location</span><input name="calibration_location" value="{{ equipment.calibration_location if equipment else '' }}"></label>
+      <label class="wide"><span>Calibration instruction number</span><input name="instruction_number" value="{{ equipment.instruction_number if equipment else '' }}"></label>
+    </div>
+  </section>
+  {% if equipment and equipment.source_filename %}<div class="equipment-source">Last imported from <strong>{{ equipment.source_filename }}</strong>, {{ equipment.source_sheet }} row {{ equipment.source_row }}.</div>{% endif %}
+  <div class="form-actions"><a class="button secondary button-link" href="/ops/equipment">Cancel</a><button class="button primary" type="submit">Save equipment</button></div>
+</form>
+{% endblock %}

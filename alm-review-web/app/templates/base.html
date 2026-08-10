@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ALM Review{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/equipment.css') }}?v=2">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">AR</span>
+      <span>ALM Review Workspace</span>
+    </a>
+    <div class="environment"><span class="live-dot"></span> Local review service</div>
+  </header>
+  <main class="page-shell">
+    {% if message %}<div class="notice notice-{{ message_kind }}">{{ message }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">ALM content remains inside the local review environment.</footer>
+</body>
+</html>

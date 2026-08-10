@@ -1,0 +1,11 @@
+# Keep this deployment list synchronized with [project].dependencies in pyproject.toml.
+apscheduler>=3.11,<4
+cryptography>=45,<46
+fastapi>=0.116,<1
+httpx>=0.28,<1
+jinja2>=3.1,<4
+pydantic-settings>=2.10,<3
+pymysql>=1.1,<2
+python-multipart>=0.0.20,<1
+sqlalchemy>=2.0,<3
+uvicorn[standard]>=0.35,<1

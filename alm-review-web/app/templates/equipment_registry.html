@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Equipment Registry{% endblock %}
+{% block content %}
+<a class="back-link" href="/">&larr; Dashboard</a>
+<section class="page-heading equipment-heading">
+  <div>
+    <p class="eyebrow">CONTROLLED EQUIPMENT</p>
+    <h1>Equipment Registry</h1>
+    <p class="subtle">Calibration master data used to validate equipment recorded in ALM Runs.</p>
+  </div>
+  <a class="button primary button-link" href="/ops/equipment/new">Add equipment</a>
+</section>
+
+<section class="equipment-import-band" aria-labelledby="equipment-import-title">
+  <div>
+    <h2 id="equipment-import-title">Import Master Calibration List</h2>
+    <p>Upload an .xlsx workbook containing a sheet named Master Calibration List. Existing equipment IDs are updated; new IDs are added.</p>
+  </div>
+  <form method="post" action="/ops/equipment/import" enctype="multipart/form-data">
+    <label><span>Excel workbook</span><input type="file" name="workbook" accept=".xlsx" required></label>
+    <button class="button secondary" type="submit">Import workbook</button>
+  </form>
+</section>
+
+<section class="equipment-metrics" aria-label="Equipment totals">
+  <div><span>Total equipment</span><strong>{{ total_equipment }}</strong></div>
+  <div><span>Due within 30 days</span><strong>{{ due_soon_count }}</strong></div>
+  <div><span>Calibration expired</span><strong>{{ expired_count }}</strong></div>
+  <div><span>Due date missing</span><strong>{{ missing_due_date_count }}</strong></div>
+</section>
+
+<section class="equipment-list-section">
+  <form class="equipment-filterbar" method="get">
+    <label class="search-field"><span>Search</span><input name="query" value="{{ query }}" placeholder="ID, name, serial, model, manufacturer or user"></label>
+    <label><span>Equipment status</span><select name="status"><option value="all">All statuses</option>{% for item in statuses %}<option value="{{ item }}" {% if item == selected_status %}selected{% endif %}>{{ item }}</option>{% endfor %}</select></label>
+    <label><span>Calibration</span><select name="calibration">
+      <option value="all" {% if selected_calibration == 'all' %}selected{% endif %}>All dates</option>
+      <option value="expired" {% if selected_calibration == 'expired' %}selected{% endif %}>Expired</option>
+      <option value="due_soon" {% if selected_calibration == 'due_soon' %}selected{% endif %}>Due within 30 days</option>
+      <option value="current" {% if selected_calibration == 'current' %}selected{% endif %}>Current beyond 30 days</option>
+      <option value="missing" {% if selected_calibration == 'missing' %}selected{% endif %}>Due date missing</option>
+    </select></label>
+    <button class="button secondary" type="submit">Apply filters</button>
+  </form>
+  <div class="table-scroll">
+    <table class="equipment-table">
+      <thead><tr><th>Equipment</th><th>Model / Serial</th><th>Calibration</th><th>Area / User</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody>
+      {% for item in equipment %}
+        <tr>
+          <td><strong>{{ item.equipment_id }}</strong><span>{{ item.description }}</span>{% if item.manufacturer %}<small>{{ item.manufacturer }}</small>{% endif %}</td>
+          <td><span>{{ item.model_number or 'No model' }}</span><small>SN: {{ item.serial_number or 'Not recorded' }}</small></td>
+          <td><span>{{ item.calibration_date.isoformat() if item.calibration_date else 'No calibration date' }}</span>{% if item.calibration_due_date %}<small class="{% if item.calibration_due_date < today %}date-expired{% elif item.calibration_due_date <= due_soon %}date-due-soon{% endif %}">Due {{ item.calibration_due_date.isoformat() }}</small>{% else %}<small>Due date missing</small>{% endif %}</td>
+          <td><span>{{ item.subordinate_area or 'No area' }}</span><small>{{ item.equipment_user or 'No user' }}</small></td>
+          <td><span class="equipment-status">{{ item.equipment_status or 'Not set' }}</span></td>
+          <td class="row-actions"><a href="/ops/equipment/{{ item.id }}/edit">Edit</a><form method="post" action="/ops/equipment/{{ item.id }}/delete" onsubmit="return confirm('Delete {{ item.equipment_id }}?')"><button type="submit">Delete</button></form></td>
+        </tr>
+      {% else %}
+        <tr><td class="empty-table" colspan="6">No equipment matches the current filters.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="equipment-import-history">
+  <header><h2>Recent imports</h2><span>Last 10 workbooks</span></header>
+  <div class="table-scroll"><table><thead><tr><th>Workbook</th><th>Imported at</th><th>Rows</th><th>Added</th><th>Updated</th><th>Unchanged</th></tr></thead><tbody>
+  {% for item in imports %}<tr><td><strong>{{ item.filename }}</strong><small>{{ item.sheet_name }}</small></td><td>{{ item.imported_at.strftime('%Y-%m-%d %H:%M:%S') }}</td><td>{{ item.total_rows }}</td><td>{{ item.inserted_rows }}</td><td>{{ item.updated_rows }}</td><td>{{ item.unchanged_rows }}</td></tr>{% else %}<tr><td class="empty-table" colspan="6">No workbooks imported yet.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}

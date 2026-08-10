@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Review Dashboard{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div>
+    <p class="eyebrow">TESTING / RECURSIVE SCOPE</p>
+    <h1>Review Dashboard</h1>
+    <p class="subtle">Current ALM revisions and their final review decisions.</p>
+  </div>
+  <div class="actions">
+    <a class="button secondary button-link" href="/ops/equipment">Equipment registry</a>
+    <form method="post" action="/actions/sync-alm"><button class="button secondary" type="submit">Queue ALM sync</button></form>
+    <form method="post" action="/actions/process-reviews"><button class="button primary" type="submit">Refresh review queue</button></form>
+    <form class="rereview-action" method="post" action="/actions/rereview">
+      <label><span>Re-review scope</span><select name="scope" aria-label="Re-review scope">
+        <option value="unqualified_manual">Unqualified + Manual</option>
+        <option value="unqualified">Unqualified only</option>
+        <option value="manual">Manual only</option>
+        <option value="all">All Passed Runs</option>
+      </select></label>
+      <button class="button secondary" type="submit">Queue re-review</button>
+    </form>
+  </div>
+</section>
+
+<section class="queue-strip" aria-label="Review queue status">
+  <span>Worker <strong>{{ worker_heartbeat.status if worker_online else 'offline' }}</strong>{% if worker_heartbeat %} · {{ worker_heartbeat.worker_id }}{% endif %}</span>
+  {% if active_sync_job %}<span>ALM sync <strong>{{ active_sync_job.status }}</strong></span>{% endif %}
+  <span><strong>{{ review_job_counts.get('queued', 0) }}</strong> queued</span>
+  <span><strong>{{ review_job_counts.get('running', 0) }}</strong> running</span>
+  <span><strong>{{ review_job_counts.get('failed', 0) }}</strong> failed</span>
+</section>
+
+{% if rereview_progress %}
+<section class="review-progress" data-review-progress aria-labelledby="review-progress-title">
+  <div class="review-progress-heading">
+    <div>
+      <p class="eyebrow">LATEST RE-REVIEW</p>
+      <h2 id="review-progress-title"><span data-progress-processed>{{ rereview_progress.processed }}</span> of <span data-progress-total>{{ rereview_progress.total }}</span> processed</h2>
+    </div>
+    <strong class="review-progress-percent" data-progress-percent>{{ rereview_progress.percent }}%</strong>
+  </div>
+  <progress data-progress-bar max="{{ rereview_progress.total }}" value="{{ rereview_progress.processed }}">{{ rereview_progress.percent }}%</progress>
+  <div class="review-progress-facts">
+    <span><strong data-progress-completed>{{ rereview_progress.completed }}</strong> completed</span>
+    <span><strong data-progress-remaining>{{ rereview_progress.remaining }}</strong> remaining</span>
+    <span><strong data-progress-running>{{ rereview_progress.running }}</strong> running</span>
+    <span><strong data-progress-retrying>{{ rereview_progress.retrying }}</strong> retrying</span>
+    <span><strong data-progress-failed>{{ rereview_progress.failed }}</strong> failed</span>
+    <span>Started {{ rereview_started_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+  </div>
+</section>
+<script>
+  (() => {
+    const panel = document.querySelector("[data-review-progress]");
+    const fields = ["processed", "total", "completed", "remaining", "running", "retrying", "failed"];
+    async function refreshReviewProgress() {
+      try {
+        const response = await fetch("/api/review-progress", { cache: "no-store" });
+        if (!response.ok) return;
+        const progress = await response.json();
+        if (!progress.available) return;
+        for (const field of fields) {
+          panel.querySelector(`[data-progress-${field}]`).textContent = progress[field];
+        }
+        panel.querySelector("[data-progress-percent]").textContent = `${progress.percent}%`;
+        const bar = panel.querySelector("[data-progress-bar]");
+        bar.max = progress.total;
+        bar.value = progress.processed;
+      } catch (_) {
+        return;
+      }
+    }
+    window.setInterval(refreshReviewProgress, 15000);
+  })();
+</script>
+{% endif %}
+
+<section class="metric-grid" aria-label="Review totals">
+  <a class="metric metric-total" href="/?status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
+  <a class="metric metric-qualified" href="/?status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
+  <a class="metric metric-unqualified" href="/?status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
+  <a class="metric metric-manual" href="/?status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
+  <a class="metric metric-pending" href="/?status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
+  <a class="metric metric-failed" href="/?status=review_failed"><span>Review failed</span><strong>{{ status_counts.get('review_failed', 0) }}</strong></a>
+</section>
+
+<section class="workspace-grid">
+  <div class="main-workspace">
+    <form class="filterbar" method="get">
+      <label class="search-field"><span>Search</span><input type="search" name="query" value="{{ query }}" placeholder="Run, Test Case, name or path"></label>
+      <label><span>Status</span><select name="status">
+        <option value="all" {% if selected_status == 'all' %}selected{% endif %}>All statuses</option>
+        {% for value, label in status_labels.items() %}<option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select></label>
+      <label><span>Actual tester</span><select name="tester">
+        <option value="all">All testers</option>
+        {% for code1_id, label, count in tester_counts %}<option value="{{ code1_id }}" {% if selected_tester == code1_id %}selected{% endif %}>{{ label }} &middot; {{ count }}</option>{% endfor %}
+      </select></label>
+      <button class="button secondary" type="submit">Apply</button>
+      <a class="button secondary" href="/exports/reviews.csv?status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;query={{ query|urlencode }}">Export CSV</a>
+    </form>
+    <div class="table-heading"><h2>Runs</h2><span>{{ runs|length }} shown</span></div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Run</th><th>Test case</th><th>Actual tester</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>
+        <tbody>
+        {% for item in runs %}
+          <tr>
+            <td><a class="run-link" href="/runs/{{ item.run.run_id }}">#{{ item.run.run_id }}</a><small>{{ item.run.test_set_name }}</small></td>
+            <td><strong>{{ item.run.test_name }}</strong><small>TC {{ item.run.test_id or '-' }} &middot; {{ item.run.folder_path }}</small></td>
+            <td>{{ item.actual_tester_label }}</td>
+            <td><span class="alm-status">{{ item.run.run_status }}</span></td>
+            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span></td>
+            <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
+            <td>{{ item.run.execution_at.strftime('%Y-%m-%d %H:%M') if item.run.execution_at else '-' }}</td>
+          </tr>
+        {% else %}<tr><td class="empty" colspan="7">No runs match these filters.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <aside class="side-panel">
+    <div class="panel-heading"><h2>Workload by tester</h2><span>{{ tester_counts|length }} people</span></div>
+    <div class="tester-list">
+    {% for code1_id, label, count in tester_counts[:10] %}
+      <a href="/?tester={{ code1_id|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_tester_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
+    {% else %}<p class="empty">No synced data.</p>{% endfor %}
+    </div>
+    <div class="sync-state">
+      <span>Last synchronization</span>
+      {% if recent_sync %}<strong>{{ recent_sync.status|capitalize }}</strong><small>{{ recent_sync.started_at.strftime('%Y-%m-%d %H:%M') }}</small>{% else %}<strong>Not started</strong>{% endif %}
+    </div>
+  </aside>
+</section>
+{% endblock %}

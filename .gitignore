@@ -1,0 +1,12 @@
+/.vscode/
+/.ruff_cache/
+/__pycache__/
+
+/alm_*.json
+/alm_*_readable.html
+/*.pptx
+
+/buildPpt.py
+/format_alm_report.py
+/PPTShow.py
+/snake_game.py
