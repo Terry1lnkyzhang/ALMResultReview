@@ -9,8 +9,10 @@ from app.config import PROJECT_DIR
 from app.database import Base, SessionLocal, engine
 from app.migrations import ensure_compatible_schema
 from app.services.defaults import ensure_defaults
-from app.services.importer import queue_stale_reviews
-from app.services.review_policy import backfill_legacy_review_policy
+from app.services.review_policy import (
+    adopt_legacy_workspace_policies,
+    backfill_legacy_review_policy,
+)
 from app.services.scheduler import create_scheduler
 from app.web import router
 
@@ -22,7 +24,7 @@ async def lifespan(application: FastAPI):
     with SessionLocal() as db:
         ensure_defaults(db)
         backfill_legacy_review_policy(db)
-        queue_stale_reviews(db)
+        adopt_legacy_workspace_policies(db)
     scheduler = create_scheduler()
     application.state.scheduler = scheduler
     if scheduler is not None:

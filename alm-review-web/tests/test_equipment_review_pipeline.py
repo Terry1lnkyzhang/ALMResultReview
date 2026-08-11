@@ -13,6 +13,7 @@ from app.models import (
     PromptVersion,
     ReviewJob,
     RunRevision,
+    Workspace,
 )
 from app.services.reviews import process_job
 
@@ -195,3 +196,47 @@ def test_process_job_calls_disambiguation_only_for_ambiguous_role(monkeypatch) -
         assert "You classify equipment references" in calls[0]["messages"][0]["content"]
         assert result.verdict == "qualified"
         assert step_result["equipment"]["status"] == "not_applicable"
+
+
+def test_disabled_equipment_review_skips_disambiguation_and_marks_not_applicable(
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        configure_review(db)
+        workspace = Workspace(
+            name="No equipment",
+            slug="no-equipment",
+            equipment_review_enabled=False,
+        )
+        db.add(workspace)
+        db.flush()
+        job = add_job(
+            db,
+            description="Record the PIM SN",
+            expected="PIM SN:__",
+            actual="PIM SN: CN52105243",
+        )
+        run = db.get(AlmRun, job.run_id)
+        assert run is not None
+        run.workspace_id = workspace.id
+        run.alm_run_id = 42
+        job.workspace_id = workspace.id
+        db.commit()
+        calls = []
+
+        def post(*args, **kwargs):
+            calls.append(kwargs["json"])
+            return StubResponse(main_review_response())
+
+        monkeypatch.setattr("app.services.reviews.httpx.post", post)
+
+        result = process_job(db, job)
+        step_result = json.loads(result.step_results_json)[0]
+        criteria = json.loads(result.criteria_json)
+
+        assert len(calls) == 1
+        assert result.verdict == "qualified"
+        assert step_result["equipment"]["code"] == "disabled_by_configuration"
+        assert criteria["equipment_traceability"]["status"] == "not_applicable"

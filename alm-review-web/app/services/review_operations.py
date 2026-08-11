@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import AlmRun, ReviewJob
 from app.services.review_policy import current_review_policy_key
 from app.services.reviews import current_review
+from app.services.workspaces import resolve_workspace
 
 REREVIEW_SCOPES = {
     "all": None,
@@ -43,14 +44,24 @@ class RereviewProgress:
     percent: float
 
 
-def queue_rereviews(db: Session, scope: str) -> RereviewQueueResult:
+def queue_rereviews(
+    db: Session,
+    scope: str,
+    workspace_id: int | None = None,
+) -> RereviewQueueResult:
     if scope not in REREVIEW_SCOPES:
         raise ValueError(f"Unknown re-review scope {scope!r}.")
-    policy_key = current_review_policy_key(db)
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
     target_statuses = REREVIEW_SCOPES[scope]
     runs = db.scalars(
         select(AlmRun)
         .where(
+            or_(
+                AlmRun.workspace_id == workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            ),
             AlmRun.run_status == "Passed",
             AlmRun.current_revision_id.is_not(None),
         )
@@ -79,6 +90,7 @@ def queue_rereviews(db: Session, scope: str) -> RereviewQueueResult:
     for run in runs_to_queue:
         db.add(
             ReviewJob(
+                workspace_id=workspace.id,
                 batch_id=batch_id,
                 run_id=run.run_id,
                 revision_id=run.current_revision_id,
@@ -94,10 +106,21 @@ def queue_rereviews(db: Session, scope: str) -> RereviewQueueResult:
     )
 
 
-def latest_rereview_progress(db: Session) -> RereviewProgress | None:
+def latest_rereview_progress(
+    db: Session,
+    workspace_id: int | None = None,
+) -> RereviewProgress | None:
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
     batch_id = db.scalar(
         select(ReviewJob.batch_id)
-        .where(ReviewJob.batch_id.is_not(None))
+        .where(
+            or_(
+                ReviewJob.workspace_id == workspace.id,
+                include_legacy and ReviewJob.workspace_id.is_(None),
+            ),
+            ReviewJob.batch_id.is_not(None),
+        )
         .order_by(ReviewJob.id.desc())
         .limit(1)
     )
@@ -110,7 +133,13 @@ def latest_rereview_progress(db: Session) -> RereviewProgress | None:
     else:
         legacy_created_at = db.scalar(
             select(ReviewJob.created_at)
-            .where(ReviewJob.batch_id.is_(None))
+            .where(
+                or_(
+                    ReviewJob.workspace_id == workspace.id,
+                    include_legacy and ReviewJob.workspace_id.is_(None),
+                ),
+                ReviewJob.batch_id.is_(None),
+            )
             .group_by(ReviewJob.created_at)
             .having(func.count() > 1)
             .order_by(desc(ReviewJob.created_at))

@@ -37,6 +37,7 @@ from app.services.image_evidence import (
     image_transport_allowed,
 )
 from app.services.review_policy import current_review_policy_key
+from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 VALID_VERDICTS = {"qualified", "unqualified", "needs_manual_review"}
 CRITERIA_NAMES = (
@@ -81,7 +82,7 @@ def current_review(
 ) -> CurrentReview:
     if run.current_revision_id is None:
         return CurrentReview(None, None, "pending_review")
-    active_policy_key = policy_key or current_review_policy_key(db)
+    active_policy_key = policy_key or current_review_policy_key(db, run.workspace_id)
 
     result = db.scalar(
         select(ReviewResult)
@@ -149,6 +150,7 @@ def save_manual_decision(
         raise ValueError("Operator and reason are required.")
 
     manual = ManualDecision(
+        workspace_id=run.workspace_id,
         run_id=run.run_id,
         revision_id=run.current_revision_id,
         review_result_id=review.result.id,
@@ -604,6 +606,24 @@ def _apply_equipment_guards(
     return _recalculate_result(parsed)
 
 
+def _apply_disabled_equipment_guards(parsed: dict[str, Any]) -> dict[str, Any]:
+    for step_result in parsed["step_results"]:
+        step_result["equipment"] = {
+            "review_step": step_result["review_step"],
+            "status": "not_applicable",
+            "code": "disabled_by_configuration",
+            "summary": "设备台账校验已在当前 Workspace 配置中关闭。",
+            "matches": [],
+            "warnings": [],
+        }
+    result = _recalculate_result(parsed)
+    result["criteria"]["equipment_traceability"] = _criterion(
+        "not_applicable",
+        "设备台账校验已在当前 Workspace 配置中关闭。",
+    )
+    return result
+
+
 def _request_equipment_disambiguation(
     ai_config: AiConfig,
     ambiguous: list[dict[str, Any]],
@@ -828,7 +848,12 @@ def test_ai_connection(config: AiConfig) -> str:
 
 
 def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> ReviewResult:
-    policy_key = current_review_policy_key(db)
+    run = db.get(AlmRun, job.run_id)
+    revision = db.get(RunRevision, job.revision_id)
+    if run is None or revision is None:
+        raise ValueError("Review job references missing run data.")
+    workspace = resolve_workspace(db, run.workspace_id or job.workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
     if job.status == "completed":
         existing = db.scalar(select(ReviewResult).where(ReviewResult.job_id == job.id))
         if existing is None:
@@ -836,11 +861,6 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         if existing.review_policy_key != policy_key:
             raise ValueError("Completed review job belongs to an outdated review policy.")
         return existing
-
-    run = db.get(AlmRun, job.run_id)
-    revision = db.get(RunRevision, job.revision_id)
-    if run is None or revision is None:
-        raise ValueError("Review job references missing run data.")
     if run.current_revision_id != revision.id or run.source_hash != revision.source_hash:
         job.status = "outdated"
         job.completed_at = utcnow()
@@ -863,13 +883,23 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
 
     snapshot = json.loads(revision.snapshot_json)
     structured_content = review_payload(snapshot)
-    equipment_registry = db.scalars(
-        select(EquipmentRegistry).order_by(EquipmentRegistry.equipment_id)
-    ).all()
-    equipment_checks, ambiguous_equipment = analyze_equipment_steps(
-        structured_content,
-        equipment_registry,
-    )
+    equipment_checks: list[dict[str, Any]] = []
+    if workspace.equipment_review_enabled:
+        equipment_statement = select(EquipmentRegistry).order_by(
+            EquipmentRegistry.equipment_id
+        )
+        if workspace.equipment_area_filter:
+            equipment_statement = equipment_statement.where(
+                EquipmentRegistry.subordinate_area == workspace.equipment_area_filter
+            )
+        equipment_registry = db.scalars(equipment_statement).all()
+        equipment_checks, ambiguous_equipment = analyze_equipment_steps(
+            structured_content,
+            equipment_registry,
+        )
+    else:
+        equipment_registry = []
+        ambiguous_equipment = []
     if ambiguous_equipment:
         try:
             equipment_decisions = _request_equipment_disambiguation(
@@ -891,7 +921,7 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
                 check["status"] = "manual"
                 check["code"] = "equipment_disambiguation_failed"
                 check["summary"] = "设备角色 AI 消歧失败，需要人工审核。"
-    evidence_config = db.get(EvidenceConfig, 1)
+    evidence_config = workspace_evidence_config(db, workspace.id)
     prepared_evidence = _prepare_image_evidence(
         structured_content,
         evidence_config,
@@ -948,17 +978,20 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         if not isinstance(content, str) or not content.strip():
             raise ValueError("AI response did not contain review JSON.")
         expected_steps = [step["review_step"] for step in structured_content["steps"]]
-        parsed = _apply_equipment_guards(
-            _apply_capability_guards(
+        guarded = _apply_capability_guards(
                 _parse_response(content, expected_steps),
                 structured_content,
                 evidence_config,
                 prepared_evidence,
-            ),
-            equipment_checks,
+            )
+        parsed = (
+            _apply_equipment_guards(guarded, equipment_checks)
+            if workspace.equipment_review_enabled
+            else _apply_disabled_equipment_guards(guarded)
         )
         duration_ms = round((time.perf_counter() - started) * 1000)
         result = ReviewResult(
+            workspace_id=workspace.id,
             job_id=job.id,
             run_id=run.run_id,
             revision_id=revision.id,

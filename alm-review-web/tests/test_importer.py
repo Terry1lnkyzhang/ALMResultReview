@@ -4,9 +4,9 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models import AlmRun, AlmUser, ReviewJob, ReviewResult, RunRevision
+from app.models import AlmRun, AlmUser, ReviewJob, ReviewResult, RunRevision, Workspace
 from app.services.alm import _latest_run
-from app.services.importer import import_data
+from app.services.importer import import_data, queue_stale_reviews
 
 
 def sample_data() -> dict:
@@ -117,6 +117,24 @@ def test_import_queues_unchanged_run_when_review_policy_changed() -> None:
         assert [item.status for item in jobs] == ["completed", "queued"]
 
 
+def test_stale_review_scan_does_not_requeue_superseded_revision() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        import_data(sample_data(), db)
+        job = db.scalar(select(ReviewJob).where(ReviewJob.run_id == 152711))
+        assert job is not None
+        job.status = "superseded"
+        db.commit()
+
+        queued = queue_stale_reviews(db)
+
+        assert queued == 0
+        jobs = db.scalars(select(ReviewJob).where(ReviewJob.run_id == 152711)).all()
+        assert [item.status for item in jobs] == ["superseded"]
+
+
 def test_latest_run_only_considers_passed_results() -> None:
     runs = [
         {
@@ -154,3 +172,32 @@ def test_import_ignores_results_that_are_not_passed() -> None:
         assert db.get(AlmRun, 152711) is not None
         assert db.get(AlmRun, 152712) is None
         assert db.scalar(select(func.count()).select_from(ReviewJob)) == 1
+
+
+def test_same_alm_run_id_is_isolated_between_workspaces() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        first_workspace = Workspace(name="Project A", slug="project-a")
+        second_workspace = Workspace(name="Project B", slug="project-b")
+        db.add_all((first_workspace, second_workspace))
+        db.flush()
+
+        import_data(sample_data(), db, workspace_id=first_workspace.id)
+        import_data(sample_data(), db, workspace_id=second_workspace.id)
+
+        runs = db.scalars(select(AlmRun).order_by(AlmRun.workspace_id)).all()
+        jobs = db.scalars(select(ReviewJob).order_by(ReviewJob.workspace_id)).all()
+
+        assert len(runs) == 2
+        assert {run.workspace_id for run in runs} == {
+            first_workspace.id,
+            second_workspace.id,
+        }
+        assert {run.alm_run_id for run in runs} == {152711}
+        assert len({run.run_id for run in runs}) == 2
+        assert [job.workspace_id for job in jobs] == [
+            first_workspace.id,
+            second_workspace.id,
+        ]

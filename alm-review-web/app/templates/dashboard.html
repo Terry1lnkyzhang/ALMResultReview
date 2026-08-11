@@ -3,15 +3,18 @@
 {% block content %}
 <section class="page-heading">
   <div>
-    <p class="eyebrow">TESTING / RECURSIVE SCOPE</p>
+    <p class="eyebrow">{{ current_workspace.name|upper }} / RECURSIVE SCOPE</p>
     <h1>Review Dashboard</h1>
     <p class="subtle">Current ALM revisions and their final review decisions.</p>
   </div>
   <div class="actions">
+    <form method="get" action="/"><label class="workspace-switcher"><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspaces %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label></form>
+    <a class="button secondary button-link" href="/ops/configuration?workspace={{ current_workspace.id }}">Configuration</a>
     <a class="button secondary button-link" href="/ops/equipment">Equipment registry</a>
-    <form method="post" action="/actions/sync-alm"><button class="button secondary" type="submit">Queue ALM sync</button></form>
-    <form method="post" action="/actions/process-reviews"><button class="button primary" type="submit">Refresh review queue</button></form>
+    <form method="post" action="/actions/sync-alm"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Queue ALM sync</button></form>
+    <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Refresh review queue</button></form>
     <form class="rereview-action" method="post" action="/actions/rereview">
+      <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
       <label><span>Re-review scope</span><select name="scope" aria-label="Re-review scope">
         <option value="unqualified_manual">Unqualified + Manual</option>
         <option value="unqualified">Unqualified only</option>
@@ -30,6 +33,49 @@
   <span><strong>{{ review_job_counts.get('running', 0) }}</strong> running</span>
   <span><strong>{{ review_job_counts.get('failed', 0) }}</strong> failed</span>
 </section>
+
+{% if active_sync_job %}
+<section class="sync-progress" data-sync-progress aria-labelledby="sync-progress-title">
+  <div class="sync-progress-heading">
+    <div>
+      <p class="eyebrow">ALM SYNCHRONIZATION / JOB {{ active_sync_job.id }}</p>
+      <h2 id="sync-progress-title"><span data-sync-stage>{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}Collecting{% else %}{{ active_sync_job.progress_stage|replace('_', ' ')|title }}{% endif %}</span></h2>
+    </div>
+    <strong class="sync-progress-status" data-sync-status>{{ active_sync_job.status|upper }}</strong>
+  </div>
+  <p class="sync-progress-message" data-sync-message>{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}</p>
+  <div class="sync-progress-facts">
+    <span><strong data-sync-folders-processed>{{ active_sync_job.folders_processed }}</strong> / <strong data-sync-folders-discovered>{{ active_sync_job.folders_discovered }}</strong> folders</span>
+    <span><strong data-sync-test-sets>{{ active_sync_job.test_sets_discovered }}</strong> Test Sets</span>
+    <span><strong data-sync-runs>{{ active_sync_job.runs_discovered }}</strong> Runs selected</span>
+  </div>
+</section>
+<script>
+  (() => {
+    const panel = document.querySelector("[data-sync-progress]");
+    const terminalStatuses = new Set(["completed", "failed"]);
+    const refreshSyncProgress = async () => {
+      try {
+        const response = await fetch("/api/sync-progress?workspace={{ current_workspace.id }}", { cache: "no-store" });
+        if (!response.ok) return;
+        const progress = await response.json();
+        if (!progress.available) return;
+        panel.querySelector("[data-sync-stage]").textContent = progress.stage.replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
+        panel.querySelector("[data-sync-status]").textContent = progress.status.toUpperCase();
+        panel.querySelector("[data-sync-message]").textContent = progress.message || "Waiting for progress data from the worker";
+        panel.querySelector("[data-sync-folders-processed]").textContent = progress.folders_processed;
+        panel.querySelector("[data-sync-folders-discovered]").textContent = progress.folders_discovered;
+        panel.querySelector("[data-sync-test-sets]").textContent = progress.test_sets_discovered;
+        panel.querySelector("[data-sync-runs]").textContent = progress.runs_discovered;
+        if (terminalStatuses.has(progress.status)) window.clearInterval(timer);
+      } catch (_) {
+        return;
+      }
+    };
+    const timer = window.setInterval(refreshSyncProgress, 5000);
+  })();
+</script>
+{% endif %}
 
 {% if rereview_progress %}
 <section class="review-progress" data-review-progress aria-labelledby="review-progress-title">
@@ -56,7 +102,7 @@
     const fields = ["processed", "total", "completed", "remaining", "running", "retrying", "failed"];
     async function refreshReviewProgress() {
       try {
-        const response = await fetch("/api/review-progress", { cache: "no-store" });
+        const response = await fetch("/api/review-progress?workspace={{ current_workspace.id }}", { cache: "no-store" });
         if (!response.ok) return;
         const progress = await response.json();
         if (!progress.available) return;
@@ -77,17 +123,18 @@
 {% endif %}
 
 <section class="metric-grid" aria-label="Review totals">
-  <a class="metric metric-total" href="/?status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
-  <a class="metric metric-qualified" href="/?status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
-  <a class="metric metric-unqualified" href="/?status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
-  <a class="metric metric-manual" href="/?status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
-  <a class="metric metric-pending" href="/?status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
-  <a class="metric metric-failed" href="/?status=review_failed"><span>Review failed</span><strong>{{ status_counts.get('review_failed', 0) }}</strong></a>
+  <a class="metric metric-total" href="/?workspace={{ current_workspace.id }}&amp;status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
+  <a class="metric metric-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
+  <a class="metric metric-unqualified" href="/?workspace={{ current_workspace.id }}&amp;status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
+  <a class="metric metric-manual" href="/?workspace={{ current_workspace.id }}&amp;status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
+  <a class="metric metric-pending" href="/?workspace={{ current_workspace.id }}&amp;status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
+  <a class="metric metric-failed" href="/?workspace={{ current_workspace.id }}&amp;status=review_failed"><span>Review failed</span><strong>{{ status_counts.get('review_failed', 0) }}</strong></a>
 </section>
 
 <section class="workspace-grid">
   <div class="main-workspace">
     <form class="filterbar" method="get">
+      <input type="hidden" name="workspace" value="{{ current_workspace.id }}">
       <label class="search-field"><span>Search</span><input type="search" name="query" value="{{ query }}" placeholder="Run, Test Case, name or path"></label>
       <label><span>Status</span><select name="status">
         <option value="all" {% if selected_status == 'all' %}selected{% endif %}>All statuses</option>
@@ -97,25 +144,30 @@
         <option value="all">All testers</option>
         {% for code1_id, label, count in tester_counts %}<option value="{{ code1_id }}" {% if selected_tester == code1_id %}selected{% endif %}>{{ label }} &middot; {{ count }}</option>{% endfor %}
       </select></label>
+      <label><span>Test owner</span><select name="owner">
+        <option value="all">All owners</option>
+        {% for code1_id, label, count in owner_counts %}<option value="{{ code1_id }}" {% if selected_owner == code1_id %}selected{% endif %}>{{ label }} &middot; {{ count }}</option>{% endfor %}
+      </select></label>
       <button class="button secondary" type="submit">Apply</button>
-      <a class="button secondary" href="/exports/reviews.csv?status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;query={{ query|urlencode }}">Export CSV</a>
+      <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}">Export CSV</a>
     </form>
     <div class="table-heading"><h2>Runs</h2><span>{{ runs|length }} shown</span></div>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Run</th><th>Test case</th><th>Actual tester</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>
+        <thead><tr><th>Run</th><th>Test case</th><th>Actual tester</th><th>Test owner</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>
         <tbody>
         {% for item in runs %}
           <tr>
-            <td><a class="run-link" href="/runs/{{ item.run.run_id }}">#{{ item.run.run_id }}</a><small>{{ item.run.test_set_name }}</small></td>
+            <td><a class="run-link" href="/runs/{{ item.run.run_id }}">#{{ item.run.alm_run_id or item.run.run_id }}</a><small>{{ item.run.test_set_name }}</small></td>
             <td><strong>{{ item.run.test_name }}</strong><small>TC {{ item.run.test_id or '-' }} &middot; {{ item.run.folder_path }}</small></td>
             <td>{{ item.actual_tester_label }}</td>
+            <td>{{ item.test_owner_label }}</td>
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
             <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span></td>
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
             <td>{{ item.run.execution_at.strftime('%Y-%m-%d %H:%M') if item.run.execution_at else '-' }}</td>
           </tr>
-        {% else %}<tr><td class="empty" colspan="7">No runs match these filters.</td></tr>{% endfor %}
+        {% else %}<tr><td class="empty" colspan="8">No runs match these filters.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -124,7 +176,13 @@
     <div class="panel-heading"><h2>Workload by tester</h2><span>{{ tester_counts|length }} people</span></div>
     <div class="tester-list">
     {% for code1_id, label, count in tester_counts[:10] %}
-      <a href="/?tester={{ code1_id|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_tester_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
+      <a href="/?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ code1_id|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_tester_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
+    {% else %}<p class="empty">No synced data.</p>{% endfor %}
+    </div>
+    <div class="panel-heading"><h2>Workload by test owner</h2><span>{{ owner_counts|length }} people</span></div>
+    <div class="tester-list">
+    {% for code1_id, label, count in owner_counts[:10] %}
+      <a href="/?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ code1_id|urlencode }}&amp;query={{ query|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_owner_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
     {% else %}<p class="empty">No synced data.</p>{% endfor %}
     </div>
     <div class="sync-state">

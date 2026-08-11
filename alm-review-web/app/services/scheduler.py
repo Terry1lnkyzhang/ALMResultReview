@@ -26,14 +26,46 @@ def scheduled_heartbeat() -> None:
 
 def scheduled_sync() -> None:
     with SessionLocal() as db:
+        configs = db.scalars(
+            select(SyncConfig)
+            .where(SyncConfig.enabled.is_(True))
+            .order_by(SyncConfig.id)
+        ).all()
+        for config in configs:
+            result = queue_sync_job(
+                db,
+                requested_by="scheduler",
+                workspace_id=config.workspace_id,
+            )
+            if result.created:
+                logger.info(
+                    "Queued scheduled ALM synchronization workspace=%s job=%s",
+                    config.workspace_id,
+                    result.job.id,
+                )
+
+
+def queue_scheduled_workspace_sync(workspace_id: int) -> None:
+    with SessionLocal() as db:
         config = db.scalar(
-            select(SyncConfig).where(SyncConfig.enabled.is_(True)).order_by(SyncConfig.id).limit(1)
+            select(SyncConfig).where(
+                SyncConfig.workspace_id == workspace_id,
+                SyncConfig.enabled.is_(True),
+            )
         )
         if config is None:
             return
-        result = queue_sync_job(db, requested_by="scheduler")
+        result = queue_sync_job(
+            db,
+            requested_by="scheduler",
+            workspace_id=workspace_id,
+        )
         if result.created:
-            logger.info("Queued scheduled ALM synchronization job=%s", result.job.id)
+            logger.info(
+                "Queued scheduled ALM synchronization workspace=%s job=%s",
+                workspace_id,
+                result.job.id,
+            )
 
 
 def run_worker_cycle() -> None:
@@ -68,24 +100,33 @@ def run_worker_cycle() -> None:
 
 
 def configure_scheduler(scheduler: BackgroundScheduler) -> None:
-    for job_id in (
+    managed_job_ids = {
         "daily-alm-sync",
         "queued-ai-reviews",
         "worker-queue-poll",
         "worker-heartbeat",
-    ):
+    }
+    managed_job_ids.update(
+        job.id for job in scheduler.get_jobs() if job.id.startswith("daily-alm-sync:")
+    )
+    for job_id in managed_job_ids:
         if scheduler.get_job(job_id) is not None:
             scheduler.remove_job(job_id)
 
     with SessionLocal() as db:
-        config = db.scalar(select(SyncConfig).order_by(SyncConfig.id).limit(1))
-    if config is not None and config.enabled:
+        configs = db.scalars(
+            select(SyncConfig)
+            .where(SyncConfig.enabled.is_(True))
+            .order_by(SyncConfig.id)
+        ).all()
+    for config in configs:
         scheduler.add_job(
-            scheduled_sync,
+            queue_scheduled_workspace_sync,
             "cron",
             hour=config.schedule_hour,
             minute=config.schedule_minute,
-            id="daily-alm-sync",
+            args=[config.workspace_id],
+            id=f"daily-alm-sync:{config.workspace_id}",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

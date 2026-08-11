@@ -4,8 +4,17 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models import AiConfig, AlmRun, ReviewJob, RunRevision, SyncConfig, SyncJob
-from app.web import import_snapshot, review_run_now, sync_alm
+from app.models import (
+    AiConfig,
+    AlmRun,
+    EvidenceConfig,
+    ReviewJob,
+    RunRevision,
+    SyncConfig,
+    SyncJob,
+    Workspace,
+)
+from app.web import create_workspace, import_snapshot, review_run_now, sync_alm
 
 
 def test_import_snapshot_requires_configured_path(monkeypatch) -> None:
@@ -82,3 +91,25 @@ def test_review_action_only_creates_a_database_job() -> None:
         assert job.run_id == run.run_id
         assert job.revision_id == revision.id
         assert job.status == "queued"
+
+
+def test_create_workspace_creates_independent_sync_and_evidence_configs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        response = create_workspace("Project B", db)
+
+        workspace = db.scalar(select(Workspace).where(Workspace.slug == "project-b"))
+        assert workspace is not None
+        sync_config = db.scalar(
+            select(SyncConfig).where(SyncConfig.workspace_id == workspace.id)
+        )
+        evidence_config = db.scalar(
+            select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
+        )
+
+        assert response.status_code == 303
+        assert sync_config is not None
+        assert evidence_config is not None
+        assert sync_config.id is not None
+        assert evidence_config.id is not None

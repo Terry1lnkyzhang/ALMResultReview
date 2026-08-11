@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.models import EvidenceConfig
+from app.services.defaults import DEFAULT_PROMPT
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
 from app.services.reviews import (
     PreparedImageEvidence,
@@ -30,6 +31,11 @@ def compact_response(
             "summary": "简短总结",
         }
     )
+
+
+def test_default_prompt_distinguishes_expected_commands_from_actual_records() -> None:
+    assert "不得仅因 Expected 使用 Record、Enter、Select 等原形" in DEFAULT_PROMPT
+    assert "Recorded the EC Name: ..." in DEFAULT_PROMPT
 
 
 def evidence_content(

@@ -74,7 +74,7 @@ WEB_AUTH_PASSWORD=CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD
 Start the remote server on an internal or VPN interface:
 
 ```powershell
-.\start-server.ps1 -BindAddress 0.0.0.0 -Port 8010
+.\start-server.ps1 -BindAddress 0.0.0.0
 ```
 
 Laptop Worker `.env`:
@@ -133,10 +133,13 @@ From the workspace root:
 .\alm-review-web\start-server.ps1
 ```
 
-The startup script uses the single local application port `8010` and refuses to
-start a duplicate server when that port is already occupied.
+The startup script uses the single local application port `8090` and refuses to
+start a duplicate server when that port is already occupied. It listens on all
+network interfaces by default so other machines on the local network can connect.
 
-Open `http://127.0.0.1:8010`.
+Open `http://127.0.0.1:8090` on the same computer, or
+`http://<computer-ip>:8090` from another computer on the local network. To restrict
+the service to this computer, start it with `-BindAddress 127.0.0.1`.
 
 ## Operations
 

@@ -3,17 +3,18 @@ from __future__ import annotations
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
+from time import monotonic
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import SyncConfig, SyncHistory, SyncJob, WorkerHeartbeat, utcnow
-from app.services.alm import collect_folder
+from app.models import SyncHistory, SyncJob, WorkerHeartbeat, utcnow
+from app.services.alm import FolderCollectionProgress, collect_folder
 from app.services.importer import ImportResult, import_data
+from app.services.workspaces import resolve_workspace, workspace_sync_config
 
-SYNC_ACTIVE_KEY = "alm-sync"
 MAX_JOB_ATTEMPTS = 3
 
 
@@ -28,12 +29,19 @@ def current_worker_id() -> str:
     return configured or socket.gethostname()
 
 
-def queue_sync_job(db: Session, requested_by: str = "web") -> SyncQueueResult:
-    active = db.scalar(select(SyncJob).where(SyncJob.active_key == SYNC_ACTIVE_KEY))
+def queue_sync_job(
+    db: Session,
+    requested_by: str = "web",
+    workspace_id: int | None = None,
+) -> SyncQueueResult:
+    workspace = resolve_workspace(db, workspace_id)
+    active_key = f"alm-sync:{workspace.id}"
+    active = db.scalar(select(SyncJob).where(SyncJob.active_key == active_key))
     if active is not None:
         return SyncQueueResult(active, False)
     job = SyncJob(
-        active_key=SYNC_ACTIVE_KEY,
+        workspace_id=workspace.id,
+        active_key=active_key,
         status="queued",
         requested_by=requested_by[:128],
     )
@@ -42,7 +50,7 @@ def queue_sync_job(db: Session, requested_by: str = "web") -> SyncQueueResult:
         db.commit()
     except IntegrityError:
         db.rollback()
-        active = db.scalar(select(SyncJob).where(SyncJob.active_key == SYNC_ACTIVE_KEY))
+        active = db.scalar(select(SyncJob).where(SyncJob.active_key == active_key))
         if active is None:
             raise
         return SyncQueueResult(active, False)
@@ -77,6 +85,12 @@ def claim_next_sync_job(
         db.rollback()
         return None
     job.status = "running"
+    job.progress_stage = "connecting"
+    job.progress_message = "Connecting to ALM"
+    job.folders_discovered = 0
+    job.folders_processed = 0
+    job.test_sets_discovered = 0
+    job.runs_discovered = 0
     job.claimed_by = worker_id
     job.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
     job.started_at = now
@@ -89,17 +103,41 @@ def claim_next_sync_job(
 
 
 def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
-    config = db.scalar(select(SyncConfig).order_by(SyncConfig.id).limit(1))
+    workspace = resolve_workspace(db, job.workspace_id)
+    config = workspace_sync_config(db, workspace.id)
     if config is None:
         raise ValueError("No ALM synchronization scope is configured.")
     source = f"alm:folder:{config.folder_id}"
+    last_progress_update = 0.0
+
+    def persist_progress(progress: FolderCollectionProgress, force: bool) -> None:
+        nonlocal last_progress_update
+        now = monotonic()
+        if not force and now - last_progress_update < 1:
+            return
+        active_job = db.get(SyncJob, job.id)
+        if active_job is None:
+            return
+        active_job.progress_stage = progress.stage
+        active_job.progress_message = progress.message[:1500]
+        active_job.folders_discovered = progress.folders_discovered
+        active_job.folders_processed = progress.folders_processed
+        active_job.test_sets_discovered = progress.test_sets_discovered
+        active_job.runs_discovered = progress.runs_discovered
+        active_job.lease_expires_at = utcnow() + timedelta(
+            seconds=max(1, get_settings().worker_lease_seconds)
+        )
+        db.commit()
+        last_progress_update = now
+
     try:
-        data = collect_folder(config)
+        data = collect_folder(config, progress_callback=persist_progress)
     except Exception as exc:
         db.rollback()
         db.add(
             SyncHistory(
                 sync_config_id=config.id,
+                workspace_id=workspace.id,
                 source=source,
                 status="failed",
                 error_message=str(exc)[:2000],
@@ -108,11 +146,24 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
         )
         db.commit()
         raise
-    result = import_data(data, db, source=source)
+    importing_job = db.get(SyncJob, job.id)
+    if importing_job is not None:
+        importing_job.progress_stage = "importing"
+        importing_job.progress_message = "Importing Runs and creating review jobs"
+        db.commit()
+    result = import_data(
+        data,
+        db,
+        source=source,
+        workspace_id=workspace.id,
+        sync_config_id=config.id,
+    )
     completed_job = db.get(SyncJob, job.id)
     if completed_job is None:
         raise ValueError("Sync job disappeared while it was running.")
     completed_job.status = "completed"
+    completed_job.progress_stage = "completed"
+    completed_job.progress_message = "Synchronization complete"
     completed_job.active_key = None
     completed_job.claimed_by = None
     completed_job.lease_expires_at = None
@@ -141,6 +192,8 @@ def process_queued_sync_jobs(
             failed_job = db.get(SyncJob, job.id)
             if failed_job is not None:
                 failed_job.status = "failed"
+                failed_job.progress_stage = "failed"
+                failed_job.progress_message = str(exc)[:1500]
                 failed_job.error_message = str(exc)[:2000]
                 failed_job.claimed_by = None
                 failed_job.lease_expires_at = None

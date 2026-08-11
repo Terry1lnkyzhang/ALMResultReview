@@ -28,8 +28,13 @@ def utcnow() -> datetime:
 
 class AlmRun(Base):
     __tablename__ = "alm_runs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "alm_run_id", name="uq_workspace_alm_run"),
+    )
 
     run_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    alm_run_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     test_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     test_instance_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     test_set_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
@@ -122,8 +127,12 @@ class AiConfig(Base):
 
 class EvidenceConfig(Base):
     __tablename__ = "evidence_configs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_evidence_config_workspace"),
+    )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     allowed_network_root: Mapped[str] = mapped_column(String(1500), default="")
     local_html_fallback_root: Mapped[str] = mapped_column(String(1500), default="")
     network_evidence_enabled: Mapped[bool] = mapped_column(
@@ -189,6 +198,7 @@ class ReviewJob(Base):
     __table_args__ = (Index("ix_review_jobs_status_created", "status", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     batch_id: Mapped[str | None] = mapped_column(String(36), index=True)
     run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     revision_id: Mapped[int] = mapped_column(
@@ -212,11 +222,18 @@ class SyncJob(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     active_key: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     requested_by: Mapped[str] = mapped_column(String(128), default="web", nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="")
+    progress_stage: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    progress_message: Mapped[str] = mapped_column(String(1500), default="", nullable=False)
+    folders_discovered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    folders_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    test_sets_discovered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    runs_discovered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     claimed_by: Mapped[str | None] = mapped_column(String(255), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -240,6 +257,7 @@ class ReviewResult(Base):
     __tablename__ = "review_results"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     job_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("review_jobs.id", ondelete="CASCADE"), unique=True, nullable=False
     )
@@ -263,6 +281,7 @@ class ManualDecision(Base):
     __tablename__ = "manual_decisions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     revision_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     review_result_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -276,8 +295,12 @@ class ManualDecision(Base):
 
 class SyncConfig(Base):
     __tablename__ = "sync_configs"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_sync_config_workspace"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     server_url: Mapped[str] = mapped_column(String(1000), nullable=False)
     domain: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -290,10 +313,31 @@ class SyncConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    equipment_review_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    equipment_area_filter: Mapped[str] = mapped_column(
+        String(255), default="", nullable=False
+    )
+    legacy_policy_adopted: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class SyncHistory(Base):
     __tablename__ = "sync_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     sync_config_id: Mapped[int | None] = mapped_column(Integer, index=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)

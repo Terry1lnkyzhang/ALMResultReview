@@ -24,6 +24,37 @@ def normalize_text(value: Any) -> str:
     return _BLANK_LINES_RE.sub("\n\n", text).strip()
 
 
+def actual_format_profile(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"layout_text": "", "signals": []}
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    text = _BREAK_RE.sub("\n", text)
+    text = unescape(_TAG_RE.sub("", text)).strip("\n")
+    lines = text.splitlines()
+    signals: list[dict[str, Any]] = []
+    repeated_spaces = sum(len(re.findall(r" {2,}", line)) for line in lines)
+    leading_whitespace_lines = [
+        index for index, line in enumerate(lines, start=1) if line and line[0].isspace()
+    ]
+    trailing_whitespace_lines = [
+        index for index, line in enumerate(lines, start=1) if line.rstrip() != line
+    ]
+    blank_line_runs = len(re.findall(r"\n[ \t]*\n", text))
+    if repeated_spaces:
+        signals.append({"type": "repeated_spaces", "count": repeated_spaces})
+    if leading_whitespace_lines:
+        signals.append(
+            {"type": "leading_whitespace", "lines": leading_whitespace_lines[:20]}
+        )
+    if trailing_whitespace_lines:
+        signals.append(
+            {"type": "trailing_whitespace", "lines": trailing_whitespace_lines[:20]}
+        )
+    if blank_line_runs:
+        signals.append({"type": "blank_line_runs", "count": blank_line_runs})
+    return {"layout_text": text, "signals": signals}
+
+
 def _digest(value: Any) -> str:
     serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -90,6 +121,9 @@ def review_payload(record: dict[str, Any]) -> dict[str, Any]:
     ):
         step = dict(normalized)
         step["review_step"] = review_step
+        step["actual_format"] = actual_format_profile(
+            raw.get("actualText", raw.get("actual"))
+        )
         attachment_declared = bool(raw.get("attachment") or raw.get("attachmentContents"))
         step["attachment_declared"] = attachment_declared
         step["evidence_profile"] = step_evidence_profile(

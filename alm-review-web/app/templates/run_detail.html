@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Run {{ run.run_id }}{% endblock %}
+{% block title %}Run {{ run.alm_run_id or run.run_id }}{% endblock %}
 {% block content %}
-<a class="back-link" href="/">&larr; Dashboard</a>
+<a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; Dashboard</a>
 <section class="detail-heading">
-  <div><p class="eyebrow">RUN #{{ run.run_id }} / REVISION {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
+  <div><p class="eyebrow">RUN #{{ run.alm_run_id or run.run_id }} / REVISION {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
   <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
 </section>
 

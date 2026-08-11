@@ -29,12 +29,19 @@ def test_export_includes_ai_result_and_manual_override() -> None:
             test_set_name="Regression",
             folder_path="Root / Export",
             run_status="Passed",
+            test_owner="owner1",
             actual_tester="tester1",
             source_hash="a" * 64,
             review_hash="b" * 64,
             raw_json="{}",
         )
-        db.add_all((run, AlmUser(code1_id="tester1", full_name="Test User")))
+        db.add_all(
+            (
+                run,
+                AlmUser(code1_id="tester1", full_name="Test User"),
+                AlmUser(code1_id="owner1", full_name="Test Owner"),
+            )
+        )
         db.flush()
         revision = RunRevision(
             run_id=run.run_id,
@@ -72,14 +79,35 @@ def test_export_includes_ai_result_and_manual_override() -> None:
             "Checked against the source evidence",
         )
 
-        response = export_reviews(status="qualified", tester="all", query="", db=db)
+        response = export_reviews(
+            status="qualified",
+            tester="all",
+            owner="owner1",
+            query="",
+            db=db,
+        )
+        other_owner_response = export_reviews(
+            status="qualified",
+            tester="all",
+            owner="owner2",
+            query="",
+            db=db,
+        )
 
     assert response.body.startswith(b"\xef\xbb\xbf")
     rows = list(csv.DictReader(io.StringIO(response.body.decode("utf-8-sig"))))
     assert len(rows) == 1
     assert rows[0]["actual_tester"] == "Test User (tester1)"
+    assert rows[0]["test_owner_id"] == "owner1"
+    assert rows[0]["test_owner"] == "Test Owner (owner1)"
     assert rows[0]["ai_verdict"] == "unqualified"
     assert rows[0]["final_status"] == "qualified"
     assert rows[0]["manual_decision"] == "override_qualified"
     assert rows[0]["manual_operator"] == "reviewer1"
     assert rows[0]["manual_reason"] == "Checked against the source evidence"
+    other_owner_rows = list(
+        csv.DictReader(
+            io.StringIO(other_owner_response.body.decode("utf-8-sig"))
+        )
+    )
+    assert other_owner_rows == []

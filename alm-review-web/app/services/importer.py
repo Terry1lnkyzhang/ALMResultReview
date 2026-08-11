@@ -18,9 +18,11 @@ from app.models import (
     RunRevision,
     RunStep,
     SyncHistory,
+    Workspace,
     utcnow,
 )
 from app.services.review_policy import current_review_policy_key
+from app.services.workspaces import next_internal_run_id, resolve_workspace
 
 
 @dataclass
@@ -62,6 +64,7 @@ def _next_revision_number(db: Session, run_id: int) -> int:
 
 def _queue_review(
     db: Session,
+    workspace_id: int,
     run_id: int,
     revision_id: int,
     policy_key: str,
@@ -69,7 +72,7 @@ def _queue_review(
     active_job = db.scalar(
         select(ReviewJob).where(
             ReviewJob.revision_id == revision_id,
-            ReviewJob.status.in_(("queued", "running")),
+            ReviewJob.status.in_(("queued", "running", "superseded")),
         )
     )
     current_result = db.scalar(
@@ -80,12 +83,20 @@ def _queue_review(
     )
     if active_job is not None or current_result is not None:
         return False
-    db.add(ReviewJob(run_id=run_id, revision_id=revision_id, status="queued"))
+    db.add(
+        ReviewJob(
+            workspace_id=workspace_id,
+            run_id=run_id,
+            revision_id=revision_id,
+            status="queued",
+        )
+    )
     return True
 
 
 def _add_revision(
     db: Session,
+    workspace_id: int,
     run_row: AlmRun,
     record: dict[str, Any],
     raw_json: str,
@@ -120,20 +131,28 @@ def _add_revision(
         )
 
     run_row.current_revision_id = revision.id
-    _queue_review(db, run_row.run_id, revision.id, policy_key)
+    _queue_review(db, workspace_id, run_row.run_id, revision.id, policy_key)
     return revision
 
 
-def queue_stale_reviews(db: Session) -> int:
-    policy_key = current_review_policy_key(db)
+def queue_stale_reviews(db: Session, workspace_id: int | None = None) -> int:
+    workspace = resolve_workspace(db, workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
     runs = db.scalars(
         select(AlmRun).where(
+            AlmRun.workspace_id == workspace.id,
             AlmRun.current_revision_id.is_not(None),
             AlmRun.run_status == "Passed",
         )
     ).all()
     queued = sum(
-        _queue_review(db, run.run_id, run.current_revision_id, policy_key)
+        _queue_review(
+            db,
+            workspace.id,
+            run.run_id,
+            run.current_revision_id,
+            policy_key,
+        )
         for run in runs
         if run.current_revision_id is not None
     )
@@ -141,12 +160,33 @@ def queue_stale_reviews(db: Session) -> int:
     return queued
 
 
-def import_data(data: dict[str, Any], db: Session, source: str = "json") -> ImportResult:
+def queue_all_stale_reviews(db: Session) -> int:
+    workspace_ids = db.scalars(
+        select(Workspace.id)
+        .where(Workspace.archived.is_(False))
+        .order_by(Workspace.id)
+    ).all()
+    return sum(queue_stale_reviews(db, workspace_id) for workspace_id in workspace_ids)
+
+
+def import_data(
+    data: dict[str, Any],
+    db: Session,
+    source: str = "json",
+    workspace_id: int | None = None,
+    sync_config_id: int | None = None,
+) -> ImportResult:
+    workspace = resolve_workspace(db, workspace_id)
     result = ImportResult()
-    history = SyncHistory(source=source, status="running")
+    history = SyncHistory(
+        workspace_id=workspace.id,
+        sync_config_id=sync_config_id,
+        source=source,
+        status="running",
+    )
     db.add(history)
     db.flush()
-    policy_key = current_review_policy_key(db)
+    policy_key = current_review_policy_key(db, workspace.id)
 
     try:
         for item in data.get("users") or []:
@@ -181,12 +221,19 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
             raw_json = _raw(record)
             current_source_hash = source_hash(record)
             current_review_hash = review_hash(record)
-            run_row = db.get(AlmRun, run_id)
+            run_row = db.scalar(
+                select(AlmRun).where(
+                    AlmRun.workspace_id == workspace.id,
+                    AlmRun.alm_run_id == run_id,
+                )
+            )
             is_new = run_row is None
 
             if is_new:
                 run_row = AlmRun(
-                    run_id=run_id,
+                    run_id=next_internal_run_id(db, run_id),
+                    workspace_id=workspace.id,
+                    alm_run_id=run_id,
                     source_hash=current_source_hash,
                     review_hash=current_review_hash,
                     raw_json=raw_json,
@@ -199,6 +246,8 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
                 result.unchanged_runs += 1
 
             run_row.test_id = _integer(run.get("test-id") or test_instance.get("test-id"))
+            run_row.workspace_id = workspace.id
+            run_row.alm_run_id = run_id
             run_row.test_instance_id = _integer(run.get("testcycl-id") or test_instance.get("id"))
             run_row.test_set_id = _integer(test_set.get("id") or run.get("cycle-id"))
             run_row.folder_id = _integer(folder.get("id"))
@@ -223,6 +272,7 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
                 run_row.raw_json = raw_json
                 _add_revision(
                     db,
+                    workspace.id,
                     run_row,
                     record,
                     raw_json,
@@ -231,7 +281,13 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
                     policy_key,
                 )
             elif run_row.current_revision_id is not None:
-                _queue_review(db, run_id, run_row.current_revision_id, policy_key)
+                _queue_review(
+                    db,
+                    workspace.id,
+                    run_row.run_id,
+                    run_row.current_revision_id,
+                    policy_key,
+                )
 
         history.status = "completed"
         history.discovered_runs = result.discovered_runs
@@ -244,6 +300,8 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
     except Exception as exc:
         db.rollback()
         failed_history = SyncHistory(
+            workspace_id=workspace.id,
+            sync_config_id=sync_config_id,
             source=source,
             status="failed",
             error_message=str(exc),
@@ -255,6 +313,15 @@ def import_data(data: dict[str, Any], db: Session, source: str = "json") -> Impo
         raise
 
 
-def import_file(path: Path, db: Session) -> ImportResult:
+def import_file(
+    path: Path,
+    db: Session,
+    workspace_id: int | None = None,
+) -> ImportResult:
     with path.open("r", encoding="utf-8") as stream:
-        return import_data(json.load(stream), db, source=f"json:{path.name}")
+        return import_data(
+            json.load(stream),
+            db,
+            source=f"json:{path.name}",
+            workspace_id=workspace_id,
+        )

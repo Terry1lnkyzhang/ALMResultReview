@@ -5,6 +5,8 @@ import logging
 import mimetypes
 import xml.etree.ElementTree as ElementTree
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -17,6 +19,19 @@ IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGES_PER_STEP = 4
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FolderCollectionProgress:
+    stage: str
+    message: str
+    folders_discovered: int = 0
+    folders_processed: int = 0
+    test_sets_discovered: int = 0
+    runs_discovered: int = 0
+
+
+ProgressCallback = Callable[[FolderCollectionProgress, bool], None]
 
 
 class AlmClient:
@@ -199,26 +214,50 @@ def _latest_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
     )
 
 
-def collect_folder(config: SyncConfig) -> dict[str, Any]:
+def collect_folder(
+    config: SyncConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     folders: list[dict[str, Any]] = []
     test_sets: list[dict[str, Any]] = []
     test_cache: dict[str, dict[str, Any]] = {}
     users: list[dict[str, Any]] = []
+    pending: deque[dict[str, Any]] = deque()
+    folders_processed = 0
 
+    def report(stage: str, message: str, force: bool = False) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            FolderCollectionProgress(
+                stage=stage,
+                message=message,
+                folders_discovered=len(folders) + len(pending),
+                folders_processed=folders_processed,
+                test_sets_discovered=len(test_sets),
+                runs_discovered=len(records),
+            ),
+            force,
+        )
+
+    report("connecting", "Connecting to ALM", True)
     with AlmClient(config) as alm:
         root = alm.entity("test-set-folders", config.folder_id)
         root["path"] = config.folder_path or str(root.get("name") or config.folder_id)
-        pending = deque([root])
+        pending.append(root)
+        report("collecting", str(root["path"]), True)
         while pending:
             folder = pending.popleft()
             folders.append(folder)
+            report("collecting", str(folder["path"]), True)
             children = alm.entities(
                 "test-set-folders", query=_query("parent-id", folder["id"])
             )
             for child in children:
                 child["path"] = f"{folder['path']} / {child.get('name', child.get('id', ''))}"
                 pending.append(child)
+            report("collecting", str(folder["path"]))
 
             folder_test_sets = alm.entities(
                 "test-sets", query=_query("parent-id", folder["id"])
@@ -226,6 +265,7 @@ def collect_folder(config: SyncConfig) -> dict[str, Any]:
             for test_set in folder_test_sets:
                 test_set["folderPath"] = folder["path"]
                 test_sets.append(test_set)
+                report("collecting", str(folder["path"]))
                 instances = alm.entities(
                     "test-instances", query=_query("cycle-id", test_set["id"])
                 )
@@ -257,6 +297,9 @@ def collect_folder(config: SyncConfig) -> dict[str, Any]:
                             "run": run,
                         }
                     )
+                    report("collecting", str(folder["path"]))
+                    folders_processed += 1
+            report("collecting", str(folder["path"]), True)
 
         used_code1_ids = {
             str(value).strip()
@@ -270,11 +313,14 @@ def collect_folder(config: SyncConfig) -> dict[str, Any]:
             if value
         }
         try:
+            report("users", "Synchronizing ALM user directory", True)
             users = [
                 user for user in alm.users() if user["code1_id"] in used_code1_ids
             ]
         except (httpx.HTTPError, ElementTree.ParseError):
             logger.exception("ALM user directory synchronization failed")
+
+    report("collected", "ALM collection complete", True)
 
     return {
         "metadata": {

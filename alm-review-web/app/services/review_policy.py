@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AiConfig,
+    AlmRun,
     EquipmentRegistry,
-    EvidenceConfig,
     PromptVersion,
     ReviewResult,
+    Workspace,
 )
+from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
 REVIEW_ENGINE_VERSION = "2026.08.07.1"
@@ -35,7 +37,11 @@ def _review_implementation_hash() -> str:
     return digest.hexdigest()
 
 
-def current_review_policy_key(db: Session) -> str:
+def current_review_policy_key(
+    db: Session,
+    workspace_id: int | None = None,
+) -> str:
+    workspace = resolve_workspace(db, workspace_id)
     prompt = db.scalar(
         select(PromptVersion)
         .where(PromptVersion.is_active.is_(True))
@@ -43,10 +49,19 @@ def current_review_policy_key(db: Session) -> str:
         .limit(1)
     )
     ai_config = db.get(AiConfig, 1)
-    evidence_config = db.get(EvidenceConfig, 1)
-    equipment_registry = db.scalars(
-        select(EquipmentRegistry).order_by(EquipmentRegistry.equipment_id)
-    ).all()
+    evidence_config = workspace_evidence_config(db, workspace.id)
+    equipment_statement = select(EquipmentRegistry).order_by(
+        EquipmentRegistry.equipment_id
+    )
+    if workspace.equipment_area_filter:
+        equipment_statement = equipment_statement.where(
+            EquipmentRegistry.subordinate_area == workspace.equipment_area_filter
+        )
+    equipment_registry = (
+        db.scalars(equipment_statement).all()
+        if workspace.equipment_review_enabled
+        else []
+    )
     equipment_snapshot = [
         {
             "equipment_id": item.equipment_id,
@@ -68,6 +83,7 @@ def current_review_policy_key(db: Session) -> str:
         for item in equipment_registry
     ]
     policy = {
+        "workspace_id": workspace.id,
         "engine_version": REVIEW_ENGINE_VERSION,
         "implementation_hash": _review_implementation_hash(),
         "prompt_id": prompt.id if prompt else None,
@@ -86,6 +102,8 @@ def current_review_policy_key(db: Session) -> str:
         "allow_insecure_image_transport": bool(
             evidence_config and evidence_config.allow_insecure_image_transport
         ),
+        "equipment_review_enabled": workspace.equipment_review_enabled,
+        "equipment_area_filter": workspace.equipment_area_filter,
         "equipment_registry": equipment_snapshot,
     }
     serialized = json.dumps(policy, sort_keys=True, separators=(",", ":"))
@@ -100,3 +118,37 @@ def backfill_legacy_review_policy(db: Session) -> int:
     )
     db.commit()
     return result.rowcount
+
+
+def adopt_legacy_workspace_policies(db: Session) -> int:
+    workspaces = db.scalars(
+        select(Workspace)
+        .where(Workspace.legacy_policy_adopted.is_(False))
+        .order_by(Workspace.id)
+    ).all()
+    adopted_results = 0
+    for workspace in workspaces:
+        policy_key = current_review_policy_key(db, workspace.id)
+        runs = db.scalars(
+            select(AlmRun).where(
+                AlmRun.workspace_id == workspace.id,
+                AlmRun.current_revision_id.is_not(None),
+            )
+        ).all()
+        for run in runs:
+            result = db.scalar(
+                select(ReviewResult)
+                .where(
+                    ReviewResult.workspace_id == workspace.id,
+                    ReviewResult.revision_id == run.current_revision_id,
+                    ReviewResult.source_hash == run.source_hash,
+                )
+                .order_by(desc(ReviewResult.completed_at), desc(ReviewResult.id))
+                .limit(1)
+            )
+            if result is not None:
+                result.review_policy_key = policy_key
+                adopted_results += 1
+        workspace.legacy_policy_adopted = True
+    db.commit()
+    return adopted_results

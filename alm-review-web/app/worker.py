@@ -7,8 +7,10 @@ from threading import Event
 from app.database import Base, SessionLocal, engine
 from app.migrations import ensure_compatible_schema
 from app.services.defaults import ensure_defaults
-from app.services.importer import queue_stale_reviews
-from app.services.review_policy import backfill_legacy_review_policy
+from app.services.review_policy import (
+    adopt_legacy_workspace_policies,
+    backfill_legacy_review_policy,
+)
 from app.services.scheduler import create_scheduler, run_worker_cycle
 from app.services.worker_tasks import current_worker_id, update_worker_heartbeat
 
@@ -25,7 +27,7 @@ def main() -> None:
     with SessionLocal() as db:
         ensure_defaults(db)
         backfill_legacy_review_policy(db)
-        queue_stale_reviews(db)
+        adopt_legacy_workspace_policies(db)
         update_worker_heartbeat(db, current_worker_id(), status="starting")
 
     scheduler = create_scheduler(force_worker=True)

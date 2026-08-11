@@ -16,7 +16,7 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.config import PROJECT_DIR, get_settings
 from app.database import get_db
@@ -36,6 +36,7 @@ from app.models import (
     SyncHistory,
     SyncJob,
     WorkerHeartbeat,
+    Workspace,
 )
 from app.services.equipment_registry import import_equipment_workbook
 from app.services.importer import import_file, queue_stale_reviews
@@ -45,6 +46,7 @@ from app.services.review_operations import (
     queue_rereviews,
 )
 from app.services.review_policy import current_review_policy_key
+from app.services.review_status import current_reviews
 from app.services.reviews import (
     current_review,
     save_manual_decision,
@@ -52,6 +54,12 @@ from app.services.reviews import (
 )
 from app.services.scheduler import configure_scheduler
 from app.services.worker_tasks import queue_sync_job
+from app.services.workspaces import (
+    resolve_workspace,
+    workspace_evidence_config,
+    workspace_slug,
+    workspace_sync_config,
+)
 
 basic_auth = HTTPBasic(auto_error=False)
 
@@ -94,8 +102,10 @@ STATUS_LABELS = {
 
 
 def _redirect(path: str, message: str, kind: str = "success") -> RedirectResponse:
+    separator = "&" if "?" in path else "?"
     return RedirectResponse(
-        f"{path}?message={quote(message)}&message_kind={quote(kind)}", status_code=303
+        f"{path}{separator}message={quote(message)}&message_kind={quote(kind)}",
+        status_code=303,
     )
 
 
@@ -111,11 +121,14 @@ def _run_view(
     run: AlmRun,
     policy_key: str,
     users: dict[str, AlmUser],
+    review=None,
 ) -> dict:
-    review = current_review(db, run, policy_key)
+    if review is None:
+        review = current_review(db, run, policy_key)
     return {
         "run": run,
         "actual_tester_label": _person_label(run.actual_tester, users),
+        "test_owner_label": _person_label(run.test_owner, users),
         "review": review,
         "review_summary": review.result.issue_summary if review.result else "",
         "final_status": review.final_status,
@@ -123,11 +136,18 @@ def _run_view(
     }
 
 
-def _matches_dashboard_filters(item: dict, status: str, tester: str, query: str) -> bool:
+def _matches_dashboard_filters(
+    item: dict,
+    status: str,
+    tester: str,
+    owner: str,
+    query: str,
+) -> bool:
     normalized_query = query.strip().casefold()
     return (
         (status == "all" or item["final_status"] == status)
         and (tester == "all" or (item["run"].actual_tester or "Unassigned") == tester)
+        and (owner == "all" or (item["run"].test_owner or "Unassigned") == owner)
         and (
             not normalized_query
             or normalized_query in str(item["run"].run_id)
@@ -136,6 +156,7 @@ def _matches_dashboard_filters(item: dict, status: str, tester: str, query: str)
             or normalized_query in item["run"].test_set_name.casefold()
             or normalized_query in item["run"].folder_path.casefold()
             or normalized_query in item["actual_tester_label"].casefold()
+            or normalized_query in item["test_owner_label"].casefold()
             or normalized_query in item["review_summary"].casefold()
         )
     )
@@ -256,34 +277,98 @@ def dashboard(
     request: Request,
     status: str = Query(default="all"),
     tester: str = Query(default="all"),
+    owner: str = Query(default="all"),
     query: str = Query(default=""),
+    workspace: int | None = None,
     db: Session = Depends(get_db),
 ):
-    runs = db.scalars(select(AlmRun).order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))).all()
-    policy_key = current_review_policy_key(db)
+    include_legacy = workspace is None
+    current_workspace = resolve_workspace(db, workspace)
+    workspaces = db.scalars(
+        select(Workspace)
+        .where(Workspace.archived.is_(False))
+        .order_by(Workspace.name)
+    ).all()
+    runs = db.scalars(
+        select(AlmRun)
+        .options(
+            load_only(
+                AlmRun.run_id,
+                AlmRun.alm_run_id,
+                AlmRun.test_id,
+                AlmRun.test_name,
+                AlmRun.test_set_name,
+                AlmRun.folder_path,
+                AlmRun.run_status,
+                AlmRun.test_owner,
+                AlmRun.actual_tester,
+                AlmRun.execution_at,
+                AlmRun.source_hash,
+                AlmRun.current_revision_id,
+            )
+        )
+        .where(
+            or_(
+                AlmRun.workspace_id == current_workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            )
+        )
+        .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
+    ).all()
+    policy_key = current_review_policy_key(db, current_workspace.id)
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
-    all_views = [_run_view(db, run, policy_key, users) for run in runs]
+    reviews_by_run = current_reviews(db, runs, policy_key)
+    all_views = [
+        _run_view(db, run, policy_key, users, reviews_by_run[run.run_id]) for run in runs
+    ]
     status_counts = Counter(item["final_status"] for item in all_views)
-    tester_counts = Counter((item["run"].actual_tester or "Unassigned") for item in all_views)
+    tester_scope = [
+        item
+        for item in all_views
+        if _matches_dashboard_filters(item, status, "all", owner, query)
+    ]
+    tester_counts = Counter(
+        item["run"].actual_tester or "Unassigned" for item in tester_scope
+    )
+    owner_scope = [
+        item
+        for item in all_views
+        if _matches_dashboard_filters(item, status, tester, "all", query)
+    ]
+    owner_counts = Counter(
+        item["run"].test_owner or "Unassigned" for item in owner_scope
+    )
 
     filtered = [
         item
         for item in all_views
-        if _matches_dashboard_filters(item, status, tester, query)
+        if _matches_dashboard_filters(item, status, tester, owner, query)
     ]
-    recent_sync = db.scalar(select(SyncHistory).order_by(desc(SyncHistory.started_at)).limit(1))
+    recent_sync = db.scalar(
+        select(SyncHistory)
+        .where(SyncHistory.workspace_id == current_workspace.id)
+        .order_by(desc(SyncHistory.started_at))
+        .limit(1)
+    )
     max_tester_count = max(tester_counts.values(), default=1)
+    max_owner_count = max(owner_counts.values(), default=1)
     review_job_counts = dict(
         db.execute(
             select(ReviewJob.status, func.count())
-            .where(ReviewJob.status.in_(("queued", "running")))
+            .where(
+                ReviewJob.workspace_id == current_workspace.id,
+                ReviewJob.status.in_(("queued", "running")),
+            )
             .group_by(ReviewJob.status)
         ).all()
     )
     review_job_counts["failed"] = status_counts.get("review_failed", 0)
     active_sync_job = db.scalar(
         select(SyncJob)
-        .where(SyncJob.status.in_(("queued", "running", "failed")))
+        .where(
+            SyncJob.workspace_id == current_workspace.id,
+            SyncJob.status.in_(("queued", "running", "failed")),
+        )
         .order_by(desc(SyncJob.created_at))
         .limit(1)
     )
@@ -297,7 +382,7 @@ def dashboard(
         >= datetime.utcnow()
         - timedelta(seconds=max(15, get_settings().worker_poll_seconds * 3))
     )
-    rereview_progress = latest_rereview_progress(db)
+    rereview_progress = latest_rereview_progress(db, current_workspace.id)
     rereview_started_at = (
         rereview_progress.created_at.replace(tzinfo=UTC).astimezone(
             ZoneInfo(get_settings().app_timezone)
@@ -310,16 +395,24 @@ def dashboard(
         name="dashboard.html",
         context={
             "runs": filtered,
+            "workspaces": workspaces,
+            "current_workspace": current_workspace,
             "total_runs": len(all_views),
             "status_counts": status_counts,
             "tester_counts": [
                 (code1_id, _person_label(code1_id, users), count)
                 for code1_id, count in tester_counts.most_common()
             ],
+            "owner_counts": [
+                (code1_id, _person_label(code1_id, users), count)
+                for code1_id, count in owner_counts.most_common()
+            ],
             "max_tester_count": max_tester_count,
+            "max_owner_count": max_owner_count,
             "status_labels": STATUS_LABELS,
             "selected_status": status,
             "selected_tester": tester,
+            "selected_owner": owner,
             "query": query,
             "recent_sync": recent_sync,
             "review_job_counts": review_job_counts,
@@ -335,8 +428,9 @@ def dashboard(
 
 
 @router.get("/api/review-progress")
-def review_progress(db: Session = Depends(get_db)):
-    progress = latest_rereview_progress(db)
+def review_progress(workspace: int | None = None, db: Session = Depends(get_db)):
+    current_workspace = resolve_workspace(db, workspace)
+    progress = latest_rereview_progress(db, current_workspace.id)
     if progress is None:
         return {"available": False}
     return {
@@ -354,21 +448,75 @@ def review_progress(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/api/sync-progress")
+def sync_progress(workspace: int | None = None, db: Session = Depends(get_db)):
+    current_workspace = resolve_workspace(db, workspace)
+    job = db.scalar(
+        select(SyncJob)
+        .where(SyncJob.workspace_id == current_workspace.id)
+        .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
+        .limit(1)
+    )
+    if job is None:
+        return {"available": False}
+    legacy_running_job = (
+        job.status == "running"
+        and job.progress_stage == "queued"
+        and not job.progress_message
+    )
+    return {
+        "available": True,
+        "job_id": job.id,
+        "status": job.status,
+        "stage": "collecting" if legacy_running_job else job.progress_stage,
+        "message": (
+            "This synchronization started before live progress tracking; "
+            "detailed counts will be available from the next synchronization."
+            if legacy_running_job
+            else job.progress_message
+        ),
+        "folders_discovered": job.folders_discovered,
+        "folders_processed": job.folders_processed,
+        "test_sets_discovered": job.test_sets_discovered,
+        "runs_discovered": job.runs_discovered,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "error": job.error_message,
+    }
+
+
 @router.get("/exports/reviews.csv")
 def export_reviews(
     status: str = Query(default="all"),
     tester: str = Query(default="all"),
+    owner: str = Query(default="all"),
     query: str = Query(default=""),
+    workspace: int | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
-    runs = db.scalars(select(AlmRun).order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))).all()
-    policy_key = current_review_policy_key(db)
+    include_legacy = workspace is None
+    current_workspace = resolve_workspace(db, workspace)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            or_(
+                AlmRun.workspace_id == current_workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            )
+        )
+        .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
+    ).all()
+    policy_key = current_review_policy_key(db, current_workspace.id)
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
     views = [
         item
         for run in runs
         if _matches_dashboard_filters(
-            item := _run_view(db, run, policy_key, users), status, tester, query
+            item := _run_view(db, run, policy_key, users),
+            status,
+            tester,
+            owner,
+            query,
         )
     ]
 
@@ -384,6 +532,8 @@ def export_reviews(
             "folder_path",
             "actual_tester_id",
             "actual_tester",
+            "test_owner_id",
+            "test_owner",
             "alm_result",
             "execution_at",
             "source_hash",
@@ -418,6 +568,8 @@ def export_reviews(
                 run.folder_path,
                 run.actual_tester,
                 item["actual_tester_label"],
+                run.test_owner,
+                item["test_owner_label"],
                 run.run_status,
                 run.execution_at,
                 run.source_hash,
@@ -590,6 +742,7 @@ def review_run_now(
         )
     if job is None:
         job = ReviewJob(
+            workspace_id=run.workspace_id,
             run_id=run_id,
             revision_id=run.current_revision_id,
             status="queued",
@@ -608,47 +761,66 @@ def review_run_now(
 
 
 @router.post("/actions/import-snapshot")
-def import_snapshot(db: Session = Depends(get_db)):
+def import_snapshot(
+    db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
+):
+    explicit_workspace = isinstance(workspace_id, int)
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}" if explicit_workspace else "/"
     path = get_settings().import_path
     if path is None:
-        return _redirect("/", "Snapshot import path is not configured.", "error")
+        return _redirect(redirect_path, "Snapshot import path is not configured.", "error")
     if not path.exists():
-        return _redirect("/", f"Import file not found: {path}", "error")
+        return _redirect(redirect_path, f"Import file not found: {path}", "error")
     try:
-        result = import_file(path, db)
+        result = import_file(path, db, workspace.id)
     except Exception as exc:
-        return _redirect("/", f"Import failed: {exc}", "error")
+        return _redirect(redirect_path, f"Import failed: {exc}", "error")
     return _redirect(
-        "/",
+        redirect_path,
         f"Sync complete: {result.new_runs} new, {result.changed_runs} changed, "
         f"{result.unchanged_runs} unchanged.",
     )
 
 
 @router.post("/actions/sync-alm")
-def sync_alm(db: Session = Depends(get_db)):
-    config = db.scalar(select(SyncConfig).order_by(SyncConfig.id).limit(1))
+def sync_alm(
+    db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
+):
+    explicit_workspace = isinstance(workspace_id, int)
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}" if explicit_workspace else "/"
+    config = workspace_sync_config(db, workspace.id)
     if config is None:
-        return _redirect("/", "No ALM synchronization scope is configured.", "error")
-    result = queue_sync_job(db, requested_by="web")
+        return _redirect(redirect_path, "No ALM synchronization scope is configured.", "error")
+    result = queue_sync_job(db, requested_by="web", workspace_id=workspace.id)
     message = (
         f"ALM synchronization queued as job {result.job.id}."
         if result.created
         else f"ALM synchronization job {result.job.id} is already {result.job.status}."
     )
-    return _redirect("/", message)
+    return _redirect(redirect_path, message)
 
 
 @router.post("/actions/process-reviews")
-def process_reviews(db: Session = Depends(get_db)):
+def process_reviews(
+    db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
+):
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}"
     ai_config = db.get(AiConfig, 1)
     if ai_config is None or not ai_config.enabled:
         return _redirect(
-            "/", "AI review is disabled. Configure the local model before processing.", "error"
+            redirect_path,
+            "AI review is disabled. Configure the local model before processing.",
+            "error",
         )
-    queued = queue_stale_reviews(db)
+    queued = queue_stale_reviews(db, workspace.id)
     return _redirect(
-        "/",
+        redirect_path,
         f"Review queue refreshed: {queued} stale Runs queued. The laptop worker will process them.",
     )
 
@@ -657,17 +829,22 @@ def process_reviews(db: Session = Depends(get_db)):
 def rereview_runs(
     scope: str = Form(...),
     db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
 ):
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}"
     ai_config = db.get(AiConfig, 1)
     if ai_config is None or not ai_config.enabled:
         return _redirect(
-            "/", "AI review is disabled. Configure the model before re-reviewing.", "error"
+            redirect_path,
+            "AI review is disabled. Configure the model before re-reviewing.",
+            "error",
         )
     if scope not in REREVIEW_SCOPES:
-        return _redirect("/", "Invalid re-review scope.", "error")
-    result = queue_rereviews(db, scope)
+        return _redirect(redirect_path, "Invalid re-review scope.", "error")
+    result = queue_rereviews(db, scope, workspace.id)
     return _redirect(
-        "/",
+        redirect_path,
         f"Re-review queued: {result.queued} of {result.matched} matching Runs. "
         f"{result.already_active} already active. Previous results were retained.",
     )
@@ -889,21 +1066,48 @@ def delete_equipment(equipment_pk: int, db: Session = Depends(get_db)):
 
 
 @router.get("/ops/configuration")
-def configuration(request: Request, db: Session = Depends(get_db)):
-    sync_config = db.scalar(select(SyncConfig).order_by(SyncConfig.id).limit(1))
+def configuration(
+    request: Request,
+    workspace: int | None = None,
+    db: Session = Depends(get_db),
+):
+    current_workspace = resolve_workspace(db, workspace)
+    workspaces = db.scalars(
+        select(Workspace)
+        .where(Workspace.archived.is_(False))
+        .order_by(Workspace.name)
+    ).all()
+    sync_config = workspace_sync_config(db, current_workspace.id)
     ai_config = db.get(AiConfig, 1)
-    evidence_config = db.get(EvidenceConfig, 1)
+    evidence_config = workspace_evidence_config(db, current_workspace.id)
     prompt = db.scalar(
         select(PromptVersion)
         .where(PromptVersion.is_active.is_(True))
         .order_by(desc(PromptVersion.id))
         .limit(1)
     )
+    source_locked = bool(
+        db.scalar(
+            select(AlmRun.run_id)
+            .where(AlmRun.workspace_id == current_workspace.id)
+            .limit(1)
+        )
+    )
+    equipment_areas = db.scalars(
+        select(EquipmentRegistry.subordinate_area)
+        .where(EquipmentRegistry.subordinate_area != "")
+        .distinct()
+        .order_by(EquipmentRegistry.subordinate_area)
+    ).all()
     return templates.TemplateResponse(
         request=request,
         name="configuration.html",
         context={
             "sync_config": sync_config,
+            "workspaces": workspaces,
+            "current_workspace": current_workspace,
+            "source_locked": source_locked,
+            "equipment_areas": equipment_areas,
             "ai_config": ai_config,
             "evidence_config": evidence_config,
             "prompt": prompt,
@@ -918,10 +1122,16 @@ def test_ai(
     ai_base_url: str = Form(...),
     model_name: str = Form(...),
     timeout_seconds: int = Form(...),
+    workspace_id: int | None = Form(None),
 ):
+    redirect_path = (
+        f"/ops/configuration?workspace={workspace_id}"
+        if workspace_id is not None
+        else "/ops/configuration"
+    )
     if get_settings().app_role == "web":
         return _redirect(
-            "/ops/configuration",
+            redirect_path,
             "AI connectivity must be tested on the laptop worker.",
             "error",
         )
@@ -935,9 +1145,9 @@ def test_ai(
     try:
         test_ai_connection(ai_config)
     except Exception as exc:
-        return _redirect("/ops/configuration", f"AI connection failed: {exc}", "error")
+        return _redirect(redirect_path, f"AI connection failed: {exc}", "error")
     return _redirect(
-        "/ops/configuration",
+        redirect_path,
         f"AI connection succeeded: {ai_config.model_name} at {ai_config.base_url}",
     )
 
@@ -945,6 +1155,8 @@ def test_ai(
 @router.post("/ops/configuration")
 def save_configuration(
     request: Request,
+    workspace_id: int = Form(...),
+    workspace_name: str = Form(...),
     server_url: str = Form(...),
     domain: str = Form(...),
     project: str = Form(...),
@@ -962,15 +1174,25 @@ def save_configuration(
     network_evidence_enabled: bool = Form(False),
     image_review_enabled: bool = Form(False),
     allow_insecure_image_transport: bool = Form(False),
+    equipment_review_enabled: bool = Form(False),
+    equipment_area_filter: str = Form(""),
     prompt_name: str = Form(...),
     prompt_template: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None or workspace.archived:
+        return _redirect("/ops/configuration", "Workspace not found.", "error")
+    redirect_path = f"/ops/configuration?workspace={workspace.id}"
     if not 0 <= schedule_hour <= 23 or not 0 <= schedule_minute <= 59:
-        return _redirect("/ops/configuration", "Invalid schedule time.", "error")
-    sync_config = db.scalar(select(SyncConfig).order_by(SyncConfig.id).limit(1))
+        return _redirect(redirect_path, "Invalid schedule time.", "error")
+    workspace.name = workspace_name.strip()
+    workspace.equipment_review_enabled = equipment_review_enabled
+    workspace.equipment_area_filter = equipment_area_filter.strip()
+    sync_config = workspace_sync_config(db, workspace.id)
     if sync_config is None:
         sync_config = SyncConfig(
+            workspace_id=workspace.id,
             name=folder_path or str(folder_id),
             server_url=server_url,
             domain=domain,
@@ -978,6 +1200,49 @@ def save_configuration(
             folder_id=folder_id,
         )
         db.add(sync_config)
+    source_locked = bool(
+        db.scalar(
+            select(AlmRun.run_id)
+            .where(AlmRun.workspace_id == workspace.id)
+            .limit(1)
+        )
+    )
+    proposed_source = (
+        server_url.strip().rstrip("/").casefold(),
+        domain.strip().casefold(),
+        project.strip().casefold(),
+        folder_id,
+    )
+    current_source = (
+        sync_config.server_url.rstrip("/").casefold(),
+        sync_config.domain.casefold(),
+        sync_config.project.casefold(),
+        sync_config.folder_id,
+    )
+    if source_locked and proposed_source != current_source:
+        db.rollback()
+        return _redirect(
+            redirect_path,
+            "ALM source is locked after the first import. Create a new Workspace "
+            "for a different project or folder.",
+            "error",
+        )
+    duplicate_source = db.scalar(
+        select(SyncConfig.id).where(
+            SyncConfig.workspace_id != workspace.id,
+            func.lower(SyncConfig.server_url) == proposed_source[0],
+            func.lower(SyncConfig.domain) == proposed_source[1],
+            func.lower(SyncConfig.project) == proposed_source[2],
+            SyncConfig.folder_id == folder_id,
+        )
+    )
+    if duplicate_source is not None:
+        db.rollback()
+        return _redirect(
+            redirect_path,
+            "This ALM project and folder are already assigned to another Workspace.",
+            "error",
+        )
     sync_config.server_url = server_url.strip().rstrip("/")
     sync_config.domain = domain.strip()
     sync_config.project = project.strip()
@@ -996,10 +1261,11 @@ def save_configuration(
     ai_config.timeout_seconds = max(1, timeout_seconds)
     ai_config.enabled = ai_enabled
 
-    evidence_config = db.get(EvidenceConfig, 1)
+    evidence_config = workspace_evidence_config(db, workspace.id)
     if evidence_config is None:
-        evidence_config = EvidenceConfig(id=1)
+        evidence_config = EvidenceConfig(workspace_id=workspace.id)
         db.add(evidence_config)
+    evidence_config.workspace_id = workspace.id
     evidence_config.allowed_network_root = allowed_network_root.strip().rstrip("\\/")
     evidence_config.local_html_fallback_root = local_html_fallback_root.strip().rstrip("\\/")
     evidence_config.network_evidence_enabled = network_evidence_enabled
@@ -1018,7 +1284,7 @@ def save_configuration(
             )
         )
     db.commit()
-    queued_reviews = queue_stale_reviews(db)
+    queued_reviews = queue_stale_reviews(db, workspace.id)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
         configure_scheduler(scheduler)
@@ -1028,9 +1294,52 @@ def save_configuration(
         else ""
     )
     return _redirect(
-        "/ops/configuration",
+        redirect_path,
         f"Configuration and schedule saved. {queued_reviews} stale reviews queued."
         f"{schedule_note}",
+    )
+
+
+@router.post("/ops/workspaces")
+def create_workspace(
+    name: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    normalized_name = name.strip()
+    if not normalized_name:
+        return _redirect("/ops/configuration", "Workspace name is required.", "error")
+    base_slug = workspace_slug(normalized_name)
+    slug = base_slug
+    suffix = 2
+    while db.scalar(select(Workspace.id).where(Workspace.slug == slug)) is not None:
+        slug = f"{base_slug}-{suffix}"
+        suffix += 1
+    workspace = Workspace(
+        name=normalized_name,
+        slug=slug,
+        equipment_review_enabled=True,
+        equipment_area_filter="",
+        archived=False,
+    )
+    db.add(workspace)
+    db.flush()
+    db.add(
+        SyncConfig(
+            workspace_id=workspace.id,
+            name=normalized_name,
+            server_url="",
+            domain="",
+            project="",
+            folder_id=0,
+            folder_path="",
+            enabled=False,
+        )
+    )
+    db.add(EvidenceConfig(workspace_id=workspace.id))
+    db.commit()
+    return _redirect(
+        f"/ops/configuration?workspace={workspace.id}",
+        f"Workspace {workspace.name} created. Configure its ALM source before syncing.",
     )
 
 
