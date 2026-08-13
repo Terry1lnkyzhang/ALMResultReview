@@ -131,6 +131,49 @@ def extract_paths(value: str) -> list[dict[str, str]]:
     return [item[3] for item in sorted(selected, key=lambda match: match[0])]
 
 
+def analyze_html_path_sequences(paths: list[dict[str, str]]) -> list[dict[str, Any]]:
+    html_paths = [
+        PureWindowsPath(item["raw"])
+        for item in paths
+        if item.get("kind") == "html"
+    ]
+    paths_by_location = {
+        (str(path.parent).casefold(), path.stem.casefold()): path
+        for path in html_paths
+    }
+    candidate_members: dict[tuple[str, str], dict[int, PureWindowsPath]] = {}
+    for path in html_paths:
+        match = re.fullmatch(r"(?P<base>.+)_(?P<number>[2-9]\d*)", path.stem)
+        if match is None:
+            continue
+        key = (str(path.parent).casefold(), match.group("base").casefold())
+        candidate_members.setdefault(key, {})[int(match.group("number"))] = path
+
+    sequences: list[dict[str, Any]] = []
+    for key, numbered_paths in candidate_members.items():
+        base_path = paths_by_location.get(key)
+        if base_path is None and len(numbered_paths) < 2:
+            continue
+        numbers = sorted(({1} if base_path is not None else set()) | numbered_paths.keys())
+        expected_numbers = set(range(1, max(numbers) + 1))
+        missing_numbers = sorted(expected_numbers - set(numbers))
+        display_path = base_path or next(iter(numbered_paths.values()))
+        base_name = (
+            display_path.stem
+            if base_path is not None
+            else re.sub(r"_[2-9]\d*$", "", display_path.stem)
+        )
+        sequences.append(
+            {
+                "base_name": base_name,
+                "numbers": numbers,
+                "missing_numbers": missing_numbers,
+                "status": "fail" if missing_numbers else "pass",
+            }
+        )
+    return sorted(sequences, key=lambda item: item["base_name"].casefold())
+
+
 def extract_dates(value: str, execution_date: str) -> list[dict[str, Any]]:
     dates: list[dict[str, Any]] = []
     for match in _DATE_PATTERN.finditer(value):

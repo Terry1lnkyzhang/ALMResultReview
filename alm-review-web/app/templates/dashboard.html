@@ -11,6 +11,13 @@
     <form method="get" action="/"><label class="workspace-switcher"><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspaces %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label></form>
     <a class="button secondary button-link" href="/ops/configuration?workspace={{ current_workspace.id }}">Configuration</a>
     <a class="button secondary button-link" href="/ops/equipment">Equipment registry</a>
+    <form class="docx-import-action" method="post" action="/actions/import-docx" enctype="multipart/form-data">
+      <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
+      <label class="button secondary" title="Import an ALM Design Verification Record">
+        Import ALM Word
+        <input type="file" name="document" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required onchange="this.form.submit()">
+      </label>
+    </form>
     <form method="post" action="/actions/sync-alm"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Queue ALM sync</button></form>
     <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Refresh review queue</button></form>
     <form class="rereview-action" method="post" action="/actions/rereview">
@@ -33,6 +40,19 @@
   <span><strong>{{ review_job_counts.get('running', 0) }}</strong> running</span>
   <span><strong>{{ review_job_counts.get('failed', 0) }}</strong> failed</span>
 </section>
+
+{% if review_update_count %}
+<section class="review-advisory" aria-label="Review update recommendation">
+  <div>
+    <p class="eyebrow">REVIEW UPDATE RECOMMENDED</p>
+    <h2>{{ review_update_count }} completed review{% if review_update_count != 1 %}s{% endif %} use earlier review settings</h2>
+    <p>Existing decisions remain active. No AI review was queued automatically.</p>
+  </div>
+  <div class="review-advisory-reasons">
+    {% for reason, count in review_update_reason_counts.items() %}<span>{{ reason }} <strong>{{ count }}</strong></span>{% endfor %}
+  </div>
+</section>
+{% endif %}
 
 {% if active_sync_job %}
 <section class="sync-progress" data-sync-progress aria-labelledby="sync-progress-title">
@@ -154,12 +174,13 @@
     <div class="table-heading"><h2>Runs</h2><span>{{ runs|length }} shown</span></div>
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Run</th><th>Test case</th><th>Actual tester</th><th>Test owner</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>
+        <thead><tr><th>Run</th><th>Test case</th><th>Location</th><th>Actual tester</th><th>Test owner</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>
         <tbody>
         {% for item in runs %}
           <tr>
             <td><a class="run-link" href="/runs/{{ item.run.run_id }}">#{{ item.run.alm_run_id or item.run.run_id }}</a><small>{{ item.run.test_set_name }}</small></td>
             <td><strong>{{ item.run.test_name }}</strong><small>TC {{ item.run.test_id or '-' }} &middot; {{ item.run.folder_path }}</small></td>
+            <td>{{ item.run.execution_location or '-' }}</td>
             <td>{{ item.actual_tester_label }}</td>
             <td>{{ item.test_owner_label }}</td>
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
@@ -167,7 +188,7 @@
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
             <td>{{ item.run.execution_at.strftime('%Y-%m-%d %H:%M') if item.run.execution_at else '-' }}</td>
           </tr>
-        {% else %}<tr><td class="empty" colspan="8">No runs match these filters.</td></tr>{% endfor %}
+        {% else %}<tr><td class="empty" colspan="9">No runs match these filters.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>

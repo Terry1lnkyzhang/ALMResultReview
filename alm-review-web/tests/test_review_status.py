@@ -16,7 +16,7 @@ from app.services.review_policy import (
     adopt_legacy_workspace_policies,
     current_review_policy_key,
 )
-from app.services.review_status import current_reviews
+from app.services.review_status import current_reviews, review_update_reasons
 from app.services.reviews import current_review, save_manual_decision
 
 
@@ -98,7 +98,7 @@ def test_qualified_result_rejects_manual_decision() -> None:
             save_manual_decision(db, run, "override_qualified", "operator", "No reason")
 
 
-def test_result_from_outdated_review_policy_is_not_current() -> None:
+def test_latest_result_remains_visible_after_review_policy_changes() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -110,8 +110,45 @@ def test_result_from_outdated_review_policy_is_not_current() -> None:
 
         review = current_review(db, run)
 
-        assert review.result is None
-        assert review.final_status == "pending_review"
+        assert review.result is result
+        assert review.final_status == "qualified"
+
+
+def test_review_update_reasons_describe_detectable_setting_changes() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified")
+        result = db.scalar(select(ReviewResult).where(ReviewResult.run_id == run.run_id))
+        assert result is not None
+        result.review_policy_key = "earlier-policy"
+        result.prompt_version_id = 4
+        result.model_name = "earlier-model"
+        db.commit()
+
+        reasons = review_update_reasons(result, "current-policy", 5, "current-model")
+
+        assert reasons == (
+            "Prompt version changed from 4 to 5",
+            "AI model changed from earlier-model to current-model",
+            "Review rules, evidence settings, or registry changed",
+        )
+
+
+def test_current_policy_result_does_not_recommend_review_update() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified")
+        result = db.scalar(select(ReviewResult).where(ReviewResult.run_id == run.run_id))
+        assert result is not None
+
+        assert review_update_reasons(
+            result,
+            result.review_policy_key,
+            result.prompt_version_id,
+            result.model_name,
+        ) == ()
 
 
 def test_current_reviews_batches_mixed_statuses() -> None:

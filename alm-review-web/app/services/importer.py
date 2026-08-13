@@ -22,6 +22,7 @@ from app.models import (
     utcnow,
 )
 from app.services.review_policy import current_review_policy_key
+from app.services.rich_text import source_rich_text
 from app.services.workspaces import next_internal_run_id, resolve_workspace
 
 
@@ -96,13 +97,11 @@ def _queue_review(
 
 def _add_revision(
     db: Session,
-    workspace_id: int,
     run_row: AlmRun,
     record: dict[str, Any],
     raw_json: str,
     current_source_hash: str,
     current_review_hash: str,
-    policy_key: str,
 ) -> RunRevision:
     run = record.get("run") or {}
     revision = RunRevision(
@@ -124,14 +123,17 @@ def _add_revision(
                 step_order=_integer(step.get("step-order")) or fallback_order,
                 name=normalize_text(step.get("name")),
                 status=normalize_text(step.get("status")),
-                description=normalize_text(step.get("descriptionText", step.get("description"))),
-                expected=normalize_text(step.get("expectedText", step.get("expected"))),
-                actual=normalize_text(step.get("actualText", step.get("actual"))),
+                description=source_rich_text(
+                    step.get("descriptionText", step.get("description"))
+                ),
+                expected=source_rich_text(
+                    step.get("expectedText", step.get("expected"))
+                ),
+                actual=source_rich_text(step.get("actualText", step.get("actual"))),
             )
         )
 
     run_row.current_revision_id = revision.id
-    _queue_review(db, workspace_id, run_row.run_id, revision.id, policy_key)
     return revision
 
 
@@ -186,7 +188,6 @@ def import_data(
     )
     db.add(history)
     db.flush()
-    policy_key = current_review_policy_key(db, workspace.id)
 
     try:
         for item in data.get("users") or []:
@@ -254,6 +255,7 @@ def import_data(
             run_row.test_name = normalize_text(run.get("test-name") or test_instance.get("name"))
             run_row.test_set_name = normalize_text(test_set.get("name") or run.get("cycle-name"))
             run_row.folder_path = normalize_text(folder.get("path") or test_set.get("folderPath"))
+            run_row.execution_location = normalize_text(run.get("location"))
             run_row.run_status = normalize_text(run.get("status"))
             run_row.test_owner = normalize_text(record.get("testOwner"))
             run_row.assigned_tester = normalize_text(test_instance.get("owner"))
@@ -272,21 +274,11 @@ def import_data(
                 run_row.raw_json = raw_json
                 _add_revision(
                     db,
-                    workspace.id,
                     run_row,
                     record,
                     raw_json,
                     current_source_hash,
                     current_review_hash,
-                    policy_key,
-                )
-            elif run_row.current_revision_id is not None:
-                _queue_review(
-                    db,
-                    workspace.id,
-                    run_row.run_id,
-                    run_row.current_revision_id,
-                    policy_key,
                 )
 
         history.status = "completed"

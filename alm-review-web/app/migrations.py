@@ -62,6 +62,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 )
             if "alm_run_id" not in columns:
                 connection.execute(text("ALTER TABLE alm_runs ADD COLUMN alm_run_id BIGINT NULL"))
+            if "execution_location" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE alm_runs ADD COLUMN execution_location "
+                        "VARCHAR(512) NOT NULL DEFAULT ''"
+                    )
+                )
             connection.execute(
                 text(
                     "UPDATE alm_runs SET workspace_id = :workspace_id "

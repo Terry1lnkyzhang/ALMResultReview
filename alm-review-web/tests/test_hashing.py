@@ -44,6 +44,15 @@ def test_html_format_only_change_does_not_change_review_hash() -> None:
     assert source_hash(original) != source_hash(modified)
 
 
+def test_location_is_included_in_review_payload_and_hash_when_present() -> None:
+    original = sample_record()
+    modified = deepcopy(original)
+    modified["run"]["location"] = "KunPeng-TMI-0009"
+
+    assert review_payload(modified)["execution_location"] == "KunPeng-TMI-0009"
+    assert review_hash(original) != review_hash(modified)
+
+
 def test_phase_one_evidence_is_payload_metadata_not_hash_content() -> None:
     record = sample_record()
     record["run"]["steps"][0]["actual"] = r"Saved C:\Evidence\step.png on 2026-07-30"

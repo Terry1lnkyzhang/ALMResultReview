@@ -1,5 +1,6 @@
 from app.services.evidence import (
     DeferredExternalEvidenceResolver,
+    analyze_html_path_sequences,
     extract_dates,
     extract_paths,
     step_evidence_profile,
@@ -129,3 +130,58 @@ def test_network_evidence_path_must_be_below_configured_unc_root() -> None:
         "outside_root"
     )
     assert validate_network_evidence_path(r"C:\approved\result.html", root) == "not_unc"
+
+
+def test_automation_html_suffixes_are_continuous_from_unsuffixed_report() -> None:
+    parent = r"\\code1\dfscle\automation\34834"
+    base = "CT-NMP.SRS.PhyChar.8-Axial-slice thickness-0.625_34834"
+    paths = [
+        {"raw": parent + "\\" + base + ".html", "kind": "html"},
+        *[
+            {"raw": parent + "\\" + base + f"_{number}.html", "kind": "html"}
+            for number in range(2, 9)
+        ],
+    ]
+
+    sequences = analyze_html_path_sequences(paths)
+
+    assert sequences == [
+        {
+            "base_name": base,
+            "numbers": list(range(1, 9)),
+            "missing_numbers": [],
+            "status": "pass",
+        }
+    ]
+
+
+def test_extracts_saved_screenshot_automation_report_sequence() -> None:
+    parent = (
+        r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Earth"
+        r"\System Verification Cycle01\SystemVerificationAutomaionResult"
+        r"\34834\6.4 Product-CT Tenara+V6 4cm"
+    )
+    base = "CT-NMP.SRS.PhyChar.8-Axial-slice thickness-0.625_34834"
+    path_lines = [parent + "\\" + base + ".html"] + [
+        parent + "\\" + base + f"_{number}.html" for number in range(2, 9)
+    ]
+    actual = "Saved screenshot: refer to automation test report\n" + "\n".join(
+        path_lines
+    )
+
+    paths = extract_paths(actual)
+
+    assert [path["raw"] for path in paths] == path_lines
+    assert analyze_html_path_sequences(paths)[0]["numbers"] == list(range(1, 9))
+
+
+def test_automation_html_suffix_gap_is_reported() -> None:
+    parent = r"\\server\approved\automation"
+    paths = [
+        {"raw": parent + r"\report_34834.html", "kind": "html"},
+        {"raw": parent + r"\report_34834_2.html", "kind": "html"},
+        {"raw": parent + r"\report_34834_4.html", "kind": "html"},
+    ]
+
+    assert analyze_html_path_sequences(paths)[0]["missing_numbers"] == [3]
+    assert analyze_html_path_sequences(paths)[0]["status"] == "fail"

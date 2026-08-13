@@ -70,7 +70,7 @@ def review_content(record: dict[str, Any]) -> dict[str, Any]:
     test_set = record.get("testSet") or {}
     test_instance = record.get("testInstance") or {}
     steps = run.get("steps") or []
-    return {
+    content = {
         "run_id": normalize_text(run.get("id")),
         "test_id": normalize_text(run.get("test-id") or test_instance.get("test-id")),
         "test_instance_id": normalize_text(
@@ -109,6 +109,10 @@ def review_content(record: dict[str, Any]) -> dict[str, Any]:
             for step in steps
         ],
     }
+    execution_location = normalize_text(run.get("location"))
+    if execution_location:
+        content["execution_location"] = execution_location
+    return content
 
 
 def review_payload(record: dict[str, Any]) -> dict[str, Any]:
