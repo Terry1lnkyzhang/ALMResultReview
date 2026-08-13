@@ -1,0 +1,52 @@
+.alm-rich-text {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.alm-rich-text > :first-child {
+  margin-top: 0;
+}
+
+.alm-rich-text > :last-child {
+  margin-bottom: 0;
+}
+
+.alm-rich-text table {
+  width: max-content;
+  min-width: 100%;
+  margin: 8px 0;
+  border: 1px solid #aebcc1;
+  border-collapse: collapse;
+  background: var(--surface);
+  font-size: 13px;
+  white-space: normal;
+}
+
+.alm-rich-text th,
+.alm-rich-text td {
+  min-width: 100px;
+  padding: 7px 9px;
+  border: 1px solid #aebcc1;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+}
+
+.alm-rich-text th {
+  background: #e8efee;
+  font-weight: 700;
+}
+
+.alm-rich-text ul,
+.alm-rich-text ol {
+  padding-left: 22px;
+}
+
+.alm-rich-text a {
+  color: var(--teal);
+  overflow-wrap: anywhere;
+}

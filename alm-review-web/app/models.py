@@ -42,6 +42,7 @@ class AlmRun(Base):
     test_name: Mapped[str] = mapped_column(String(512), default="")
     test_set_name: Mapped[str] = mapped_column(String(512), default="")
     folder_path: Mapped[str] = mapped_column(String(1500), default="")
+    execution_location: Mapped[str] = mapped_column(String(512), default="")
     run_status: Mapped[str] = mapped_column(String(64), default="")
     test_owner: Mapped[str] = mapped_column(String(128), default="")
     assigned_tester: Mapped[str] = mapped_column(String(128), default="")

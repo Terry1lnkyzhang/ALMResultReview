@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import desc, select, tuple_
+from sqlalchemy import case, desc, select, tuple_
 from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
@@ -30,6 +30,26 @@ def _review_from_result(
     return CurrentReview(result, manual, final_status)
 
 
+def review_update_reasons(
+    result: ReviewResult | None,
+    policy_key: str,
+    prompt_version_id: int | None,
+    model_name: str | None,
+) -> tuple[str, ...]:
+    if result is None or result.review_policy_key == policy_key:
+        return ()
+    reasons = []
+    if prompt_version_id is not None and result.prompt_version_id != prompt_version_id:
+        reasons.append(
+            f"Prompt version changed from {result.prompt_version_id} "
+            f"to {prompt_version_id}"
+        )
+    if model_name is not None and result.model_name != model_name:
+        reasons.append(f"AI model changed from {result.model_name} to {model_name}")
+    reasons.append("Review rules, evidence settings, or registry changed")
+    return tuple(reasons)
+
+
 def current_reviews(
     db: Session,
     runs: Sequence[AlmRun],
@@ -55,6 +75,8 @@ def current_reviews(
                 ReviewResult.revision_id,
                 ReviewResult.source_hash,
                 ReviewResult.review_policy_key,
+                ReviewResult.prompt_version_id,
+                ReviewResult.model_name,
                 ReviewResult.verdict,
                 ReviewResult.issue_summary,
                 ReviewResult.completed_at,
@@ -66,10 +88,15 @@ def current_reviews(
                 ReviewResult.revision_id,
                 ReviewResult.source_hash,
             ).in_(review_keys),
-            ReviewResult.review_policy_key == policy_key,
         )
         .order_by(
             ReviewResult.run_id,
+            desc(
+                case(
+                    (ReviewResult.review_policy_key == policy_key, 1),
+                    else_=0,
+                )
+            ),
             desc(ReviewResult.completed_at),
             desc(ReviewResult.id),
         )

@@ -125,6 +125,28 @@ the relative filename, media type, byte size, and SHA-256 digest. Missing paths 
 without usable images fail required evidence checks. Permission, network, and transport
 policy errors require manual review.
 
+### Review checkpoints
+
+Each completed review displays nine independent checkpoints:
+
+1. `Language quality`: Actual spelling, grammar, tense, and meaningful formatting issues.
+2. `Expected vs actual`: whether Actual clearly answers every applicable Expected requirement.
+3. `Screenshot evidence`: required screenshots exist, map to the Step, and support Expected.
+4. `Path validation`: evidence uses an absolute UNC path below the approved network root.
+5. `HTML report sequence`: related automation reports start with `.html`, then continue as
+	`_2.html`, `_3.html`, and so on without missing numbers.
+6. `Automation results`: every value after `Result (Passed/Failed)` in every referenced HTML
+	report is `Passed`. Any other value or a missing result row fails the checkpoint.
+7. `Date validation`: reserved for deterministic execution-date rules; currently not enabled.
+8. `Reference data validation`: unresolved phantom or reference data requires manual review.
+9. `Equipment traceability`: controlled equipment identity and execution-date calibration validity.
+
+HTML reports are read only when `Read approved network evidence` is enabled. The parser reads at
+most 5 MB per file and extracts table text without executing scripts, loading linked content, or
+modifying the source. Missing reports, filename sequence gaps, missing result rows, and non-Passed
+results are unqualified; permission, network, oversized-file, and parse errors require manual
+review.
+
 ## Run
 
 From the workspace root:
@@ -143,6 +165,15 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 
 ## Operations
 
+- `Import ALM Word` accepts an ALM Design Verification Record `.docx` as an alternative
+	to a live ALM synchronization. It imports every Passed Test Run, creates immutable
+	revisions only when review content changes, and automatically queues new or changed
+	Runs for AI review. Re-importing the same content, even under a different filename,
+	does not create duplicate revisions.
+- The Word importer reads Test Set, Test Case, Test Run, execution metadata, Step,
+	Expected, and Actual text from the standard export layout. UNC paths in Actual text
+	continue through the existing evidence pipeline. Embedded Word images are not stored;
+	image review still reads approved paths configured under Network image evidence.
 - `Sync ALM now` recursively refreshes the configured Test Lab scope. Only the latest
 	Passed Run for each Test Instance is imported by the Worker. The same synchronization reads the ALM
 	project user directory and displays people as `Full Name (CODE1 ID)`.
@@ -166,7 +197,8 @@ Set-Location .\alm-review-web
 ## Review Rules
 
 - `run_id` is the global primary key for the configured ALM project.
-- A changed source hash creates an immutable Run revision and queues a new review.
+- A changed source hash creates an immutable Run revision without queuing a review.
+- Reviews are queued only through the explicit Process reviews, Re-review, or Review now actions.
 - AI `qualified` is final without manual confirmation.
 - AI `needs_manual_review` accepts qualified or unqualified confirmation.
 - AI `unqualified` remains unqualified unless an operator records a force-qualified override.

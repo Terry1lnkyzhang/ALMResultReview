@@ -4,6 +4,7 @@ import pytest
 
 from app.models import EvidenceConfig
 from app.services.defaults import DEFAULT_PROMPT
+from app.services.html_evidence import HtmlEvidenceResult
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
 from app.services.reviews import (
     PreparedImageEvidence,
@@ -355,6 +356,93 @@ def test_required_screenshot_without_reference_is_unqualified() -> None:
 
     assert guarded["criteria"]["screenshot_evidence"]["status"] == "fail"
     assert guarded["verdict"] == "unqualified"
+
+
+def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None:
+    parent = r"\\server\approved\automation"
+    first_report = parent + r"\report_34834.html"
+    second_report = parent + r"\report_34834_2.html"
+    parsed = _parse_response(compact_response(), [1])
+    content = evidence_content(
+        paths=[
+            {"raw": first_report, "kind": "html"},
+            {"raw": second_report, "kind": "html"},
+        ],
+        screenshot_required=True,
+    )
+    prepared = PreparedImageEvidence(
+        network_enabled=True,
+        image_review_enabled=False,
+        transport_allowed=False,
+        results={},
+        html_results={
+            1: {
+                first_report: HtmlEvidenceResult(status="pass", result_count=2),
+                second_report: HtmlEvidenceResult(status="pass", result_count=3),
+            }
+        },
+    )
+
+    guarded = _apply_capability_guards(
+        parsed,
+        content,
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "qualified"
+    assert guarded["criteria"]["html_report_sequence"]["status"] == "pass"
+    assert guarded["criteria"]["automation_results"]["status"] == "pass"
+    assert guarded["step_results"][0]["html_evidence"][1]["result_count"] == 3
+
+
+def test_missing_html_report_suffix_is_unqualified() -> None:
+    parent = r"\\server\approved\automation"
+    parsed = _parse_response(compact_response(), [1])
+    content = evidence_content(
+        paths=[
+            {"raw": parent + r"\report_34834.html", "kind": "html"},
+            {"raw": parent + r"\report_34834_3.html", "kind": "html"},
+        ]
+    )
+
+    guarded = _apply_capability_guards(parsed, content)
+
+    assert guarded["verdict"] == "unqualified"
+    assert guarded["criteria"]["html_report_sequence"]["status"] == "fail"
+    assert "_2.html" in guarded["step_results"][0]["summary"]
+
+
+def test_any_non_passed_html_result_is_unqualified() -> None:
+    report = r"\\server\approved\automation\report_34834.html"
+    parsed = _parse_response(compact_response(), [1])
+    content = evidence_content(paths=[{"raw": report, "kind": "html"}])
+    prepared = PreparedImageEvidence(
+        network_enabled=True,
+        image_review_enabled=False,
+        transport_allowed=False,
+        results={},
+        html_results={
+            1: {
+                report: HtmlEvidenceResult(
+                    status="fail",
+                    result_count=2,
+                    non_passed_values=("Failed",),
+                )
+            }
+        },
+    )
+
+    guarded = _apply_capability_guards(
+        parsed,
+        content,
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "unqualified"
+    assert guarded["criteria"]["automation_results"]["status"] == "fail"
+    assert "Failed" in guarded["step_results"][0]["summary"]
 
 
 def test_date_mismatch_does_not_affect_verdict_until_date_rules_are_enabled() -> None:

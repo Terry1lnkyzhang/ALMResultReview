@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import desc, or_, select
+from sqlalchemy import case, desc, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -30,7 +30,12 @@ from app.services.equipment_review import (
     equipment_disambiguation_prompt,
     parse_equipment_disambiguation,
 )
-from app.services.evidence import CAPABILITIES, validate_network_evidence_path
+from app.services.evidence import (
+    CAPABILITIES,
+    analyze_html_path_sequences,
+    validate_network_evidence_path,
+)
+from app.services.html_evidence import HtmlEvidenceResolver, HtmlEvidenceResult
 from app.services.image_evidence import (
     ImageEvidenceResult,
     NetworkImageResolver,
@@ -45,6 +50,8 @@ CRITERIA_NAMES = (
     "expected_vs_actual",
     "screenshot_evidence",
     "path_validation",
+    "html_report_sequence",
+    "automation_results",
     "automation_timing",
     "phantom_information",
     "equipment_traceability",
@@ -73,6 +80,7 @@ class PreparedImageEvidence:
     image_review_enabled: bool
     transport_allowed: bool
     results: dict[int, dict[str, ImageEvidenceResult]]
+    html_results: dict[int, dict[str, HtmlEvidenceResult]] = field(default_factory=dict)
 
 
 def current_review(
@@ -90,9 +98,17 @@ def current_review(
             ReviewResult.run_id == run.run_id,
             ReviewResult.revision_id == run.current_revision_id,
             ReviewResult.source_hash == run.source_hash,
-            ReviewResult.review_policy_key == active_policy_key,
         )
-        .order_by(desc(ReviewResult.completed_at), desc(ReviewResult.id))
+        .order_by(
+            desc(
+                case(
+                    (ReviewResult.review_policy_key == active_policy_key, 1),
+                    else_=0,
+                )
+            ),
+            desc(ReviewResult.completed_at),
+            desc(ReviewResult.id),
+        )
         .limit(1)
     )
     if result is None:
@@ -312,6 +328,12 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "expected_vs_actual": _criterion("pass", "Actual 可以回答 Expected。"),
         "screenshot_evidence": _criterion("not_applicable", "未检测到截图证据要求。"),
         "path_validation": _criterion("not_applicable", "Actual 中未检测到外部路径。"),
+        "html_report_sequence": _criterion(
+            "not_applicable", "未检测到自动化 HTML 报告序列。"
+        ),
+        "automation_results": _criterion(
+            "not_applicable", "未检测到自动化 HTML 报告结果。"
+        ),
         "automation_timing": _criterion("not_applicable", "日期审核规则尚未启用。"),
         "phantom_information": _criterion("not_applicable", "未检测到参考数据要求。"),
         "equipment_traceability": _criterion(
@@ -325,6 +347,8 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "html": "screenshot_evidence",
         "folder": "screenshot_evidence",
         "path": "path_validation",
+        "html_sequence": "html_report_sequence",
+        "automation_result": "automation_results",
         "reference_data": "phantom_information",
         "equipment": "equipment_traceability",
     }
@@ -413,6 +437,12 @@ def _apply_capability_guards(
     prepared_evidence: PreparedImageEvidence | None = None,
 ) -> dict[str, Any]:
     allowed_root = evidence_config.allowed_network_root if evidence_config else ""
+    html_path_count = 0
+    checked_html_count = 0
+    passed_html_result_count = 0
+    checked_result_value_count = 0
+    sequence_count = 0
+    continuous_sequence_count = 0
     for content_step, step_result in zip(
         content.get("steps", []), parsed["step_results"], strict=True
     ):
@@ -422,12 +452,43 @@ def _apply_capability_guards(
             continue
         profile = content_step["evidence_profile"]
         paths = profile["actual_paths"]
+        html_paths = [path for path in paths if path.get("kind") == "html"]
+        html_path_count += len(html_paths)
+        html_sequences = analyze_html_path_sequences(paths)
+        sequence_count += len(html_sequences)
+        continuous_sequence_count += sum(
+            sequence["status"] == "pass" for sequence in html_sequences
+        )
+        step_result["html_sequences"] = html_sequences
+        for sequence in html_sequences:
+            if sequence["status"] != "fail":
+                continue
+            missing_numbers = sequence["missing_numbers"]
+            missing_suffixes = [
+                "无后缀起始文件" if number == 1 else f"_{number}.html"
+                for number in missing_numbers
+            ]
+            _append_step_issue(
+                parsed,
+                step_result["review_step"],
+                "fail",
+                "html_sequence",
+                "自动化 HTML 报告序号不连续，缺少 "
+                + "、".join(missing_suffixes)
+                + "。",
+            )
         step_evidence = (
             prepared_evidence.results.get(step_result["review_step"], {})
             if prepared_evidence
             else {}
         )
+        step_html_evidence = (
+            prepared_evidence.html_results.get(step_result["review_step"], {})
+            if prepared_evidence
+            else {}
+        )
         step_result["image_evidence"] = []
+        step_result["html_evidence"] = []
         for path in paths:
             path_status = validate_network_evidence_path(path["raw"], allowed_root)
             if path_status in {"not_unc", "outside_root"}:
@@ -524,6 +585,71 @@ def _apply_capability_guards(
                         "证据图片存在，但总量超过当前 AI 端点的处理范围，需人工确认。",
                     )
 
+        for path in html_paths:
+            evidence = step_html_evidence.get(path["raw"])
+            if evidence is None:
+                if prepared_evidence and prepared_evidence.network_enabled:
+                    _append_step_issue(
+                        parsed,
+                        step_result["review_step"],
+                        "manual",
+                        "automation_result",
+                        "自动化 HTML 报告未完成解析，需人工确认。",
+                    )
+                continue
+            checked_html_count += 1
+            checked_result_value_count += evidence.result_count
+            if evidence.status == "pass":
+                passed_html_result_count += 1
+            step_result["html_evidence"].append(
+                {
+                    "source_path": path["raw"],
+                    "status": evidence.status,
+                    "result_count": evidence.result_count,
+                    "non_passed_values": list(evidence.non_passed_values),
+                    "detail": evidence.detail,
+                }
+            )
+            if evidence.status == "fail":
+                values = ", ".join(evidence.non_passed_values[:4])
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    "fail",
+                    "automation_result",
+                    f"自动化报告结果并非全部 Passed：{values}。",
+                )
+            elif evidence.status == "result_row_missing":
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    "fail",
+                    "automation_result",
+                    "自动化报告未找到 Result (Passed/Failed) 结果行。",
+                )
+            elif evidence.status == "missing":
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    "fail",
+                    "automation_result",
+                    "自动化 HTML 报告文件不存在。",
+                )
+            elif evidence.status in {
+                "denied",
+                "unavailable",
+                "too_large",
+                "invalid",
+                "outside_root",
+            }:
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    "manual",
+                    "automation_result",
+                    "自动化 HTML 报告无法可靠解析，需人工确认。",
+                )
+
         screenshot_required = profile["screenshot_review_required"]
         has_evidence_reference = bool(paths or profile["attachment_declared"])
         if screenshot_required and not has_evidence_reference:
@@ -572,7 +698,42 @@ def _apply_capability_guards(
                 "reference_data",
                 "参考数据尚未配置，设备或模体信息需人工确认。",
             )
-    return _recalculate_result(parsed)
+    result = _recalculate_result(parsed)
+    if html_path_count:
+        sequence_criterion = result["criteria"]["html_report_sequence"]
+        if sequence_criterion["status"] == "not_applicable":
+            sequence_criterion.update(
+                status="pass",
+                summary="自动化 HTML 报告文件名连续。",
+            )
+        sequence_criterion["evidence"] = (
+            f"共 {html_path_count} 个 HTML 文件；"
+            f"连续序列 {continuous_sequence_count}/{sequence_count}。"
+        )
+
+        results_criterion = result["criteria"]["automation_results"]
+        if (
+            checked_html_count == html_path_count
+            and results_criterion["status"] == "not_applicable"
+        ):
+            results_criterion.update(
+                status="pass",
+                summary="所有自动化报告结果均为 Passed。",
+            )
+        elif (
+            checked_html_count < html_path_count
+            and results_criterion["status"] == "not_applicable"
+        ):
+            results_criterion.update(
+                status="manual",
+                summary="部分自动化 HTML 报告尚未读取，需人工确认。",
+            )
+        results_criterion["evidence"] = (
+            f"已解析 {checked_html_count}/{html_path_count} 个 HTML 文件；"
+            f"全 Passed 文件 {passed_html_result_count}；"
+            f"共核对 {checked_result_value_count} 个结果值。"
+        )
+    return result
 
 
 def _apply_equipment_guards(
@@ -675,18 +836,29 @@ def _prepare_image_evidence(
         )
     )
     results: dict[int, dict[str, ImageEvidenceResult]] = {}
+    html_results: dict[int, dict[str, HtmlEvidenceResult]] = {}
     if not network_enabled:
         return PreparedImageEvidence(
             network_enabled=False,
             image_review_enabled=image_review_enabled,
             transport_allowed=transport_allowed,
             results=results,
+            html_results=html_results,
         )
 
     remaining_run_images = 12
     remaining_run_bytes = 15 * 1024 * 1024
     path_review_steps: dict[str, set[int]] = {}
     for step in content.get("steps", []):
+        step_html_results: dict[str, HtmlEvidenceResult] = {}
+        for path in step["evidence_profile"]["actual_paths"]:
+            if path.get("kind") != "html":
+                continue
+            step_html_results[path["raw"]] = HtmlEvidenceResolver().resolve(
+                path["raw"], evidence_config.allowed_network_root
+            )
+        html_results[step["review_step"]] = step_html_results
+
         if not step["evidence_profile"]["screenshot_review_required"]:
             continue
         for path in step["evidence_profile"]["actual_paths"]:
@@ -704,6 +876,8 @@ def _prepare_image_evidence(
         }
         step_results: dict[str, ImageEvidenceResult] = {}
         for path in step["evidence_profile"]["actual_paths"]:
+            if path.get("kind") == "html":
+                continue
             if (
                 remaining_step_images <= 0
                 or remaining_run_images <= 0
@@ -749,6 +923,7 @@ def _prepare_image_evidence(
         image_review_enabled=image_review_enabled,
         transport_allowed=transport_allowed,
         results=results,
+        html_results=html_results,
     )
 
 

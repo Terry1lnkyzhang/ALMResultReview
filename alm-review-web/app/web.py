@@ -7,6 +7,7 @@ import secrets
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -38,20 +39,22 @@ from app.models import (
     WorkerHeartbeat,
     Workspace,
 )
+from app.services.docx_import import MAX_DOCX_BYTES, parse_alm_docx
 from app.services.equipment_registry import import_equipment_workbook
-from app.services.importer import import_file, queue_stale_reviews
+from app.services.importer import import_data, import_file, queue_stale_reviews
 from app.services.review_operations import (
     REREVIEW_SCOPES,
     latest_rereview_progress,
     queue_rereviews,
 )
 from app.services.review_policy import current_review_policy_key
-from app.services.review_status import current_reviews
+from app.services.review_status import current_reviews, review_update_reasons
 from app.services.reviews import (
     current_review,
     save_manual_decision,
     test_ai_connection,
 )
+from app.services.rich_text import render_alm_rich_text, snapshot_step_fields
 from app.services.scheduler import configure_scheduler
 from app.services.worker_tasks import queue_sync_job
 from app.services.workspaces import (
@@ -91,6 +94,7 @@ def require_web_access(
 
 router = APIRouter(dependencies=[Depends(require_web_access)])
 templates = Jinja2Templates(directory=PROJECT_DIR / "app" / "templates")
+templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
     "qualified": "Qualified",
@@ -122,6 +126,8 @@ def _run_view(
     policy_key: str,
     users: dict[str, AlmUser],
     review=None,
+    prompt_version_id: int | None = None,
+    model_name: str | None = None,
 ) -> dict:
     if review is None:
         review = current_review(db, run, policy_key)
@@ -133,6 +139,12 @@ def _run_view(
         "review_summary": review.result.issue_summary if review.result else "",
         "final_status": review.final_status,
         "status_label": STATUS_LABELS[review.final_status],
+        "review_update_reasons": review_update_reasons(
+            review.result,
+            policy_key,
+            prompt_version_id,
+            model_name,
+        ),
     }
 
 
@@ -155,6 +167,7 @@ def _matches_dashboard_filters(
             or normalized_query in item["run"].test_name.casefold()
             or normalized_query in item["run"].test_set_name.casefold()
             or normalized_query in item["run"].folder_path.casefold()
+            or normalized_query in item["run"].execution_location.casefold()
             or normalized_query in item["actual_tester_label"].casefold()
             or normalized_query in item["test_owner_label"].casefold()
             or normalized_query in item["review_summary"].casefold()
@@ -299,6 +312,7 @@ def dashboard(
                 AlmRun.test_name,
                 AlmRun.test_set_name,
                 AlmRun.folder_path,
+                AlmRun.execution_location,
                 AlmRun.run_status,
                 AlmRun.test_owner,
                 AlmRun.actual_tester,
@@ -316,11 +330,33 @@ def dashboard(
         .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
     ).all()
     policy_key = current_review_policy_key(db, current_workspace.id)
+    active_prompt = db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.is_active.is_(True))
+        .order_by(desc(PromptVersion.id))
+        .limit(1)
+    )
+    ai_config = db.get(AiConfig, 1)
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
     reviews_by_run = current_reviews(db, runs, policy_key)
     all_views = [
-        _run_view(db, run, policy_key, users, reviews_by_run[run.run_id]) for run in runs
+        _run_view(
+            db,
+            run,
+            policy_key,
+            users,
+            reviews_by_run[run.run_id],
+            active_prompt.id if active_prompt else None,
+            ai_config.model_name if ai_config else None,
+        )
+        for run in runs
     ]
+    review_update_count = sum(bool(item["review_update_reasons"]) for item in all_views)
+    review_update_reason_counts = Counter(
+        reason
+        for item in all_views
+        for reason in item["review_update_reasons"]
+    )
     status_counts = Counter(item["final_status"] for item in all_views)
     tester_scope = [
         item
@@ -416,6 +452,8 @@ def dashboard(
             "query": query,
             "recent_sync": recent_sync,
             "review_job_counts": review_job_counts,
+            "review_update_count": review_update_count,
+            "review_update_reason_counts": review_update_reason_counts,
             "active_sync_job": active_sync_job,
             "worker_heartbeat": worker_heartbeat,
             "worker_online": worker_online,
@@ -530,6 +568,7 @@ def export_reviews(
             "test_name",
             "test_set_name",
             "folder_path",
+            "execution_location",
             "actual_tester_id",
             "actual_tester",
             "test_owner_id",
@@ -566,6 +605,7 @@ def export_reviews(
                 run.test_name,
                 run.test_set_name,
                 run.folder_path,
+                run.execution_location,
                 run.actual_tester,
                 item["actual_tester_label"],
                 run.test_owner,
@@ -610,15 +650,55 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    review = current_review(db, run)
+    policy_key = current_review_policy_key(db, run.workspace_id)
+    review = current_review(db, run, policy_key)
+    active_prompt = db.scalar(
+        select(PromptVersion)
+        .where(PromptVersion.is_active.is_(True))
+        .order_by(desc(PromptVersion.id))
+        .limit(1)
+    )
+    ai_config = db.get(AiConfig, 1)
+    update_reasons = review_update_reasons(
+        review.result,
+        policy_key,
+        active_prompt.id if active_prompt else None,
+        ai_config.model_name if ai_config else None,
+    )
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
     steps = []
     if run.current_revision_id:
-        steps = db.scalars(
+        current_revision = db.get(RunRevision, run.current_revision_id)
+        source_fields = snapshot_step_fields(
+            current_revision.snapshot_json if current_revision else ""
+        )
+        stored_steps = db.scalars(
             select(RunStep)
             .where(RunStep.revision_id == run.current_revision_id)
             .order_by(RunStep.step_order, RunStep.id)
         ).all()
+        steps = [
+            SimpleNamespace(
+                step_order=step.step_order,
+                name=step.name,
+                status=step.status,
+                description=render_alm_rich_text(
+                    source_fields.get(step.step_id, {}).get(
+                        "description", step.description
+                    )
+                    or "-"
+                ),
+                expected=render_alm_rich_text(
+                    source_fields.get(step.step_id, {}).get("expected", step.expected)
+                    or "-"
+                ),
+                actual=render_alm_rich_text(
+                    source_fields.get(step.step_id, {}).get("actual", step.actual)
+                    or "-"
+                ),
+            )
+            for step in stored_steps
+        ]
     revisions = db.scalars(
         select(RunRevision)
         .where(RunRevision.run_id == run_id)
@@ -668,6 +748,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "assigned_tester_label": _person_label(run.assigned_tester, users),
             "actual_tester_label": _person_label(run.actual_tester, users),
             "review": review,
+            "review_update_reasons": update_reasons,
             "steps": steps,
             "revisions": revisions,
             "results": results,
@@ -781,6 +862,39 @@ def import_snapshot(
         redirect_path,
         f"Sync complete: {result.new_runs} new, {result.changed_runs} changed, "
         f"{result.unchanged_runs} unchanged.",
+    )
+
+
+@router.post("/actions/import-docx")
+async def import_docx(
+    document: UploadFile = File(...),
+    workspace_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}"
+    filename = Path(document.filename or "ALM export.docx").name
+    if Path(filename).suffix.casefold() != ".docx":
+        await document.close()
+        return _redirect(redirect_path, "Select an ALM Word export (.docx).", "error")
+    content = await document.read(MAX_DOCX_BYTES + 1)
+    await document.close()
+    try:
+        data = parse_alm_docx(content, filename)
+        result = import_data(
+            data,
+            db,
+            source=f"docx:{filename}",
+            workspace_id=workspace.id,
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(redirect_path, f"Word import failed: {exc}", "error")
+    return _redirect(
+        redirect_path,
+        f"Word import completed: {result.discovered_runs} Passed Runs; "
+        f"{result.new_runs} added, {result.changed_runs} changed, "
+        f"{result.unchanged_runs} unchanged. Reviews were not queued.",
     )
 
 
@@ -1284,7 +1398,6 @@ def save_configuration(
             )
         )
     db.commit()
-    queued_reviews = queue_stale_reviews(db, workspace.id)
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
         configure_scheduler(scheduler)
@@ -1295,7 +1408,7 @@ def save_configuration(
     )
     return _redirect(
         redirect_path,
-        f"Configuration and schedule saved. {queued_reviews} stale reviews queued."
+        "Configuration and schedule saved. Reviews were not queued automatically."
         f"{schedule_note}",
     )
 

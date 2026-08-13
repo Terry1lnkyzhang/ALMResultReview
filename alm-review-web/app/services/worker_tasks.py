@@ -149,7 +149,7 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
     importing_job = db.get(SyncJob, job.id)
     if importing_job is not None:
         importing_job.progress_stage = "importing"
-        importing_job.progress_message = "Importing Runs and creating review jobs"
+        importing_job.progress_message = "Importing Runs"
         db.commit()
     result = import_data(
         data,

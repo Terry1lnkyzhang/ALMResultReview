@@ -18,12 +18,13 @@ from app.models import (
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.08.07.1"
+REVIEW_ENGINE_VERSION = "2026.08.12.1"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "hashing.py",
     _APP_DIRECTORY / "services" / "evidence.py",
     _APP_DIRECTORY / "services" / "equipment_review.py",
+    _APP_DIRECTORY / "services" / "html_evidence.py",
     _APP_DIRECTORY / "services" / "image_evidence.py",
     _APP_DIRECTORY / "services" / "reviews.py",
 )

@@ -28,6 +28,7 @@ def test_export_includes_ai_result_and_manual_override() -> None:
             test_name="Exported test",
             test_set_name="Regression",
             folder_path="Root / Export",
+            execution_location="Bay 5",
             run_status="Passed",
             test_owner="owner1",
             actual_tester="tester1",
@@ -98,6 +99,7 @@ def test_export_includes_ai_result_and_manual_override() -> None:
     rows = list(csv.DictReader(io.StringIO(response.body.decode("utf-8-sig"))))
     assert len(rows) == 1
     assert rows[0]["actual_tester"] == "Test User (tester1)"
+    assert rows[0]["execution_location"] == "Bay 5"
     assert rows[0]["test_owner_id"] == "owner1"
     assert rows[0]["test_owner"] == "Test Owner (owner1)"
     assert rows[0]["ai_verdict"] == "unqualified"

@@ -162,6 +162,27 @@ class AlmClient:
                 break
         return attachments
 
+    def field_name_by_label(self, entity: str, label: str) -> str | None:
+        response = self.client.get(
+            self._project_url(f"customization/entities/{entity}/fields"),
+            headers={"Accept": "application/xml"},
+        )
+        response.raise_for_status()
+        root = ElementTree.fromstring(response.content)
+        expected_label = label.strip().casefold()
+        for field in root.iter():
+            if field.tag.rsplit("}", 1)[-1].casefold() != "field":
+                continue
+            field_label = str(
+                field.attrib.get("Label") or field.attrib.get("label") or ""
+            ).strip()
+            if field_label.casefold() != expected_label:
+                continue
+            return str(
+                field.attrib.get("Name") or field.attrib.get("name") or ""
+            ).strip() or None
+        return None
+
     def users(self) -> list[dict[str, Any]]:
         response = self.client.get(
             self._project_url("customization/users"),
@@ -214,6 +235,13 @@ def _latest_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
     )
 
 
+def _run_location(run: dict[str, Any], location_field: str | None) -> str:
+    value = run.get("location")
+    if not value and location_field:
+        value = run.get(location_field)
+    return str(value or "").strip()
+
+
 def collect_folder(
     config: SyncConfig,
     progress_callback: ProgressCallback | None = None,
@@ -243,6 +271,11 @@ def collect_folder(
 
     report("connecting", "Connecting to ALM", True)
     with AlmClient(config) as alm:
+        try:
+            location_field = alm.field_name_by_label("run", "Location")
+        except (httpx.HTTPError, ElementTree.ParseError):
+            logger.exception("ALM Run Location field lookup failed")
+            location_field = None
         root = alm.entity("test-set-folders", config.folder_id)
         root["path"] = config.folder_path or str(root.get("name") or config.folder_id)
         pending.append(root)
@@ -278,6 +311,9 @@ def collect_folder(
                     run = _latest_run(runs)
                     if run is None:
                         continue
+                    location = _run_location(run, location_field)
+                    if location:
+                        run["location"] = location
                     run["steps"] = alm.entities(f"runs/{run['id']}/run-steps")
                     for step in run["steps"]:
                         if step.get("attachment") and CAPABILITIES.image_review:

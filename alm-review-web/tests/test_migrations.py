@@ -147,6 +147,9 @@ def test_existing_runs_and_configs_are_assigned_to_default_workspace() -> None:
 
     ensure_compatible_schema(engine)
 
+    columns = {column["name"] for column in inspect(engine).get_columns("alm_runs")}
+    assert "execution_location" in columns
+
     with engine.connect() as connection:
         workspace_id = connection.execute(
             text("SELECT id FROM workspaces WHERE slug = 'testing'")
