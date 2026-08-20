@@ -1,14 +1,10 @@
-import json
 from datetime import date
-
-import pytest
 
 from app.models import EquipmentRegistry
 from app.services.equipment_review import (
     _serial_aliases,
     analyze_equipment_steps,
     apply_equipment_disambiguation,
-    parse_equipment_disambiguation,
 )
 
 
@@ -134,7 +130,7 @@ def test_execution_outside_calibration_window_fails() -> None:
     checks, _ = analyze_equipment_steps(content, registry)
 
     assert checks[0]["status"] == "fail"
-    assert "不在校准有效期" in checks[0]["summary"]
+    assert "outside the calibration period" in checks[0]["summary"]
 
 
 def test_reported_calibration_range_must_match_registry() -> None:
@@ -147,7 +143,7 @@ def test_reported_calibration_range_must_match_registry() -> None:
     checks, _ = analyze_equipment_steps(content, registry)
 
     assert checks[0]["status"] == "fail"
-    assert "与台账" in checks[0]["summary"]
+    assert "does not match the registry" in checks[0]["summary"]
 
 
 def test_current_non_use_status_is_warning_not_historical_failure() -> None:
@@ -198,59 +194,18 @@ def test_dut_disambiguation_makes_step_not_applicable() -> None:
         expected="PIM SN:__",
     )
     checks, ambiguous = analyze_equipment_steps(content, [])
-    decisions = parse_equipment_disambiguation(
-        json.dumps(
-            {
-                "steps": [
-                    {
-                        "step": 1,
-                        "role": "dut_or_other",
-                        "required": False,
-                        "selected_equipment_ids": [],
-                        "reason": "PIM is the product under test.",
-                    }
-                ]
-            }
-        ),
-        ambiguous,
-    )
+    decisions = {
+        1: {
+            "role": "dut_or_other",
+            "required": False,
+            "selected_equipment_ids": [],
+            "reason": "PIM is the product under test.",
+        }
+    }
 
     apply_equipment_disambiguation(content, checks, decisions, [])
 
     assert checks[0]["status"] == "not_applicable"
-
-
-def test_disambiguation_cannot_invent_equipment_id() -> None:
-    ambiguous = [
-        {
-            "step": 1,
-            "candidate_equipment": [
-                {
-                    "equipment_id": "PCCSY-RD-CT-1-0175",
-                    "description": "ECG simulator",
-                    "model_number": "ProSim2",
-                    "serial_number": "00850540007089",
-                }
-            ],
-        }
-    ]
-    response = json.dumps(
-        {
-            "steps": [
-                {
-                    "step": 1,
-                    "role": "controlled_equipment",
-                    "required": True,
-                    "selected_equipment_ids": ["INVENTED-DEVICE"],
-                    "reason": "",
-                }
-            ]
-        }
-    )
-
-    with pytest.raises(ValueError, match="unavailable equipment ID"):
-        parse_equipment_disambiguation(response, ambiguous)
-
 
 def test_calibration_tool_does_not_match_to_inside_tool_as_date_requirement() -> None:
     content = review_content(
@@ -358,7 +313,7 @@ def test_each_equipment_calibration_range_is_checked_in_multi_device_step() -> N
 
     assert checks[0]["status"] == "fail"
     assert "PCCSY-RD-CT-1-0076" in checks[0]["summary"]
-    assert "与台账" in checks[0]["summary"]
+    assert "does not match the registry" in checks[0]["summary"]
     stop_watch = next(
         item
         for item in checks[0]["matches"]

@@ -4,7 +4,16 @@
 <a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; Dashboard</a>
 <section class="detail-heading">
   <div><p class="eyebrow">RUN #{{ run.alm_run_id or run.run_id }} / REVISION {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
-  <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
+  <div class="detail-status">
+    <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
+    {% if active_sync_job %}<span class="queue-tag">ALM refresh {{ active_sync_job.status }}</span>{% endif %}
+    {% if active_review_job %}<span class="queue-tag">AI review {{ active_review_job.status }}</span>{% endif %}
+  </div>
+</section>
+
+<section class="detail-actions">
+  <div><p class="eyebrow">REFRESH THIS RUN</p><p class="subtle">Re-imports this single Run from ALM and then queues its AI review. The decision above stays visible until the new result lands.</p></div>
+  <form method="post" action="/runs/{{ run.run_id }}/refresh"><button class="button secondary" type="submit"{% if active_sync_job %} disabled{% endif %}>Refresh from ALM &amp; review</button></form>
 </section>
 
 <dl class="fact-strip">
@@ -29,6 +38,48 @@
   <div><p class="eyebrow">AI REVIEW / {{ review.result.model_name }}</p><h2>{{ review.result.verdict|replace('_', ' ')|title }}</h2><p>{{ review.result.issue_summary or 'No issue summary was returned.' }}</p><small>Completed {{ review.result.completed_at.strftime('%Y-%m-%d %H:%M:%S') }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit">Queue re-review</button></form></div>
   {% if review.manual_decision %}<div class="manual-record"><span>Manual decision</span><strong>{{ review.manual_decision.decision|replace('_', ' ')|title }}</strong><small>{{ review.manual_decision.operator }} / {{ review.manual_decision.created_at.strftime('%Y-%m-%d %H:%M') }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
 </section>
+{% if review_pipeline %}
+<section class="pipeline-section">
+  <div class="table-heading"><h2>Review pipeline</h2><span>{{ review_pipeline.get('total_ai_calls', 0) }} AI call{% if review_pipeline.get('total_ai_calls', 0) != 1 %}s{% endif %}</span></div>
+  <div class="pipeline-stages">
+    {% for key, label in [('routing', 'Route'), ('text_review', 'Text review'), ('image_review', 'Image review'), ('report_review', 'Report review'), ('equipment_review', 'Equipment review'), ('aggregation', 'Aggregate')] %}
+      {% set stage = review_pipeline.get('stages', {}).get(key, {}) %}
+      <article class="pipeline-stage pipeline-stage-{{ stage.get('status', 'not_applicable') }}">
+        <span>{{ loop.index|string }}</span><div><strong>{{ label }}</strong><small>{{ stage.get('status', 'not_applicable')|replace('_', ' ')|title }}{% if stage.get('ai_calls') %} &middot; {{ stage.get('ai_calls') }} AI{% endif %}{% if stage.get('steps') %} &middot; {% if key == 'routing' %}{{ stage.get('steps')|length }}{% else %}{{ stage.get('steps') }}{% endif %} Steps{% endif %}{% if stage.get('reports') %} &middot; {{ stage.get('reports') }} Reports{% endif %}</small></div>
+      </article>
+    {% endfor %}
+  </div>
+  {% set routing_steps = review_pipeline.get('stages', {}).get('routing', {}).get('steps', []) %}
+  {% if routing_steps %}
+  <div class="routing-trace">
+    <div class="routing-trace-heading"><strong>Evidence routing trace</strong><span>Recorded when this review ran</span></div>
+    {% for route in routing_steps %}
+    <details class="routing-step" {% if route.get('intent') not in ['none'] %}open{% endif %}>
+      <summary><span>Step {{ route.get('review_step') }}</span><strong>{{ route.get('intent', 'none')|replace('_', ' ')|title }}</strong><i>{{ route.get('decision_source', 'deterministic')|replace('_', ' ')|title }}{% if route.get('confidence') is not none %} &middot; {{ (route.get('confidence') * 100)|round|int }}%{% endif %}</i></summary>
+      <div class="routing-step-body">
+        <p>{{ route.get('reason') or 'No routing reason was recorded.' }}</p>
+        {% if route.get('paths') %}<dl><dt>Detected paths</dt><dd>{% for path in route.get('paths') %}<code>{{ path.get('raw') }}</code><small>{{ path.get('kind', 'unknown')|replace('_', ' ') }}</small>{% endfor %}</dd></dl>{% endif %}
+        <dl><dt>Matched conditions</dt><dd class="routing-tags">{% for trigger in route.get('triggers', []) %}<span>{{ trigger }}</span>{% else %}<span>none</span>{% endfor %}</dd></dl>
+        <dl><dt>Actions</dt><dd class="routing-tags routing-actions">{% for action in route.get('actions', []) %}<span>{{ action|replace('_', ' ') }}</span>{% else %}<span>no external evidence action</span>{% endfor %}</dd></dl>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if review_skill_traces %}
+  <div class="skill-trace-list">
+    <div class="routing-trace-heading"><strong>Skill execution trace</strong><span>Version, mode, capability grants, and runtime</span></div>
+    {% for trace in review_skill_traces %}
+    <article class="skill-trace-item skill-trace-{{ trace.get('status', 'failed') }}">
+      <header><div><strong>{{ trace.get('skill_name') or trace.get('skill_id') }}</strong><code>{{ trace.get('skill_id') }}{% if trace.get('skill_version') %}@{{ trace.get('skill_version') }}{% endif %}</code></div><i>{{ trace.get('status', 'failed')|replace('_', ' ')|title }}</i></header>
+      <div class="skill-shadow-meta"><span>{{ trace.get('pipeline_stage', 'unknown')|replace('_', ' ')|title }}</span><span>{{ trace.get('mode', 'authoritative')|replace('_', ' ')|title }}</span>{% if trace.get('duration_ms') is not none %}<span>{{ trace.get('duration_ms') }} ms</span>{% endif %}{% if trace.get('skill_hash') %}<span>Policy {{ trace.get('skill_hash')[:12] }}</span>{% endif %}{% for capability in trace.get('capabilities', {}).get('granted', []) %}<span>{{ capability }}</span>{% endfor %}</div>
+      {% if trace.get('error') %}<p>{{ trace.get('error') }}</p>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 {% if review_warnings %}
 <section class="warning-section">
   <div class="table-heading"><h2>Warnings</h2><span>{{ review_warnings|length }}</span></div>
@@ -53,8 +104,19 @@
 {% else %}<section class="review-band review-empty"><div><h2>No current AI review</h2><p>This revision is queued or its latest attempt failed.</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit">Queue this Run</button></form></section>{% endif %}
 
 {% if allowed_decisions %}
-<section class="decision-panel"><div><p class="eyebrow">MANUAL DECISION</p><h2>Resolve this result</h2><p>Operator and reason are retained with the current source hash.</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>Decision</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label><span>Operator</span><input name="operator" required></label><label class="reason-field"><span>Reason</span><textarea name="reason" rows="3" required></textarea></label><button class="button primary" type="submit">Record decision</button></form></section>
+<section class="decision-panel"><div><p class="eyebrow">MANUAL DECISION</p><h2>Resolve this result</h2><p>The reason is retained with the current source hash, and a resolved Run is never re-reviewed automatically.</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>Decision</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>Reason</span><textarea name="reason" rows="3" required placeholder="Why this result is being resolved manually"></textarea></label><button class="button primary" type="submit">Record decision</button></form></section>
 {% endif %}
+<script>
+  (() => {
+    const form = document.querySelector(".decision-panel form");
+    if (!form) return;
+    const reason = form.querySelector("textarea[name='reason']");
+    const submit = form.querySelector("button[type='submit']");
+    const sync = () => { submit.disabled = !reason.value.trim(); };
+    reason.addEventListener("input", sync);
+    sync();
+  })();
+</script>
 
 <section class="steps-section"><div class="table-heading"><h2>Execution evidence</h2><span>{{ steps|length }} steps</span></div>
   <div class="step-list">{% for step in steps %}{% set step_review = step_review_map.get(loop.index, {}) %}{% set equipment = step_review.get('equipment', {}) %}<article class="step"><header><span>STEP {{ step.step_order }}</span><strong>{{ step.name }}</strong>{% if step_review %}<i class="step-review-status status-{{ step_review.get('status', 'pass') }}">{{ step_review.get('status', 'pass')|upper }}</i>{% else %}<i class="alm-status">{{ step.status }}</i>{% endif %}</header>{% if step_review.get('summary') %}<div class="step-review-summary">{{ step_review.get('summary') }}</div>{% endif %}{% for warning in step_review.get('warnings', []) %}<div class="step-warning">Warning: {{ warning.get('summary') }}</div>{% endfor %}{% if equipment and equipment.get('status') != 'not_applicable' %}<div class="step-equipment"><div class="step-equipment-heading"><div><span>Equipment registry</span><strong>{{ equipment.get('summary') }}</strong></div><i class="step-review-status status-{{ equipment.get('status', 'manual') }}">{{ equipment.get('status', 'manual')|upper }}</i></div><dl class="equipment-check-facts"><div><dt>Execution date</dt><dd>{{ equipment.get('execution_date') or '-' }}</dd></div><div><dt>Reported ID</dt><dd>{{ equipment.get('reported_identifiers')|join(', ') or equipment.get('unknown_identifiers')|join(', ') or equipment.get('matches')|map(attribute='equipment_id')|join(', ') or '-' }}</dd></div><div><dt>Reported calibration</dt><dd>{% if equipment.get('reported_calibration_ranges') %}{{ equipment.get('reported_calibration_ranges')|length }} device range(s){% elif equipment.get('reported_calibration_range') %}{{ equipment.get('reported_calibration_range')|join(' to ') }}{% else %}-{% endif %}</dd></div></dl>{% for item in equipment.get('matches', []) %}<div class="equipment-match"><div><strong>{{ item.get('equipment_id') }}</strong><span>{{ item.get('description') or '-' }}</span></div><div><span>Matched by {{ item.get('matched_by')|join(', ') }}</span><small>Serial {{ item.get('serial_number') or '-' }}</small></div><div><span>Registry {{ item.get('calibration_date') or '-' }} to {{ item.get('calibration_due_date') or '-' }}</span><small>{% if item.get('reported_calibration_range') %}Actual {{ item.get('reported_calibration_range')|join(' to ') }}{% else %}Actual calibration not recorded{% endif %}</small></div><div><span>{{ item.get('manufacturer') or '-' }} / {{ item.get('model_number') or '-' }}</span><small>{{ item.get('equipment_status') or 'Status not recorded' }} &middot; {{ item.get('source_filename') or '-' }}{% if item.get('source_row') %} row {{ item.get('source_row') }}{% endif %}</small></div></div>{% endfor %}</div>{% endif %}<div class="step-columns"><div><h3>Description</h3><div class="alm-rich-text">{{ step.description or '-' }}</div></div><div><h3>Expected</h3><div class="alm-rich-text">{{ step.expected or '-' }}</div></div><div class="actual"><h3>Actual</h3><div class="alm-rich-text">{{ step.actual or '-' }}</div></div></div></article>{% else %}<p class="empty">No Run Steps found.</p>{% endfor %}</div>

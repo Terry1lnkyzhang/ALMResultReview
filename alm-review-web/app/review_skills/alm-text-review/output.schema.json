@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["assessments"],
+  "properties": {
+    "assessments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["review_step", "applicability", "findings", "reference_decisions", "summary"],
+        "properties": {
+          "review_step": {"type": "integer", "minimum": 1},
+          "applicability": {"enum": ["applicable", "not_applicable", "manual"]},
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "severity", "reason"],
+              "properties": {
+                "code": {"enum": ["actual_missing", "actual_insufficient", "expected_actual_mismatch", "language_quality", "evidence_reference_missing"]},
+                "severity": {"enum": ["warning", "fail", "manual"]},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+              }
+            }
+          },
+          "reference_decisions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["candidate_id", "role", "requires_check", "reason"],
+              "properties": {
+                "candidate_id": {"type": "string", "minLength": 1},
+                "role": {"enum": ["test_equipment", "dut_or_other", "result_evidence", "reference_document", "result_evidence_location", "unrelated", "uncertain"]},
+                "requires_check": {"type": "boolean"},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+              }
+            }
+          },
+          "summary": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    }
+  }
+}

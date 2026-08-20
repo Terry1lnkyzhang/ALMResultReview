@@ -1,12 +1,32 @@
+import re
 from pathlib import Path
 
 import app.services.image_evidence as image_evidence
-from app.models import AiConfig, EvidenceConfig
-from app.services.image_evidence import (
-    NetworkImageResolver,
-    image_transport_allowed,
+from app.models import EvidenceConfig
+from app.services.evidence import step_evidence_profile
+from app.services.image_evidence import NetworkImageResolver
+from app.services.reviews import _IMAGE_EVIDENCE_ISSUES, _prepare_image_evidence
+
+# Every status the resolver or the review pipeline can attach to image evidence.
+IMAGE_EVIDENCE_STATUSES = frozenset(
+    {
+        "ready",
+        "missing",
+        "denied",
+        "unavailable",
+        "outside_root",
+        "not_unc",
+        "root_not_configured",
+        "no_images",
+        "no_usable_images",
+        "no_matching_images",
+        "ambiguous_step_mapping",
+        "transport_too_large",
+    }
 )
-from app.services.reviews import _prepare_image_evidence
+SILENT_IMAGE_EVIDENCE_STATUSES = frozenset(
+    {"ready", "not_unc", "root_not_configured"}
+)
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"test-png"
 JPEG_BYTES = b"\xff\xd8\xff" + b"test-jpeg"
@@ -16,6 +36,24 @@ WEBP_BYTES = b"RIFF\x04\x00\x00\x00WEBP" + b"test-webp"
 def write_image(path: Path, content: bytes = PNG_BYTES) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+
+
+def test_image_evidence_statuses_map_to_exactly_one_review_outcome() -> None:
+    assert set(_IMAGE_EVIDENCE_ISSUES) == (
+        IMAGE_EVIDENCE_STATUSES - SILENT_IMAGE_EVIDENCE_STATUSES
+    )
+    assert all(
+        status in {"fail", "manual"} and issue_type in {"path", "screenshot"}
+        for status, issue_type, _summary in _IMAGE_EVIDENCE_ISSUES.values()
+    )
+
+
+def test_resolver_only_reports_known_image_evidence_statuses() -> None:
+    source = Path(image_evidence.__file__).read_text(encoding="utf-8")
+    literals = set(re.findall(r'status\s*=\s*"([a-z_]+)"', source))
+
+    assert literals
+    assert literals <= IMAGE_EVIDENCE_STATUSES
 
 
 def test_collects_supported_images_with_depth_and_count_limits(tmp_path: Path) -> None:
@@ -106,10 +144,8 @@ def test_shared_directory_images_are_matched_to_their_review_step(
         content,
         EvidenceConfig(
             allowed_network_root=str(tmp_path),
-            network_evidence_enabled=True,
-            image_review_enabled=True,
+            external_evidence_review_enabled=True,
         ),
-        AiConfig(base_url="https://ai.example/v1"),
     )
 
     assert [
@@ -120,6 +156,67 @@ def test_shared_directory_images_are_matched_to_their_review_step(
         image.relative_name
         for image in prepared.results[2][str(tagged)].images
     ] == ["Step2-1.png", "Step2-2.png"]
+
+
+def test_step_letter_suffix_images_match_the_base_step(tmp_path: Path) -> None:
+    write_image(tmp_path / "Step1a.png")
+    write_image(tmp_path / "Step1b.JPG", JPEG_BYTES)
+    write_image(tmp_path / "Step2a.png")
+
+    result = NetworkImageResolver(
+        matching_step_numbers={1},
+        require_step_marker=True,
+    ).collect(tmp_path)
+
+    assert result.status == "ready"
+    assert [image.relative_name for image in result.images] == [
+        "Step1a.png",
+        "Step1b.JPG",
+    ]
+
+
+def test_direct_image_path_is_loaded_without_screenshot_wording(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "Step1.png"
+    write_image(image_path)
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    profile = step_evidence_profile(
+        "Record the result.",
+        "The result is available.",
+        f"Result: {image_path}",
+        "2026-08-14",
+        False,
+    )
+
+    prepared = _prepare_image_evidence(
+        {
+            "steps": [
+                {
+                    "review_step": 1,
+                    "order": "1",
+                    "evidence_profile": profile,
+                }
+            ]
+        },
+        EvidenceConfig(
+            allowed_network_root=str(tmp_path),
+            external_evidence_review_enabled=True,
+        ),
+    )
+
+    assert profile["routing"]["actions"] == [
+        "validate_path",
+        "load_images",
+        "send_to_visual_ai",
+    ]
+    assert prepared.results[1][str(image_path)].status == "ready"
+    assert prepared.results[1][str(image_path)].images[0].relative_name == "Step1.png"
 
 
 def test_alm_step_order_takes_priority_over_internal_review_step(
@@ -151,10 +248,8 @@ def test_alm_step_order_takes_priority_over_internal_review_step(
         content,
         EvidenceConfig(
             allowed_network_root=str(tmp_path),
-            network_evidence_enabled=True,
-            image_review_enabled=True,
+            external_evidence_review_enabled=True,
         ),
-        AiConfig(base_url="https://ai.example/v1"),
     )
 
     assert [
@@ -191,21 +286,12 @@ def test_shared_directory_without_step_markers_is_ambiguous(
         content,
         EvidenceConfig(
             allowed_network_root=str(tmp_path),
-            network_evidence_enabled=True,
-            image_review_enabled=True,
+            external_evidence_review_enabled=True,
         ),
-        AiConfig(base_url="https://ai.example/v1"),
     )
 
     assert prepared.results[1][str(untagged)].status == "ambiguous_step_mapping"
     assert prepared.results[2][str(untagged)].status == "ambiguous_step_mapping"
-
-
-def test_image_transport_requires_https_localhost_or_explicit_approval() -> None:
-    assert image_transport_allowed("https://ai.example/v1", allow_insecure=False)
-    assert image_transport_allowed("http://127.0.0.1:6000/v1", allow_insecure=False)
-    assert not image_transport_allowed("http://161.92.92.153:6000/v1", allow_insecure=False)
-    assert image_transport_allowed("http://161.92.92.153:6000/v1", allow_insecure=True)
 
 
 def test_resolve_does_not_require_pathlib_resolve_for_approved_path(

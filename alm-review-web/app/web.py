@@ -34,21 +34,28 @@ from app.models import (
     RunRevision,
     RunStep,
     SyncConfig,
-    SyncHistory,
     SyncJob,
     WorkerHeartbeat,
     Workspace,
 )
 from app.services.docx_import import MAX_DOCX_BYTES, parse_alm_docx
 from app.services.equipment_registry import import_equipment_workbook
-from app.services.importer import import_data, import_file, queue_stale_reviews
+from app.services.importer import import_data, import_file, queue_latest_alm_changes
 from app.services.review_operations import (
     REREVIEW_SCOPES,
-    latest_rereview_progress,
+    active_run_review_job,
+    cancel_queued_reviews,
+    queue_failed_reviews,
     queue_rereviews,
+    queue_run_review,
+    workspace_review_progress,
 )
 from app.services.review_policy import current_review_policy_key
-from app.services.review_status import current_reviews, review_update_reasons
+from app.services.review_status import (
+    current_reviews,
+    is_force_qualified,
+    review_update_reasons,
+)
 from app.services.reviews import (
     current_review,
     save_manual_decision,
@@ -56,6 +63,11 @@ from app.services.reviews import (
 )
 from app.services.rich_text import render_alm_rich_text, snapshot_step_fields
 from app.services.scheduler import configure_scheduler
+from app.services.skill_runner import (
+    discover_skills,
+    load_skill,
+    skill_manifest_metadata,
+)
 from app.services.worker_tasks import queue_sync_job
 from app.services.workspaces import (
     resolve_workspace,
@@ -65,6 +77,63 @@ from app.services.workspaces import (
 )
 
 basic_auth = HTTPBasic(auto_error=False)
+
+
+def _skill_catalog() -> list[dict[str, Any]]:
+    catalog = []
+    for skill_id in discover_skills():
+        try:
+            metadata = skill_manifest_metadata(skill_id)
+            if metadata["status"] == "planned":
+                catalog.append(metadata)
+                continue
+            definition = load_skill(skill_id)
+        except Exception as exc:
+            catalog.append(
+                {"skill_id": skill_id, "status": "unavailable", "error": str(exc)}
+            )
+            continue
+        catalog.append(
+            {
+                "skill_id": definition.skill_id,
+                "name": definition.name,
+                "version": definition.version,
+                "stage": definition.stage,
+                "status": "available",
+                "skill_hash": definition.skill_hash,
+                "required_capabilities": definition.required_capabilities,
+                "optional_capabilities": definition.optional_capabilities,
+            }
+        )
+    return catalog
+
+
+def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
+    stages = pipeline.get("stages", {})
+    if not isinstance(stages, dict):
+        return []
+    traces: list[dict[str, Any]] = []
+
+    def add(stage: str, value: Any, mode: str = "authoritative") -> None:
+        if not isinstance(value, dict) or not value.get("skill_id"):
+            return
+        trace = dict(value)
+        trace["pipeline_stage"] = stage
+        trace.setdefault("mode", mode)
+        traces.append(trace)
+
+    text = stages.get("text_review", {})
+    if isinstance(text, dict):
+        for trace in text.get("skills", []):
+            add("text_review", trace)
+    image = stages.get("image_review", {})
+    if isinstance(image, dict):
+        for trace in image.get("skills", []):
+            add("image_review", trace)
+    equipment = stages.get("equipment_review", {})
+    if isinstance(equipment, dict):
+        add("equipment_review", equipment.get("skill"))
+    return traces
 
 
 def require_web_access(
@@ -98,6 +167,7 @@ templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
     "qualified": "Qualified",
+    "force_qualified": "Force qualified",
     "unqualified": "Unqualified",
     "needs_manual_review": "Manual review",
     "pending_review": "Pending",
@@ -138,6 +208,7 @@ def _run_view(
         "review": review,
         "review_summary": review.result.issue_summary if review.result else "",
         "final_status": review.final_status,
+        "force_qualified": is_force_qualified(review),
         "status_label": STATUS_LABELS[review.final_status],
         "review_update_reasons": review_update_reasons(
             review.result,
@@ -146,6 +217,13 @@ def _run_view(
             model_name,
         ),
     }
+
+
+def _matches_status(item: dict, status: str) -> bool:
+    # Force qualified is a lens over qualified Runs, not a separate final status.
+    if status == "force_qualified":
+        return item["force_qualified"]
+    return status == "all" or item["final_status"] == status
 
 
 def _matches_dashboard_filters(
@@ -157,7 +235,7 @@ def _matches_dashboard_filters(
 ) -> bool:
     normalized_query = query.strip().casefold()
     return (
-        (status == "all" or item["final_status"] == status)
+        _matches_status(item, status)
         and (tester == "all" or (item["run"].actual_tester or "Unassigned") == tester)
         and (owner == "all" or (item["run"].test_owner or "Unassigned") == owner)
         and (
@@ -358,6 +436,7 @@ def dashboard(
         for reason in item["review_update_reasons"]
     )
     status_counts = Counter(item["final_status"] for item in all_views)
+    status_counts["force_qualified"] = sum(item["force_qualified"] for item in all_views)
     tester_scope = [
         item
         for item in all_views
@@ -380,12 +459,6 @@ def dashboard(
         for item in all_views
         if _matches_dashboard_filters(item, status, tester, owner, query)
     ]
-    recent_sync = db.scalar(
-        select(SyncHistory)
-        .where(SyncHistory.workspace_id == current_workspace.id)
-        .order_by(desc(SyncHistory.started_at))
-        .limit(1)
-    )
     max_tester_count = max(tester_counts.values(), default=1)
     max_owner_count = max(owner_counts.values(), default=1)
     review_job_counts = dict(
@@ -398,34 +471,98 @@ def dashboard(
             .group_by(ReviewJob.status)
         ).all()
     )
-    review_job_counts["failed"] = status_counts.get("review_failed", 0)
-    active_sync_job = db.scalar(
+    active_review_counts = {
+        (workspace_id, job_status): count
+        for workspace_id, job_status, count in db.execute(
+            select(ReviewJob.workspace_id, ReviewJob.status, func.count())
+            .where(ReviewJob.status.in_(("queued", "running")))
+            .group_by(ReviewJob.workspace_id, ReviewJob.status)
+        ).all()
+    }
+    queue_overview = sorted(
+        (
+            {
+                "workspace": item,
+                "queued": active_review_counts.get((item.id, "queued"), 0),
+                "running": active_review_counts.get((item.id, "running"), 0),
+            }
+            for item in workspaces
+            if active_review_counts.get((item.id, "queued"), 0)
+            or active_review_counts.get((item.id, "running"), 0)
+            or item.review_queue_paused
+        ),
+        key=lambda item: (-item["workspace"].queue_priority, item["workspace"].name),
+    )
+    queued_review_preview = [
+        {
+            "job": job,
+            "run": run,
+            "workspace": job_workspace,
+            "created_at": job.created_at.replace(tzinfo=UTC).astimezone(
+                ZoneInfo(get_settings().app_timezone)
+            ),
+        }
+        for job, run, job_workspace in db.execute(
+            select(ReviewJob, AlmRun, Workspace)
+            .join(Workspace, Workspace.id == ReviewJob.workspace_id)
+            .outerjoin(
+                AlmRun,
+                (AlmRun.run_id == ReviewJob.run_id)
+                & (AlmRun.workspace_id == ReviewJob.workspace_id),
+            )
+            .where(ReviewJob.status == "queued", Workspace.archived.is_(False))
+            .order_by(
+                Workspace.review_queue_paused,
+                desc(Workspace.queue_priority),
+                ReviewJob.created_at,
+                ReviewJob.id,
+            )
+            .limit(10)
+        ).all()
+    ]
+    latest_sync_job = db.scalar(
         select(SyncJob)
-        .where(
-            SyncJob.workspace_id == current_workspace.id,
-            SyncJob.status.in_(("queued", "running", "failed")),
-        )
-        .order_by(desc(SyncJob.created_at))
+        .where(SyncJob.workspace_id == current_workspace.id)
+        .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
         .limit(1)
     )
+    active_sync_job = (
+        latest_sync_job
+        if latest_sync_job is not None
+        and latest_sync_job.status in ("queued", "running", "failed")
+        else None
+    )
+    sync_display_at = None
+    if latest_sync_job is not None:
+        sync_timestamp = latest_sync_job.completed_at or latest_sync_job.started_at
+        if sync_timestamp is not None:
+            sync_display_at = sync_timestamp.replace(tzinfo=UTC).astimezone(
+                ZoneInfo(get_settings().app_timezone)
+            )
     worker_heartbeat = db.scalar(
         select(WorkerHeartbeat).order_by(desc(WorkerHeartbeat.last_seen_at)).limit(1)
     )
-    worker_online = bool(
-        worker_heartbeat
-        and worker_heartbeat.status != "offline"
-        and worker_heartbeat.last_seen_at
-        >= datetime.utcnow()
-        - timedelta(seconds=max(15, get_settings().worker_poll_seconds * 3))
-    )
-    rereview_progress = latest_rereview_progress(db, current_workspace.id)
-    rereview_started_at = (
-        rereview_progress.created_at.replace(tzinfo=UTC).astimezone(
-            ZoneInfo(get_settings().app_timezone)
+    now = datetime.utcnow()
+    worker_has_active_review = db.scalar(
+        select(ReviewJob.id)
+        .where(
+            ReviewJob.status == "running",
+            ReviewJob.lease_expires_at.is_not(None),
+            ReviewJob.lease_expires_at > now,
         )
-        if rereview_progress is not None
-        else None
+        .limit(1)
     )
+    worker_online = bool(
+        (active_sync_job is not None and active_sync_job.status == "running")
+        or worker_has_active_review
+        or (
+            worker_heartbeat
+            and worker_heartbeat.status != "offline"
+            and worker_heartbeat.last_seen_at
+            >= now - timedelta(seconds=max(15, get_settings().worker_poll_seconds * 3))
+        )
+    )
+    review_progress = workspace_review_progress(db, current_workspace.id)
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
@@ -450,15 +587,18 @@ def dashboard(
             "selected_tester": tester,
             "selected_owner": owner,
             "query": query,
-            "recent_sync": recent_sync,
             "review_job_counts": review_job_counts,
+            "queue_overview": queue_overview,
+            "queued_review_preview": queued_review_preview,
             "review_update_count": review_update_count,
             "review_update_reason_counts": review_update_reason_counts,
             "active_sync_job": active_sync_job,
+            "latest_sync_job": latest_sync_job,
+            "sync_display_at": sync_display_at,
+            "ai_config": ai_config,
             "worker_heartbeat": worker_heartbeat,
             "worker_online": worker_online,
-            "rereview_progress": rereview_progress,
-            "rereview_started_at": rereview_started_at,
+            "review_progress": review_progress,
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
@@ -468,21 +608,84 @@ def dashboard(
 @router.get("/api/review-progress")
 def review_progress(workspace: int | None = None, db: Session = Depends(get_db)):
     current_workspace = resolve_workspace(db, workspace)
-    progress = latest_rereview_progress(db, current_workspace.id)
-    if progress is None:
-        return {"available": False}
+    progress = workspace_review_progress(db, current_workspace.id)
     return {
         "available": True,
         "total": progress.total,
-        "processed": progress.processed,
-        "completed": progress.completed,
-        "remaining": progress.remaining,
+        "reviewed": progress.reviewed,
+        "qualified": progress.qualified,
+        "force_qualified": progress.force_qualified,
+        "unqualified": progress.unqualified,
+        "manual": progress.manual,
+        "pending": progress.pending,
+        "review_failed": progress.review_failed,
         "queued": progress.queued,
         "running": progress.running,
-        "retrying": progress.retrying,
-        "failed": progress.failed,
-        "skipped": progress.skipped,
         "percent": progress.percent,
+    }
+
+
+@router.get("/api/queue-status")
+def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
+    current_workspace = resolve_workspace(db, workspace)
+    counts = dict(
+        db.execute(
+            select(ReviewJob.status, func.count())
+            .where(
+                ReviewJob.workspace_id == current_workspace.id,
+                ReviewJob.status.in_(("queued", "running")),
+            )
+            .group_by(ReviewJob.status)
+        ).all()
+    )
+    ai_config = db.get(AiConfig, 1)
+    worker_heartbeat = db.scalar(
+        select(WorkerHeartbeat).order_by(desc(WorkerHeartbeat.last_seen_at)).limit(1)
+    )
+    now = datetime.utcnow()
+    active_review = db.scalar(
+        select(ReviewJob.id)
+        .where(
+            ReviewJob.status == "running",
+            ReviewJob.lease_expires_at.is_not(None),
+            ReviewJob.lease_expires_at > now,
+        )
+        .limit(1)
+    )
+    active_sync = db.scalar(
+        select(SyncJob.id)
+        .where(
+            SyncJob.status == "running",
+            SyncJob.lease_expires_at.is_not(None),
+            SyncJob.lease_expires_at > now,
+        )
+        .limit(1)
+    )
+    worker_has_active_job = bool(active_review or active_sync)
+    worker_online = bool(
+        worker_has_active_job
+        or (
+            worker_heartbeat
+            and worker_heartbeat.status != "offline"
+            and worker_heartbeat.last_seen_at
+            >= now - timedelta(seconds=max(15, get_settings().worker_poll_seconds * 3))
+        )
+    )
+    return {
+        "queued": counts.get("queued", 0),
+        "running": counts.get("running", 0),
+        "review_concurrency": max(
+            1, min(4, ai_config.review_concurrency if ai_config is not None else 1)
+        ),
+        "worker_online": worker_online,
+        "worker_status": (
+            "working"
+            if worker_has_active_job
+            else worker_heartbeat.status
+            if worker_online and worker_heartbeat is not None
+            else "offline"
+        ),
+        "worker_id": worker_heartbeat.worker_id if worker_heartbeat else None,
     }
 
 
@@ -719,6 +922,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     review_criteria = {}
     review_step_results = []
     review_warnings = []
+    review_pipeline = {}
     if review.result and review.result.criteria_json:
         try:
             review_criteria = json.loads(review.result.criteria_json)
@@ -734,11 +938,26 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             review_warnings = json.loads(review.result.warnings_json)
         except json.JSONDecodeError:
             review_warnings = []
+    if review.result and review.result.pipeline_json:
+        try:
+            review_pipeline = json.loads(review.result.pipeline_json)
+        except json.JSONDecodeError:
+            review_pipeline = {}
     step_review_map = {
         item.get("review_step"): item
         for item in review_step_results
         if isinstance(item, dict)
     }
+    review_skill_traces = _pipeline_skill_traces(review_pipeline)
+    active_sync_job = db.scalar(
+        select(SyncJob)
+        .where(
+            SyncJob.run_id == run_id,
+            SyncJob.status.in_(("queued", "running")),
+        )
+        .order_by(desc(SyncJob.id))
+        .limit(1)
+    )
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
@@ -749,11 +968,15 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "actual_tester_label": _person_label(run.actual_tester, users),
             "review": review,
             "review_update_reasons": update_reasons,
+            "active_review_job": active_run_review_job(db, run),
+            "active_sync_job": active_sync_job,
             "steps": steps,
             "revisions": revisions,
             "results": results,
             "allowed_decisions": allowed_decisions,
             "review_criteria": review_criteria,
+            "review_pipeline": review_pipeline,
+            "review_skill_traces": review_skill_traces,
             "step_review_map": step_review_map,
             "review_warnings": review_warnings,
             "status_label": STATUS_LABELS[review.final_status],
@@ -765,15 +988,17 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
 
 @router.post("/runs/{run_id}/manual-decision")
 def decide_run(
+    request: Request,
     run_id: int,
     decision: str = Form(...),
-    operator: str = Form(...),
     reason: str = Form(...),
     db: Session = Depends(get_db),
 ):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    # No login exists, so the caller address is the only attributable identity.
+    operator = request.client.host if request.client else "web"
     try:
         save_manual_decision(db, run, decision, operator, reason)
     except ValueError as exc:
@@ -799,45 +1024,35 @@ def review_run_now(
         )
     if run.current_revision_id is None:
         return _redirect(f"/runs/{run_id}", "The Run has no current revision.", "error")
-    job = db.scalar(
-        select(ReviewJob)
-        .where(
-            ReviewJob.run_id == run_id,
-            ReviewJob.revision_id == run.current_revision_id,
-            ReviewJob.status.in_(("queued", "running")),
-        )
-        .order_by(desc(ReviewJob.id))
-        .limit(1)
-    )
-    if job is None:
-        job = db.scalar(
-            select(ReviewJob)
-            .where(
-                ReviewJob.run_id == run_id,
-                ReviewJob.revision_id == run.current_revision_id,
-                ReviewJob.status == "failed",
-                ReviewJob.attempt_count < 3,
-            )
-            .order_by(desc(ReviewJob.id))
-            .limit(1)
-        )
-    if job is None:
-        job = ReviewJob(
-            workspace_id=run.workspace_id,
-            run_id=run_id,
-            revision_id=run.current_revision_id,
-            status="queued",
-        )
-        db.add(job)
-    elif job.status == "failed":
-        job.status = "queued"
-        job.error_message = ""
-        job.completed_at = None
-    db.commit()
+    queue_run_review(db, run)
     return _redirect(
         f"/runs/{run_id}",
         "AI review queued for the laptop worker."
         + (" Previous review history will be retained." if force_new else ""),
+    )
+
+
+@router.post("/runs/{run_id}/refresh")
+def refresh_run_from_alm(run_id: int, db: Session = Depends(get_db)):
+    run = db.get(AlmRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.test_instance_id is None:
+        return _redirect(
+            f"/runs/{run_id}",
+            "This Run has no ALM test instance reference to refresh from.",
+            "error",
+        )
+    queued = queue_sync_job(db, "web", run.workspace_id, run_id=run.run_id)
+    if not queued.created:
+        return _redirect(
+            f"/runs/{run_id}",
+            "A refresh is already queued for this Run.",
+            "error",
+        )
+    return _redirect(
+        f"/runs/{run_id}",
+        "ALM refresh queued. The Worker will re-import this Run and then review it.",
     )
 
 
@@ -932,10 +1147,60 @@ def process_reviews(
             "AI review is disabled. Configure the local model before processing.",
             "error",
         )
-    queued = queue_stale_reviews(db, workspace.id)
+    result = queue_latest_alm_changes(db, workspace.id)
+    if result.sync_id is None:
+        return _redirect(
+            redirect_path,
+            "No completed ALM synchronization is available.",
+            "error",
+        )
     return _redirect(
         redirect_path,
-        f"Review queue refreshed: {queued} stale Runs queued. The laptop worker will process them.",
+        f"Latest ALM changes: {result.changed} review-content changes found; "
+        f"{result.queued} queued, {result.already_reviewed} already reviewed, "
+        f"{result.already_active} already waiting or running.",
+    )
+
+
+@router.post("/actions/cancel-review-jobs")
+def cancel_review_jobs(
+    workspace_id: int = Form(...),
+    job_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None or workspace.archived:
+        return _redirect("/", "Workspace not found.", "error")
+    removed = cancel_queued_reviews(db, workspace.id, job_id)
+    if job_id is not None:
+        message = (
+            f"Queued Review job {job_id} removed."
+            if removed
+            else f"Review job {job_id} is no longer waiting and was not removed."
+        )
+    else:
+        message = f"Removed {removed} queued Review jobs from {workspace.name}."
+    return _redirect(f"/?workspace={workspace.id}", message)
+
+
+@router.post("/actions/retry-failed-reviews")
+def retry_failed_reviews(
+    workspace_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}"
+    ai_config = db.get(AiConfig, 1)
+    if ai_config is None or not ai_config.enabled:
+        return _redirect(
+            redirect_path,
+            "AI review is disabled. Configure the model before retrying.",
+            "error",
+        )
+    queued = queue_failed_reviews(db, workspace.id)
+    return _redirect(
+        redirect_path,
+        f"Failed Review retry queued: {queued} Runs. Previous failures were retained.",
     )
 
 
@@ -960,7 +1225,9 @@ def rereview_runs(
     return _redirect(
         redirect_path,
         f"Re-review queued: {result.queued} of {result.matched} matching Runs. "
-        f"{result.already_active} already active. Previous results were retained.",
+        f"{result.already_active} already active, "
+        f"{result.manually_resolved} skipped as manually resolved. "
+        "Previous results were retained.",
     )
 
 
@@ -1225,6 +1492,7 @@ def configuration(
             "ai_config": ai_config,
             "evidence_config": evidence_config,
             "prompt": prompt,
+            "skill_catalog": _skill_catalog(),
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
@@ -1236,7 +1504,10 @@ def test_ai(
     ai_base_url: str = Form(...),
     model_name: str = Form(...),
     timeout_seconds: int = Form(...),
+    ai_api_key: str = Form(""),
+    clear_ai_api_key: bool = Form(False),
     workspace_id: int | None = Form(None),
+    db: Session = Depends(get_db),
 ):
     redirect_path = (
         f"/ops/configuration?workspace={workspace_id}"
@@ -1249,10 +1520,17 @@ def test_ai(
             "AI connectivity must be tested on the laptop worker.",
             "error",
         )
+    saved_config = db.get(AiConfig, 1)
+    submitted_api_key = ai_api_key.strip()
     ai_config = AiConfig(
         id=1,
         base_url=ai_base_url.strip(),
         model_name=model_name.strip(),
+        api_key=(
+            ""
+            if clear_ai_api_key
+            else submitted_api_key or (saved_config.api_key if saved_config else "")
+        ),
         timeout_seconds=max(1, timeout_seconds),
         enabled=False,
     )
@@ -1282,14 +1560,18 @@ def save_configuration(
     ai_base_url: str = Form(...),
     model_name: str = Form(...),
     timeout_seconds: int = Form(...),
+    ai_api_key: str = Form(""),
+    clear_ai_api_key: bool = Form(False),
+    review_concurrency: int = Form(1),
     ai_enabled: bool = Form(False),
     allowed_network_root: str = Form(""),
     local_html_fallback_root: str = Form(""),
-    network_evidence_enabled: bool = Form(False),
-    image_review_enabled: bool = Form(False),
-    allow_insecure_image_transport: bool = Form(False),
+    external_evidence_review_enabled: bool = Form(False),
     equipment_review_enabled: bool = Form(False),
     equipment_area_filter: str = Form(""),
+    review_queue_paused: bool = Form(False),
+    sync_queue_paused: bool = Form(False),
+    queue_priority: int = Form(0),
     prompt_name: str = Form(...),
     prompt_template: str = Form(...),
     db: Session = Depends(get_db),
@@ -1303,6 +1585,9 @@ def save_configuration(
     workspace.name = workspace_name.strip()
     workspace.equipment_review_enabled = equipment_review_enabled
     workspace.equipment_area_filter = equipment_area_filter.strip()
+    workspace.review_queue_paused = review_queue_paused
+    workspace.sync_queue_paused = sync_queue_paused
+    workspace.queue_priority = max(-1000, min(1000, queue_priority))
     sync_config = workspace_sync_config(db, workspace.id)
     if sync_config is None:
         sync_config = SyncConfig(
@@ -1372,7 +1657,13 @@ def save_configuration(
         db.add(ai_config)
     ai_config.base_url = ai_base_url.strip().rstrip("/")
     ai_config.model_name = model_name.strip()
+    submitted_api_key = ai_api_key.strip()
+    if clear_ai_api_key:
+        ai_config.api_key = ""
+    elif submitted_api_key:
+        ai_config.api_key = submitted_api_key
     ai_config.timeout_seconds = max(1, timeout_seconds)
+    ai_config.review_concurrency = max(1, min(4, review_concurrency))
     ai_config.enabled = ai_enabled
 
     evidence_config = workspace_evidence_config(db, workspace.id)
@@ -1382,9 +1673,9 @@ def save_configuration(
     evidence_config.workspace_id = workspace.id
     evidence_config.allowed_network_root = allowed_network_root.strip().rstrip("\\/")
     evidence_config.local_html_fallback_root = local_html_fallback_root.strip().rstrip("\\/")
-    evidence_config.network_evidence_enabled = network_evidence_enabled
-    evidence_config.image_review_enabled = image_review_enabled
-    evidence_config.allow_insecure_image_transport = allow_insecure_image_transport
+    evidence_config.external_evidence_review_enabled = (
+        external_evidence_review_enabled
+    )
 
     active_prompt = db.scalar(select(PromptVersion).where(PromptVersion.is_active.is_(True)))
     if active_prompt is None or (
@@ -1411,6 +1702,52 @@ def save_configuration(
         "Configuration and schedule saved. Reviews were not queued automatically."
         f"{schedule_note}",
     )
+
+
+@router.post("/actions/workspace-queue")
+def update_workspace_queue(
+    workspace_id: int = Form(...),
+    action: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None or workspace.archived:
+        return _redirect("/", "Workspace not found.", "error")
+    redirect_path = f"/?workspace={workspace.id}"
+    if action == "pause-review":
+        workspace.review_queue_paused = True
+        message = (
+            f"Review queue paused for {workspace.name}. The current running job, if any, "
+            "will finish; no new jobs from this Workspace will start."
+        )
+    elif action == "resume-review":
+        workspace.review_queue_paused = False
+        message = f"Review queue resumed for {workspace.name}."
+    elif action == "pause-all":
+        workspace.review_queue_paused = True
+        workspace.sync_queue_paused = True
+        message = (
+            f"All queues paused for {workspace.name}. Running work will finish safely."
+        )
+    elif action == "resume-all":
+        workspace.review_queue_paused = False
+        workspace.sync_queue_paused = False
+        message = f"All queues resumed for {workspace.name}."
+    elif action == "prioritize":
+        highest_priority = db.scalar(select(func.max(Workspace.queue_priority))) or 0
+        workspace.queue_priority = min(1000, highest_priority + 10)
+        workspace.review_queue_paused = False
+        message = (
+            f"{workspace.name} is now the next priority at level "
+            f"{workspace.queue_priority}."
+        )
+    elif action == "normal-priority":
+        workspace.queue_priority = 0
+        message = f"{workspace.name} priority reset to normal."
+    else:
+        return _redirect(redirect_path, "Unknown queue action.", "error")
+    db.commit()
+    return _redirect(redirect_path, message)
 
 
 @router.post("/ops/workspaces")

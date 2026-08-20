@@ -1,0 +1,10 @@
+[
+  {
+    "input": {"review_step": 1, "expected": "The report shows Passed.", "images": [{"media_id": "step-1-image-1", "relative_name": "Step1.png"}]},
+    "output": {"review_step": 1, "status": "pass", "reason": "The supplied image clearly shows the expected Passed result.", "observed_media_ids": ["step-1-image-1"]}
+  },
+  {
+    "input": {"review_step": 2, "expected": "The value is visible.", "images": [{"media_id": "step-2-image-1", "relative_name": "Step2.png"}]},
+    "output": {"review_step": 2, "status": "manual", "reason": "The relevant value is not readable in the supplied image.", "observed_media_ids": ["step-2-image-1"]}
+  }
+]

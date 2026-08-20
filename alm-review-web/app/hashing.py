@@ -12,6 +12,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _BREAK_RE = re.compile(r"<(?:br\s*/?|/p|/div)>\s*", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
+_NUMBERED_ITEM_RE = re.compile(r"(?<!\S)(?P<number>[1-9]\d?)\.(?!\d)\s*")
 
 
 def normalize_text(value: Any) -> str:
@@ -32,27 +33,71 @@ def actual_format_profile(value: Any) -> dict[str, Any]:
     text = unescape(_TAG_RE.sub("", text)).strip("\n")
     lines = text.splitlines()
     signals: list[dict[str, Any]] = []
-    repeated_spaces = sum(len(re.findall(r" {2,}", line)) for line in lines)
-    leading_whitespace_lines = [
-        index for index, line in enumerate(lines, start=1) if line and line[0].isspace()
+    repeated_space_widths = [
+        len(match.group())
+        for line in lines
+        for match in re.finditer(r"[ \t]{2,}", line.strip(" \t"))
     ]
-    trailing_whitespace_lines = [
-        index for index, line in enumerate(lines, start=1) if line.rstrip() != line
+    leading_whitespace = [
+        (index, len(line) - len(line.lstrip()))
+        for index, line in enumerate(lines, start=1)
+        if line and line[0].isspace()
     ]
-    blank_line_runs = len(re.findall(r"\n[ \t]*\n", text))
-    if repeated_spaces:
-        signals.append({"type": "repeated_spaces", "count": repeated_spaces})
-    if leading_whitespace_lines:
+    blank_line_runs: list[int] = []
+    consecutive_blank_lines = 0
+    for line in lines:
+        if not line.strip():
+            consecutive_blank_lines += 1
+        else:
+            if consecutive_blank_lines >= 2:
+                blank_line_runs.append(consecutive_blank_lines)
+            consecutive_blank_lines = 0
+    if consecutive_blank_lines >= 2:
+        blank_line_runs.append(consecutive_blank_lines)
+
+    if len(repeated_space_widths) >= 3 or any(
+        width >= 4 for width in repeated_space_widths
+    ):
         signals.append(
-            {"type": "leading_whitespace", "lines": leading_whitespace_lines[:20]}
+            {
+                "type": "repeated_spaces",
+                "count": len(repeated_space_widths),
+                "max_width": max(repeated_space_widths),
+            }
         )
-    if trailing_whitespace_lines:
+    if len(leading_whitespace) >= 3 and len(
+        {width for _, width in leading_whitespace}
+    ) > 1:
         signals.append(
-            {"type": "trailing_whitespace", "lines": trailing_whitespace_lines[:20]}
+            {
+                "type": "inconsistent_leading_whitespace",
+                "lines": [index for index, _ in leading_whitespace[:20]],
+            }
         )
     if blank_line_runs:
-        signals.append({"type": "blank_line_runs", "count": blank_line_runs})
+        signals.append(
+            {
+                "type": "blank_line_runs",
+                "count": len(blank_line_runs),
+                "max_consecutive": max(blank_line_runs),
+            }
+        )
     return {"layout_text": text, "signals": signals}
+
+
+def _numbered_items(value: str) -> dict[int, str]:
+    matches = list(_NUMBERED_ITEM_RE.finditer(value))
+    numbers = [int(match.group("number")) for match in matches]
+    if len(numbers) < 2 or len(numbers) != len(set(numbers)):
+        return {}
+    return {
+        number: value[
+            match.end() : matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(value)
+        ].strip()
+        for index, (number, match) in enumerate(zip(numbers, matches, strict=True))
+    }
 
 
 def _digest(value: Any) -> str:
@@ -115,7 +160,9 @@ def review_content(record: dict[str, Any]) -> dict[str, Any]:
     return content
 
 
-def review_payload(record: dict[str, Any]) -> dict[str, Any]:
+def review_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
     content = review_content(record)
     raw_steps = (record.get("run") or {}).get("steps") or []
     execution_date = content["execution_date"]
@@ -128,6 +175,17 @@ def review_payload(record: dict[str, Any]) -> dict[str, Any]:
         step["actual_format"] = actual_format_profile(
             raw.get("actualText", raw.get("actual"))
         )
+        expected_items = _numbered_items(step["expected"])
+        actual_items = _numbered_items(step["actual"])
+        if expected_items or actual_items:
+            step["numbered_comparison"] = [
+                {
+                    "number": number,
+                    "expected": expected_items.get(number, ""),
+                    "actual": actual_items.get(number, ""),
+                }
+                for number in sorted(expected_items.keys() | actual_items.keys())
+            ]
         attachment_declared = bool(raw.get("attachment") or raw.get("attachmentContents"))
         step["attachment_declared"] = attachment_declared
         step["evidence_profile"] = step_evidence_profile(

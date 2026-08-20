@@ -121,7 +121,9 @@ class AiConfig(Base):
         String(1000), default="http://161.92.92.153:6000/v1/chat/completions"
     )
     model_name: Mapped[str] = mapped_column(String(255), default="qwen3")
+    api_key: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    review_concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -136,13 +138,7 @@ class EvidenceConfig(Base):
     workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     allowed_network_root: Mapped[str] = mapped_column(String(1500), default="")
     local_html_fallback_root: Mapped[str] = mapped_column(String(1500), default="")
-    network_evidence_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
-    image_review_enabled: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
-    allow_insecure_image_transport: Mapped[bool] = mapped_column(
+    external_evidence_review_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
@@ -225,8 +221,11 @@ class SyncJob(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     active_key: Mapped[str | None] = mapped_column(String(64))
+    run_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     requested_by: Mapped[str] = mapped_column(String(128), default="web", nullable=False)
+    full_refresh: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    cursor_json: Mapped[str | None] = mapped_column(Text)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="")
     progress_stage: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
@@ -273,6 +272,7 @@ class ReviewResult(Base):
     criteria_json: Mapped[str | None] = mapped_column(LongText)
     step_results_json: Mapped[str | None] = mapped_column(LongText)
     warnings_json: Mapped[str | None] = mapped_column(LongText)
+    pipeline_json: Mapped[str | None] = mapped_column(LongText)
     raw_response: Mapped[str] = mapped_column(LongText, default="")
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -329,6 +329,13 @@ class Workspace(Base):
     legacy_policy_adopted: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
+    review_queue_paused: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    sync_queue_paused: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    queue_priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import AlmRun, ReviewJob
 from app.services.review_policy import current_review_policy_key
-from app.services.reviews import current_review
+from app.services.review_status import current_reviews, is_force_qualified
+from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
 from app.services.workspaces import resolve_workspace
 
 REREVIEW_SCOPES = {
@@ -25,6 +26,7 @@ class RereviewQueueResult:
     matched: int
     queued: int
     already_active: int
+    manually_resolved: int
     batch_id: str | None
 
 
@@ -42,6 +44,160 @@ class RereviewProgress:
     failed: int
     skipped: int
     percent: float
+
+
+@dataclass(frozen=True)
+class WorkspaceReviewProgress:
+    total: int
+    reviewed: int
+    qualified: int
+    force_qualified: int
+    unqualified: int
+    manual: int
+    pending: int
+    review_failed: int
+    queued: int
+    running: int
+    percent: float
+
+
+def workspace_review_progress(
+    db: Session,
+    workspace_id: int | None = None,
+) -> WorkspaceReviewProgress:
+    workspace = resolve_workspace(db, workspace_id)
+    runs = db.scalars(
+        select(AlmRun).where(
+            AlmRun.workspace_id == workspace.id,
+            AlmRun.run_status == "Passed",
+            AlmRun.current_revision_id.is_not(None),
+        )
+    ).all()
+    reviews = current_reviews(
+        db,
+        runs,
+        current_review_policy_key(db, workspace.id),
+    )
+    status_counts = {
+        status: sum(review.final_status == status for review in reviews.values())
+        for status in (
+            "qualified",
+            "unqualified",
+            "needs_manual_review",
+            "pending_review",
+            "review_failed",
+        )
+    }
+    current_revision_ids = [
+        run.current_revision_id
+        for run in runs
+        if run.current_revision_id is not None
+    ]
+    job_counts = dict(
+        db.execute(
+            select(ReviewJob.status, func.count())
+            .where(
+                ReviewJob.workspace_id == workspace.id,
+                ReviewJob.revision_id.in_(current_revision_ids),
+                ReviewJob.status.in_(("queued", "running")),
+            )
+            .group_by(ReviewJob.status)
+        ).all()
+    )
+    reviewed = (
+        status_counts["qualified"]
+        + status_counts["unqualified"]
+        + status_counts["needs_manual_review"]
+    )
+    total = len(runs)
+    return WorkspaceReviewProgress(
+        total=total,
+        reviewed=reviewed,
+        qualified=status_counts["qualified"],
+        force_qualified=sum(is_force_qualified(review) for review in reviews.values()),
+        unqualified=status_counts["unqualified"],
+        manual=status_counts["needs_manual_review"],
+        pending=status_counts["pending_review"],
+        review_failed=status_counts["review_failed"],
+        queued=job_counts.get("queued", 0),
+        running=job_counts.get("running", 0),
+        percent=round(reviewed * 100 / total, 1) if total else 0.0,
+    )
+
+
+def queue_run_review(db: Session, run: AlmRun) -> ReviewJob | None:
+    """Queue the AI review for one Run, reusing an active or retryable job."""
+    if run.current_revision_id is None:
+        return None
+    job = db.scalar(
+        select(ReviewJob)
+        .where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.revision_id == run.current_revision_id,
+            ReviewJob.status.in_(("queued", "running")),
+        )
+        .order_by(desc(ReviewJob.id))
+        .limit(1)
+    )
+    if job is not None:
+        return job
+    job = db.scalar(
+        select(ReviewJob)
+        .where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.revision_id == run.current_revision_id,
+            ReviewJob.status == "failed",
+            ReviewJob.attempt_count < MAX_REVIEW_JOB_ATTEMPTS,
+        )
+        .order_by(desc(ReviewJob.id))
+        .limit(1)
+    )
+    if job is None:
+        job = ReviewJob(
+            workspace_id=run.workspace_id,
+            run_id=run.run_id,
+            revision_id=run.current_revision_id,
+            status="queued",
+        )
+        db.add(job)
+    else:
+        job.status = "queued"
+        job.error_message = ""
+        job.completed_at = None
+    db.commit()
+    return job
+
+
+def active_run_review_job(db: Session, run: AlmRun) -> ReviewJob | None:
+    """The queued or running job for the Run's current revision, if any."""
+    if run.current_revision_id is None:
+        return None
+    return db.scalar(
+        select(ReviewJob)
+        .where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.revision_id == run.current_revision_id,
+            ReviewJob.status.in_(("queued", "running")),
+        )
+        .order_by(desc(ReviewJob.id))
+        .limit(1)
+    )
+
+
+def cancel_queued_reviews(
+    db: Session,
+    workspace_id: int,
+    job_id: int | None = None,
+) -> int:
+    statement = delete(ReviewJob).where(
+        ReviewJob.workspace_id == workspace_id,
+        ReviewJob.status == "queued",
+    )
+    if job_id is not None:
+        statement = statement.where(ReviewJob.id == job_id)
+    result = db.execute(statement)
+    db.commit()
+    return result.rowcount or 0
 
 
 def queue_rereviews(
@@ -67,12 +223,18 @@ def queue_rereviews(
         )
         .order_by(AlmRun.run_id)
     ).all()
-    matched_runs = [
-        run
-        for run in runs
-        if target_statuses is None
-        or current_review(db, run, policy_key).final_status in target_statuses
-    ]
+    matched_runs = []
+    manually_resolved = 0
+    for run in runs:
+        review = current_review(db, run, policy_key)
+        if target_statuses is not None and review.final_status not in target_statuses:
+            continue
+        if review.manual_decision is not None:
+            # An operator already ruled on this revision; a new AI verdict would
+            # replace the result the decision is attached to and silently drop it.
+            manually_resolved += 1
+            continue
+        matched_runs.append(run)
     active_revision_ids = set(
         db.scalars(
             select(ReviewJob.revision_id).where(
@@ -102,8 +264,65 @@ def queue_rereviews(
         matched=len(matched_runs),
         queued=len(runs_to_queue),
         already_active=len(matched_runs) - len(runs_to_queue),
+        manually_resolved=manually_resolved,
         batch_id=batch_id,
     )
+
+
+def queue_failed_reviews(db: Session, workspace_id: int | None = None) -> int:
+    workspace = resolve_workspace(db, workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
+    runs = db.scalars(
+        select(AlmRun).where(
+            AlmRun.workspace_id == workspace.id,
+            AlmRun.run_status == "Passed",
+            AlmRun.current_revision_id.is_not(None),
+        )
+    ).all()
+    failed_runs = [
+        run
+        for run in runs
+        if current_review(db, run, policy_key).final_status == "review_failed"
+    ]
+    active_revision_ids = set(
+        db.scalars(
+            select(ReviewJob.revision_id).where(
+                ReviewJob.revision_id.in_(
+                    run.current_revision_id for run in failed_runs
+                ),
+                ReviewJob.status.in_(("queued", "running")),
+            )
+        ).all()
+    )
+    queued = 0
+    for run in failed_runs:
+        if run.current_revision_id in active_revision_ids:
+            continue
+        failed_job = db.scalar(
+            select(ReviewJob)
+            .where(
+                ReviewJob.revision_id == run.current_revision_id,
+                ReviewJob.status == "failed",
+            )
+            .order_by(desc(ReviewJob.id))
+            .limit(1)
+        )
+        if failed_job is not None and failed_job.attempt_count < 3:
+            failed_job.status = "queued"
+            failed_job.error_message = ""
+            failed_job.completed_at = None
+        else:
+            db.add(
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=run.run_id,
+                    revision_id=run.current_revision_id,
+                    status="queued",
+                )
+            )
+        queued += 1
+    db.commit()
+    return queued
 
 
 def latest_rereview_progress(

@@ -9,36 +9,127 @@
   </div>
   <div class="actions">
     <form method="get" action="/"><label class="workspace-switcher"><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspaces %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label></form>
-    <a class="button secondary button-link" href="/ops/configuration?workspace={{ current_workspace.id }}">Configuration</a>
-    <a class="button secondary button-link" href="/ops/equipment">Equipment registry</a>
-    <form class="docx-import-action" method="post" action="/actions/import-docx" enctype="multipart/form-data">
-      <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
-      <label class="button secondary" title="Import an ALM Design Verification Record">
-        Import ALM Word
-        <input type="file" name="document" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required onchange="this.form.submit()">
-      </label>
-    </form>
-    <form method="post" action="/actions/sync-alm"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Queue ALM sync</button></form>
-    <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Refresh review queue</button></form>
+    <nav class="page-links" aria-label="Workspace pages">
+      <a href="/ops/configuration?workspace={{ current_workspace.id }}">Configuration</a>
+      <a href="/ops/equipment">Equipment registry</a>
+    </nav>
+    <div class="action-group" role="group" aria-label="ALM data intake">
+      <form class="docx-import-action" method="post" action="/actions/import-docx" enctype="multipart/form-data">
+        <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
+        <label class="button secondary" title="Import an ALM Design Verification Record">
+          Import ALM Word
+          <input type="file" name="document" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required onchange="this.form.submit()">
+        </label>
+      </form>
+      <form method="post" action="/actions/sync-alm"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Sync from ALM</button></form>
+      <form method="post" action="/actions/sync-alm" onsubmit="return confirm('Re-read every Run from ALM? This ignores the unchanged-Run shortcut and takes much longer.');"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="full_refresh" value="true"><button class="button secondary" type="submit">Full resync</button></form>
+    </div>
+  </div>
+</section>
+
+<section class="status-panels" aria-label="Live progress">
+  <article class="sync-progress" data-sync-progress aria-labelledby="sync-progress-title">
+    <div class="sync-progress-heading">
+      <div>
+        <p class="eyebrow">ALM SYNCHRONIZATION{% if active_sync_job %} / JOB {{ active_sync_job.id }}{% endif %}</p>
+        <h2 id="sync-progress-title"><span data-sync-stage>{% if active_sync_job %}{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}Collecting{% else %}{{ active_sync_job.progress_stage|replace('_', ' ')|title }}{% endif %}{% else %}Latest synchronization{% endif %}</span></h2>
+      </div>
+      <strong class="sync-progress-status" data-sync-status>{% if active_sync_job %}{{ active_sync_job.status|upper }}{% elif latest_sync_job %}{{ latest_sync_job.status|upper }}{% else %}NOT STARTED{% endif %}</strong>
+    </div>
+    <p class="sync-progress-message" data-sync-message>{% if active_sync_job %}{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}{% elif latest_sync_job %}{% if sync_display_at %}{% if latest_sync_job.completed_at %}Completed{% else %}Started{% endif %} {{ sync_display_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}{% if latest_sync_job.status == 'completed' %} &middot; {{ latest_sync_job.runs_discovered }} Passed Runs selected{% elif latest_sync_job.status == 'failed' and latest_sync_job.error_message %} &middot; {{ latest_sync_job.error_message }}{% endif %}{% else %}No synchronization has run yet. Use Sync from ALM to import Passed Runs.{% endif %}</p>
+    {% if active_sync_job %}
+    <div class="sync-progress-facts">
+      <span><strong data-sync-folders-processed>{{ active_sync_job.folders_processed }}</strong> / <strong data-sync-folders-discovered>{{ active_sync_job.folders_discovered }}</strong> folders</span>
+      <span><strong data-sync-test-sets>{{ active_sync_job.test_sets_discovered }}</strong> Test Sets</span>
+      <span><strong data-sync-runs>{{ active_sync_job.runs_discovered }}</strong> Runs selected</span>
+      <span><strong data-sync-skipped>{{ active_sync_job.runs_skipped }}</strong> unchanged skipped</span>
+    </div>
+    {% endif %}
+    {% if active_sync_job and active_sync_job.status == 'queued' and not worker_online %}<p class="queue-warning">Worker is offline; this synchronization starts when the Worker connects.</p>{% endif %}
+  </article>
+  <article class="review-progress" data-review-progress data-queue-status aria-labelledby="review-progress-title">
+    <div class="review-progress-heading">
+      <div>
+        <p class="eyebrow">AI REVIEW</p>
+        <h2 id="review-progress-title">{% if review_progress.total %}<span data-progress-reviewed>{{ review_progress.reviewed }}</span> of <span data-progress-total>{{ review_progress.total }}</span> reviewed{% else %}No reviewable Runs yet{% endif %}</h2>
+      </div>
+      {% if review_progress.total %}<strong class="review-progress-percent" data-progress-percent>{{ review_progress.percent }}%</strong>{% endif %}
+    </div>
+    {% if review_progress.total %}<progress data-progress-bar max="{{ review_progress.total }}" value="{{ review_progress.reviewed }}">{{ review_progress.percent }}%</progress>{% endif %}
+    <div class="review-progress-facts">
+      <span>Worker <strong data-worker-status>{{ worker_heartbeat.status if worker_online else 'offline' }}</strong><span data-worker-id>{% if worker_heartbeat %} &middot; {{ worker_heartbeat.worker_id }}{% endif %}</span></span>
+      <span><strong data-review-queued>{{ review_job_counts.get('queued', 0) }}</strong> queued</span>
+      <span><strong data-review-running>{{ review_job_counts.get('running', 0) }}</strong> / <strong data-review-concurrency>{{ ai_config.review_concurrency if ai_config else 1 }}</strong> running</span>
+      <span><strong data-review-failed>{{ review_progress.review_failed or 0 }}</strong> Runs failed</span>
+      <span class="queue-warning" data-queue-warning{% if worker_online or not review_job_counts.get('queued', 0) %} hidden{% endif %}>Worker is offline; queued jobs will wait.</span>
+    </div>
+  </article>
+</section>
+<script>
+  (() => {
+    const panel = document.querySelector("[data-queue-status]");
+    async function refreshQueueStatus() {
+      try {
+        const response = await fetch("/api/queue-status?workspace={{ current_workspace.id }}", { cache: "no-store" });
+        if (!response.ok) return;
+        const status = await response.json();
+        panel.querySelector("[data-worker-status]").textContent = status.worker_status;
+        panel.querySelector("[data-worker-id]").textContent = status.worker_id ? ` \u00b7 ${status.worker_id}` : "";
+        panel.querySelector("[data-review-queued]").textContent = status.queued;
+        panel.querySelector("[data-review-running]").textContent = status.running;
+        panel.querySelector("[data-review-concurrency]").textContent = status.review_concurrency;
+        panel.querySelector("[data-queue-warning]").hidden = status.worker_online || status.queued === 0;
+      } catch (_) {
+        return;
+      }
+    }
+    refreshQueueStatus();
+    window.setInterval(refreshQueueStatus, 5000);
+  })();
+</script>
+
+<section class="queue-operations" aria-labelledby="queue-operations-title">
+  <div class="queue-operations-heading">
+    <div><p class="eyebrow">WORKSPACE QUEUE</p><h2 id="queue-operations-title">{{ current_workspace.name }}</h2></div>
+    <div class="queue-badges"><span>Priority <strong>{{ current_workspace.queue_priority }}</strong></span><span>Review <strong>{{ 'paused' if current_workspace.review_queue_paused else 'active' }}</strong></span><span>Sync <strong>{{ 'paused' if current_workspace.sync_queue_paused else 'active' }}</strong></span></div>
+  </div>
+  {% if current_workspace.review_queue_paused and review_job_counts.get('running', 0) %}<p class="queue-note">Paused for new Review jobs. The current running job will finish safely.</p>{% endif %}
+  <div class="queue-actions" role="group" aria-label="Queue review work">
+    <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Review new &amp; changed Runs</button></form>
     <form class="rereview-action" method="post" action="/actions/rereview">
       <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
-      <label><span>Re-review scope</span><select name="scope" aria-label="Re-review scope">
+      <label><span>Re-run review on</span><select name="scope" aria-label="Re-run review scope">
         <option value="unqualified_manual">Unqualified + Manual</option>
         <option value="unqualified">Unqualified only</option>
         <option value="manual">Manual only</option>
         <option value="all">All Passed Runs</option>
       </select></label>
-      <button class="button secondary" type="submit">Queue re-review</button>
+      <button class="button secondary" type="submit">Re-run review</button>
     </form>
+    {% if review_progress.review_failed %}<form method="post" action="/actions/retry-failed-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Retry {{ review_progress.review_failed }} failed Runs</button></form>{% endif %}
   </div>
-</section>
-
-<section class="queue-strip" aria-label="Review queue status">
-  <span>Worker <strong>{{ worker_heartbeat.status if worker_online else 'offline' }}</strong>{% if worker_heartbeat %} · {{ worker_heartbeat.worker_id }}{% endif %}</span>
-  {% if active_sync_job %}<span>ALM sync <strong>{{ active_sync_job.status }}</strong></span>{% endif %}
-  <span><strong>{{ review_job_counts.get('queued', 0) }}</strong> queued</span>
-  <span><strong>{{ review_job_counts.get('running', 0) }}</strong> running</span>
-  <span><strong>{{ review_job_counts.get('failed', 0) }}</strong> failed</span>
+  <p class="queue-hint">New &amp; changed covers the latest completed ALM sync and skips Runs that already have a result. Re-run review repeats review on Runs that already have a result.</p>
+  <div class="queue-actions" role="group" aria-label="Queue control">
+    <form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="{{ 'resume-review' if current_workspace.review_queue_paused else 'pause-review' }}"><button class="button secondary" type="submit">{{ 'Resume Review queue' if current_workspace.review_queue_paused else 'Pause Review queue' }}</button></form>
+    <form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="{{ 'resume-sync' if current_workspace.sync_queue_paused else 'pause-sync' }}"><button class="button secondary" type="submit">{{ 'Resume Sync queue' if current_workspace.sync_queue_paused else 'Pause Sync queue' }}</button></form>
+    <form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="prioritize"><button class="button primary" type="submit">Make next priority</button></form>
+    {% if current_workspace.queue_priority %}<form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="normal-priority"><button class="button secondary" type="submit">Reset priority</button></form>{% endif %}
+    {% if review_job_counts.get('queued', 0) %}<form method="post" action="/actions/cancel-review-jobs" onsubmit="return confirm('Remove all waiting Review jobs from this Workspace? Running jobs will continue.');"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Remove all waiting</button></form>{% endif %}
+  </div>
+  {% if queue_overview %}
+  <div class="queue-overview">
+    {% for item in queue_overview %}
+    <div class="queue-workspace{% if item.workspace.id == current_workspace.id %} current{% endif %}">
+      <div><strong><a href="/ops/configuration?workspace={{ item.workspace.id }}">{{ item.workspace.name }}</a></strong><small>Priority {{ item.workspace.queue_priority }}{% if item.workspace.review_queue_paused %} · Review paused{% endif %}</small></div>
+      <span><strong>{{ item.running }}</strong> running</span><span><strong>{{ item.queued }}</strong> queued</span>
+      <div class="queue-workspace-actions"><a class="button secondary button-link" href="/ops/configuration?workspace={{ item.workspace.id }}">Settings</a>{% if item.workspace.id != current_workspace.id %}<form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ item.workspace.id }}"><input type="hidden" name="action" value="prioritize"><button class="button secondary" type="submit">Prioritize</button></form>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if queued_review_preview %}
+  <details class="queue-preview"><summary>Preview next queued Review jobs</summary><div class="table-scroll"><table><thead><tr><th>Order</th><th>Workspace</th><th>Job</th><th>Run</th><th>Test</th><th>Queued</th><th>State</th><th>Action</th></tr></thead><tbody>{% for item in queued_review_preview %}<tr><td>{{ loop.index }}</td><td>{{ item.workspace.name }}</td><td>#{{ item.job.id }}</td><td>{{ item.job.run_id }}</td><td>{{ item.run.test_name if item.run else '-' }}</td><td>{{ item.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td><td>{{ 'Paused' if item.workspace.review_queue_paused else 'Ready' }}</td><td>{% if item.workspace.id == current_workspace.id %}<form method="post" action="/actions/cancel-review-jobs"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="job_id" value="{{ item.job.id }}"><button class="button secondary" type="submit">Remove</button></form>{% else %}-{% endif %}</td></tr>{% endfor %}</tbody></table></div></details>
+  {% endif %}
 </section>
 
 {% if review_update_count %}
@@ -55,21 +146,6 @@
 {% endif %}
 
 {% if active_sync_job %}
-<section class="sync-progress" data-sync-progress aria-labelledby="sync-progress-title">
-  <div class="sync-progress-heading">
-    <div>
-      <p class="eyebrow">ALM SYNCHRONIZATION / JOB {{ active_sync_job.id }}</p>
-      <h2 id="sync-progress-title"><span data-sync-stage>{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}Collecting{% else %}{{ active_sync_job.progress_stage|replace('_', ' ')|title }}{% endif %}</span></h2>
-    </div>
-    <strong class="sync-progress-status" data-sync-status>{{ active_sync_job.status|upper }}</strong>
-  </div>
-  <p class="sync-progress-message" data-sync-message>{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}</p>
-  <div class="sync-progress-facts">
-    <span><strong data-sync-folders-processed>{{ active_sync_job.folders_processed }}</strong> / <strong data-sync-folders-discovered>{{ active_sync_job.folders_discovered }}</strong> folders</span>
-    <span><strong data-sync-test-sets>{{ active_sync_job.test_sets_discovered }}</strong> Test Sets</span>
-    <span><strong data-sync-runs>{{ active_sync_job.runs_discovered }}</strong> Runs selected</span>
-  </div>
-</section>
 <script>
   (() => {
     const panel = document.querySelector("[data-sync-progress]");
@@ -87,7 +163,9 @@
         panel.querySelector("[data-sync-folders-discovered]").textContent = progress.folders_discovered;
         panel.querySelector("[data-sync-test-sets]").textContent = progress.test_sets_discovered;
         panel.querySelector("[data-sync-runs]").textContent = progress.runs_discovered;
+        panel.querySelector("[data-sync-skipped]").textContent = progress.runs_skipped;
         if (terminalStatuses.has(progress.status)) window.clearInterval(timer);
+        if (progress.status === "completed") window.location.reload();
       } catch (_) {
         return;
       }
@@ -97,29 +175,11 @@
 </script>
 {% endif %}
 
-{% if rereview_progress %}
-<section class="review-progress" data-review-progress aria-labelledby="review-progress-title">
-  <div class="review-progress-heading">
-    <div>
-      <p class="eyebrow">LATEST RE-REVIEW</p>
-      <h2 id="review-progress-title"><span data-progress-processed>{{ rereview_progress.processed }}</span> of <span data-progress-total>{{ rereview_progress.total }}</span> processed</h2>
-    </div>
-    <strong class="review-progress-percent" data-progress-percent>{{ rereview_progress.percent }}%</strong>
-  </div>
-  <progress data-progress-bar max="{{ rereview_progress.total }}" value="{{ rereview_progress.processed }}">{{ rereview_progress.percent }}%</progress>
-  <div class="review-progress-facts">
-    <span><strong data-progress-completed>{{ rereview_progress.completed }}</strong> completed</span>
-    <span><strong data-progress-remaining>{{ rereview_progress.remaining }}</strong> remaining</span>
-    <span><strong data-progress-running>{{ rereview_progress.running }}</strong> running</span>
-    <span><strong data-progress-retrying>{{ rereview_progress.retrying }}</strong> retrying</span>
-    <span><strong data-progress-failed>{{ rereview_progress.failed }}</strong> failed</span>
-    <span>Started {{ rereview_started_at.strftime('%Y-%m-%d %H:%M:%S') }}</span>
-  </div>
-</section>
+{% if review_progress.total %}
 <script>
   (() => {
     const panel = document.querySelector("[data-review-progress]");
-    const fields = ["processed", "total", "completed", "remaining", "running", "retrying", "failed"];
+    const fields = ["reviewed", "total"];
     async function refreshReviewProgress() {
       try {
         const response = await fetch("/api/review-progress?workspace={{ current_workspace.id }}", { cache: "no-store" });
@@ -130,9 +190,10 @@
           panel.querySelector(`[data-progress-${field}]`).textContent = progress[field];
         }
         panel.querySelector("[data-progress-percent]").textContent = `${progress.percent}%`;
+        panel.querySelector("[data-review-failed]").textContent = progress.review_failed;
         const bar = panel.querySelector("[data-progress-bar]");
         bar.max = progress.total;
-        bar.value = progress.processed;
+        bar.value = progress.reviewed;
       } catch (_) {
         return;
       }
@@ -145,6 +206,7 @@
 <section class="metric-grid" aria-label="Review totals">
   <a class="metric metric-total" href="/?workspace={{ current_workspace.id }}&amp;status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
   <a class="metric metric-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
+  <a class="metric metric-force-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified"><span>Force qualified</span><strong>{{ status_counts.get('force_qualified', 0) }}</strong></a>
   <a class="metric metric-unqualified" href="/?workspace={{ current_workspace.id }}&amp;status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
   <a class="metric metric-manual" href="/?workspace={{ current_workspace.id }}&amp;status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
   <a class="metric metric-pending" href="/?workspace={{ current_workspace.id }}&amp;status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
@@ -205,10 +267,6 @@
     {% for code1_id, label, count in owner_counts[:10] %}
       <a href="/?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ code1_id|urlencode }}&amp;query={{ query|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_owner_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
     {% else %}<p class="empty">No synced data.</p>{% endfor %}
-    </div>
-    <div class="sync-state">
-      <span>Last synchronization</span>
-      {% if recent_sync %}<strong>{{ recent_sync.status|capitalize }}</strong><small>{{ recent_sync.started_at.strftime('%Y-%m-%d %H:%M') }}</small>{% else %}<strong>Not started</strong>{% endif %}
     </div>
   </aside>
 </section>

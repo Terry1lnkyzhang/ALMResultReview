@@ -1,0 +1,8 @@
+[skill]
+id = "html-evidence-review"
+name = "HTML Evidence Review"
+version = "0.1.0"
+stage = "report_review"
+status = "planned"
+enabled = false
+note = "Rules and contract are not implemented yet. HTML results currently use the deterministic parser."

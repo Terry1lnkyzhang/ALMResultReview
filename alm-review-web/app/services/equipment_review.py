@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterable
 from datetime import date, datetime
@@ -225,7 +224,7 @@ def analyze_equipment_steps(
             "review_step": review_step,
             "status": "not_applicable",
             "code": "not_applicable",
-            "summary": "未检测到需要台账核验的受控设备。",
+            "summary": "No controlled equipment requires registry checks.",
             "required": strong_requirement,
             "execution_date": execution_date.isoformat() if execution_date else None,
             "reported_identifiers": reported_identifiers,
@@ -261,40 +260,46 @@ def analyze_equipment_steps(
                 check["status"] = "fail"
                 check["code"] = "equipment_identifier_conflict"
                 check["summary"] = (
-                    f"设备编号 {', '.join(explicit_ids)} 与填写的 Serial Number "
-                    f"指向不同台账设备 {', '.join(serial_ids)}。"
+                    f"Equipment ID {', '.join(explicit_ids)} and the recorded serial "
+                    f"number point to different registry devices "
+                    f"{', '.join(serial_ids)}."
                 )
             elif unknown_asset_ids:
                 check["status"] = "fail"
                 check["code"] = "equipment_not_found"
                 check["summary"] = (
-                    "以下设备编号不在台账中：" + ", ".join(unknown_asset_ids)
+                    "These equipment IDs are not in the registry: "
+                    + ", ".join(unknown_asset_ids)
                 )
         elif unknown_asset_ids and strong_requirement:
             check.update(
                 status="fail",
                 code="equipment_not_found",
-                summary="以下设备编号不在台账中：" + ", ".join(unknown_asset_ids),
+                summary="These equipment IDs are not in the registry: "
+                + ", ".join(unknown_asset_ids),
             )
         elif strong_requirement:
             if reported_identifiers:
                 check.update(
                     status="fail",
                     code="equipment_not_found",
-                    summary="已填写设备标识，但无法在台账中匹配："
+                    summary="Equipment identifiers were recorded but cannot be "
+                    "matched in the registry: "
                     + ", ".join(reported_identifiers),
                 )
             else:
                 check.update(
                     status="fail",
                     code="equipment_missing",
-                    summary="步骤要求记录设备及校准信息，但 Actual 未填写可识别的设备标识。",
+                    summary="The Step requires equipment and calibration records, "
+                    "but Actual records no identifiable equipment.",
                 )
         elif device_hint or reported_identifiers or unknown_asset_ids:
             check.update(
                 status="manual",
                 code="equipment_role_ambiguous",
-                summary="无法确定该步骤记录的是受控设备还是 DUT/其他标识。",
+                summary="It is unclear whether the Step records controlled equipment "
+                "or a DUT/other identifier.",
             )
             ambiguous.append(
                 {
@@ -347,15 +352,21 @@ def _evaluate_matches(
         )
         snapshots.append(snapshot)
         if execution_date is None:
-            manuals.append(f"{item.equipment_id} 缺少可解析的步骤执行日期")
+            manuals.append(
+                f"{item.equipment_id} has no parsable Step execution date"
+            )
         elif _calibration_not_required(item):
             pass
         elif item.calibration_date is None or item.calibration_due_date is None:
-            manuals.append(f"{item.equipment_id} 台账缺少校准起止日期")
+            manuals.append(
+                f"{item.equipment_id} has no calibration period in the registry"
+            )
         elif not item.calibration_date <= execution_date <= item.calibration_due_date:
             failures.append(
-                f"{item.equipment_id} 执行日期 {execution_date.isoformat()} 不在校准有效期 "
-                f"{item.calibration_date.isoformat()} 至 {item.calibration_due_date.isoformat()} 内"
+                f"{item.equipment_id} execution date {execution_date.isoformat()} is "
+                f"outside the calibration period "
+                f"{item.calibration_date.isoformat()} to "
+                f"{item.calibration_due_date.isoformat()}"
             )
         status_is_not_in_use = (
             item.equipment_status
@@ -367,8 +378,8 @@ def _evaluate_matches(
                 {
                     "type": "equipment_status",
                     "summary": (
-                        f"{item.equipment_id} 当前状态为 {item.equipment_status}；"
-                        "该状态不代表执行当天状态。"
+                        f"{item.equipment_id} is currently {item.equipment_status}; "
+                        "this status does not describe the execution day."
                     ),
                 }
             )
@@ -383,88 +394,35 @@ def _evaluate_matches(
             expected_range = (item.calibration_date, item.calibration_due_date)
             if item_range != expected_range:
                 failures.append(
-                    f"{item.equipment_id} 在 Actual 记录的校准期 "
-                    f"{item_range[0].isoformat()} 至 {item_range[1].isoformat()} 与台账 "
-                    f"{item.calibration_date.isoformat()} 至 "
-                    f"{item.calibration_due_date.isoformat()} 不一致"
+                    f"{item.equipment_id} calibration period recorded in Actual "
+                    f"{item_range[0].isoformat()} to {item_range[1].isoformat()} "
+                    f"does not match the registry "
+                    f"{item.calibration_date.isoformat()} to "
+                    f"{item.calibration_due_date.isoformat()}"
                 )
         if execution_date and not item_range[0] <= execution_date <= item_range[1]:
             failures.append(
-                f"{item.equipment_id} 的步骤执行日期不在 Actual 记录的校准有效期内"
+                f"{item.equipment_id} Step execution date is outside the calibration "
+                "period recorded in Actual"
             )
 
     check["matches"] = snapshots
     if failures:
-        check.update(status="fail", code="equipment_invalid", summary="；".join(failures))
+        check.update(status="fail", code="equipment_invalid", summary="; ".join(failures))
     elif manuals:
-        check.update(status="manual", code="equipment_date_unknown", summary="；".join(manuals))
+        check.update(
+            status="manual", code="equipment_date_unknown", summary="; ".join(manuals)
+        )
     else:
         check.update(
             status="pass",
             code="equipment_valid",
-            summary=f"已核验 {len(matched)} 台设备，设备标识及执行日期均符合台账。",
+            summary=(
+                f"Verified {len(matched)} device(s); identifiers and execution dates "
+                "match the registry."
+            ),
         )
     return check
-
-
-def equipment_disambiguation_prompt(ambiguous: list[dict[str, Any]]) -> str:
-    return (
-        "You classify equipment references for an ALM test review. Return JSON only with "
-        'shape {"steps":[{"step":1,"role":"controlled_equipment|dut_or_other|uncertain",'
-        '"required":true,"selected_equipment_ids":[],"reason":"..."}]}. '
-        "Use only candidate equipment IDs supplied for that step; never invent an ID. "
-        "A DUT/product serial is not controlled equipment. A simulator, meter, stopwatch, "
-        "analyzer, phantom or calibrated test tool is controlled equipment. `required` means "
-        "the Description/Expected requires recording controlled-equipment identity. Equipment "
-        "selected in a previous Step may remain in use in a later Step; use the supplied "
-        "previously_matched_equipment_ids only when the later Step refers to the same device.\n\n"
-        + json.dumps(ambiguous, ensure_ascii=False, indent=2)
-    )
-
-
-def parse_equipment_disambiguation(
-    response_content: str,
-    ambiguous: list[dict[str, Any]],
-) -> dict[int, dict[str, Any]]:
-    value = response_content.strip()
-    if value.startswith("```"):
-        lines = value.splitlines()
-        value = "\n".join(lines[1:-1]).strip()
-    parsed = json.loads(value)
-    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
-    if not isinstance(raw_steps, list):
-        raise ValueError("Equipment disambiguation response must contain a steps array.")
-    expected = {item["step"]: item for item in ambiguous}
-    if {item.get("step") for item in raw_steps if isinstance(item, dict)} != set(expected):
-        raise ValueError("Equipment disambiguation steps do not match the requested steps.")
-    decisions: dict[int, dict[str, Any]] = {}
-    for item in raw_steps:
-        step = item["step"]
-        role = str(item.get("role", "")).strip()
-        required = item.get("required")
-        selected = item.get("selected_equipment_ids", [])
-        reason = _normalized(item.get("reason"))[:300]
-        if role not in {"controlled_equipment", "dut_or_other", "uncertain"}:
-            raise ValueError(f"Invalid equipment role {role!r}.")
-        if not isinstance(required, bool) or not isinstance(selected, list):
-            raise ValueError("Equipment disambiguation required/selected fields are invalid.")
-        allowed = {
-            candidate["equipment_id"]
-            for candidate in expected[step]["candidate_equipment"]
-        }
-        invalid_selection = any(
-            not isinstance(identifier, str) or identifier not in allowed
-            for identifier in selected
-        )
-        if invalid_selection:
-            raise ValueError("Equipment disambiguation selected an unavailable equipment ID.")
-        decisions[step] = {
-            "role": role,
-            "required": required,
-            "selected_equipment_ids": selected,
-            "reason": reason,
-        }
-    return decisions
 
 
 def apply_equipment_disambiguation(
@@ -484,14 +442,15 @@ def apply_equipment_disambiguation(
             check.update(
                 status="not_applicable",
                 code="not_applicable",
-                summary="AI 消歧判定该标识属于 DUT 或非受控设备。",
+                summary="AI disambiguation decided the identifier belongs to a DUT "
+                "or a non-controlled object.",
             )
             continue
         if decision["role"] == "uncertain":
             check.update(
                 status="manual",
                 code="equipment_role_ambiguous",
-                summary="AI 无法确认设备角色，需要人工审核。" + (
+                summary="AI could not confirm the equipment role." + (
                     f" {decision['reason']}" if decision["reason"] else ""
                 ),
             )
@@ -514,19 +473,22 @@ def apply_equipment_disambiguation(
             check.update(
                 status="fail",
                 code="equipment_not_found",
-                summary="AI 确认这是受控设备，但标识无法在台账中匹配："
+                summary="AI confirmed controlled equipment, but the identifiers "
+                "cannot be matched in the registry: "
                 + ", ".join(dict.fromkeys(identifiers)),
             )
         elif decision["required"]:
             check.update(
                 status="fail",
                 code="equipment_missing",
-                summary="AI 确认步骤要求记录受控设备，但 Actual 未填写设备标识。",
+                summary="AI confirmed the Step requires controlled equipment, but "
+                "Actual records no equipment identifier.",
             )
         else:
             check.update(
                 status="manual",
                 code="equipment_unidentified",
-                summary="检测到受控设备语义，但没有足够标识用于台账核验。",
+                summary="Controlled equipment semantics were detected, but there is "
+                "no identifier sufficient for a registry check.",
             )
     return checks

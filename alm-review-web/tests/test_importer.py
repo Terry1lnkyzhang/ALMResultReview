@@ -11,10 +11,15 @@ from app.models import (
     ReviewResult,
     RunRevision,
     RunStep,
+    SyncHistory,
     Workspace,
 )
 from app.services.alm import _latest_run
-from app.services.importer import import_data, queue_stale_reviews
+from app.services.importer import (
+    import_data,
+    queue_latest_alm_changes,
+    unchanged_run_check,
+)
 
 
 def sample_data() -> dict:
@@ -116,6 +121,24 @@ def test_import_persists_location_and_creates_revision_when_it_changes() -> None
         assert revisions[0].review_hash != revisions[1].review_hash
 
 
+def test_unchanged_run_check_only_skips_runs_with_the_stored_last_modified() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        import_data(sample_data(), db)
+        run = db.get(AlmRun, 152711)
+        assert run is not None
+        is_unchanged = unchanged_run_check(db, run.workspace_id)
+
+        assert is_unchanged({"id": "152711", "last-modified": "2026-07-30 04:40:00"})
+        assert not is_unchanged(
+            {"id": "152711", "last-modified": "2026-08-19 09:00:00"}
+        )
+        assert not is_unchanged({"id": "999999", "last-modified": "2026-07-30 04:40:00"})
+        assert not is_unchanged({"id": "152711"})
+
+
 def test_import_preserves_step_rich_text_for_display() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -139,11 +162,15 @@ def test_import_does_not_queue_unchanged_run_when_review_policy_changed() -> Non
 
     with Session(engine) as db:
         import_data(sample_data(), db)
-        assert queue_stale_reviews(db) == 1
         run = db.get(AlmRun, 152711)
-        job = db.scalar(select(ReviewJob).where(ReviewJob.run_id == 152711))
-        assert run is not None and job is not None
-        job.status = "completed"
+        assert run is not None
+        job = ReviewJob(
+            run_id=run.run_id,
+            revision_id=run.current_revision_id,
+            status="completed",
+        )
+        db.add(job)
+        db.flush()
         db.add(
             ReviewResult(
                 job_id=job.id,
@@ -165,25 +192,6 @@ def test_import_does_not_queue_unchanged_run_when_review_policy_changed() -> Non
 
         assert result.unchanged_runs == 1
     assert [item.status for item in jobs] == ["completed"]
-
-
-def test_stale_review_scan_does_not_requeue_superseded_revision() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-
-    with Session(engine) as db:
-        import_data(sample_data(), db)
-        assert queue_stale_reviews(db) == 1
-        job = db.scalar(select(ReviewJob).where(ReviewJob.run_id == 152711))
-        assert job is not None
-        job.status = "superseded"
-        db.commit()
-
-        queued = queue_stale_reviews(db)
-
-        assert queued == 0
-        jobs = db.scalars(select(ReviewJob).where(ReviewJob.run_id == 152711)).all()
-        assert [item.status for item in jobs] == ["superseded"]
 
 
 def test_latest_run_only_considers_passed_results() -> None:
@@ -237,10 +245,18 @@ def test_same_alm_run_id_is_isolated_between_workspaces() -> None:
 
         import_data(sample_data(), db, workspace_id=first_workspace.id)
         import_data(sample_data(), db, workspace_id=second_workspace.id)
-        assert queue_stale_reviews(db, first_workspace.id) == 1
-        assert queue_stale_reviews(db, second_workspace.id) == 1
-
         runs = db.scalars(select(AlmRun).order_by(AlmRun.workspace_id)).all()
+        for run in runs:
+            db.add(
+                ReviewJob(
+                    workspace_id=run.workspace_id,
+                    run_id=run.run_id,
+                    revision_id=run.current_revision_id,
+                    status="queued",
+                )
+            )
+        db.commit()
+
         jobs = db.scalars(select(ReviewJob).order_by(ReviewJob.workspace_id)).all()
 
         assert len(runs) == 2
@@ -254,3 +270,102 @@ def test_same_alm_run_id_is_isolated_between_workspaces() -> None:
             first_workspace.id,
             second_workspace.id,
         ]
+
+
+def test_queue_latest_alm_changes_only_queues_unreviewed_latest_sync_revisions() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        import_data(
+            sample_data(),
+            db,
+            source="alm:folder:42",
+            workspace_id=workspace.id,
+        )
+        first = queue_latest_alm_changes(db, workspace.id)
+        first_job = db.scalar(select(ReviewJob))
+        assert first_job is not None
+        first_job.status = "completed"
+        db.add(
+            ReviewResult(
+                workspace_id=workspace.id,
+                job_id=first_job.id,
+                run_id=first_job.run_id,
+                revision_id=first_job.revision_id,
+                prompt_version_id=1,
+                source_hash="a" * 64,
+                review_policy_key="old-policy",
+                model_name="test-model",
+                verdict="qualified",
+            )
+        )
+        db.commit()
+
+        changed_data = deepcopy(sample_data())
+        changed_data["records"][0]["run"]["steps"][0]["actualText"] += " updated"
+        import_data(
+            changed_data,
+            db,
+            source="alm:folder:42",
+            workspace_id=workspace.id,
+        )
+        second = queue_latest_alm_changes(db, workspace.id)
+        duplicate = queue_latest_alm_changes(db, workspace.id)
+
+        assert (first.changed, first.queued) == (1, 1)
+        assert (second.changed, second.queued, second.already_reviewed) == (1, 1, 0)
+        assert (duplicate.changed, duplicate.queued, duplicate.already_active) == (1, 0, 1)
+        assert db.scalar(select(func.count()).select_from(ReviewJob)) == 2
+
+
+def test_queue_latest_alm_changes_does_not_queue_unchanged_current_revisions() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        import_data(
+            sample_data(),
+            db,
+            source="alm:folder:42",
+            workspace_id=workspace.id,
+        )
+        queue_latest_alm_changes(db, workspace.id)
+        job = db.scalar(select(ReviewJob))
+        assert job is not None
+        job.status = "completed"
+        db.add(
+            ReviewResult(
+                workspace_id=workspace.id,
+                job_id=job.id,
+                run_id=job.run_id,
+                revision_id=job.revision_id,
+                prompt_version_id=1,
+                source_hash="a" * 64,
+                review_policy_key="old-policy",
+                model_name="test-model",
+                verdict="qualified",
+            )
+        )
+        db.commit()
+        import_data(
+            sample_data(),
+            db,
+            source="alm:folder:42",
+            workspace_id=workspace.id,
+        )
+        # Second-resolution timestamps let an earlier revision fall into this window.
+        latest_sync = db.scalars(
+            select(SyncHistory).order_by(SyncHistory.id.desc()).limit(1)
+        ).one()
+        latest_sync.started_at = db.scalar(select(func.min(RunRevision.created_at)))
+        db.commit()
+
+        result = queue_latest_alm_changes(db, workspace.id)
+
+        assert (result.changed, result.queued) == (0, 0)
+        assert db.scalar(select(func.count()).select_from(ReviewJob)) == 1

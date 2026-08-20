@@ -7,18 +7,58 @@ from app.models import EvidenceConfig, Workspace
 def test_image_evidence_capabilities_default_to_disabled() -> None:
     config = EvidenceConfig()
 
-    assert config.network_evidence_enabled is None or not config.network_evidence_enabled
-    assert config.image_review_enabled is None or not config.image_review_enabled
-    assert (
-        config.allow_insecure_image_transport is None
-        or not config.allow_insecure_image_transport
-    )
+    assert not config.external_evidence_review_enabled
 
 
 def test_workspace_equipment_review_defaults_to_enabled() -> None:
     workspace = Workspace(name="Project", slug="project")
 
     assert workspace.equipment_review_enabled is None or workspace.equipment_review_enabled
+
+
+def test_workspace_queue_controls_are_added_to_existing_schema() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE workspaces ("
+                "id INTEGER PRIMARY KEY, "
+                "name VARCHAR(255) NOT NULL UNIQUE, "
+                "slug VARCHAR(128) NOT NULL UNIQUE, "
+                "equipment_review_enabled BOOLEAN NOT NULL DEFAULT 1, "
+                "equipment_area_filter VARCHAR(255) NOT NULL DEFAULT '', "
+                "legacy_policy_adopted BOOLEAN NOT NULL DEFAULT 0, "
+                "archived BOOLEAN NOT NULL DEFAULT 0, "
+                "created_at DATETIME NOT NULL, "
+                "updated_at DATETIME NULL"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO workspaces "
+                "(id, name, slug, created_at) "
+                "VALUES (1, 'Project', 'project', CURRENT_TIMESTAMP)"
+            )
+        )
+
+    ensure_compatible_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("workspaces")}
+    assert {
+        "review_queue_paused",
+        "sync_queue_paused",
+        "queue_priority",
+    } <= columns
+    assert "specialist_reviews_enabled" not in columns
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT review_queue_paused, sync_queue_paused, queue_priority "
+                "FROM workspaces WHERE id = 1"
+            )
+        ).one()
+    assert tuple(row) == (0, 0, 0)
 
 
 def test_evidence_capability_flags_are_added_to_existing_schema() -> None:
@@ -39,18 +79,48 @@ def test_evidence_capability_flags_are_added_to_existing_schema() -> None:
 
     columns = {column["name"] for column in inspect(engine).get_columns("evidence_configs")}
     assert {
-        "network_evidence_enabled",
-        "image_review_enabled",
-        "allow_insecure_image_transport",
+        "external_evidence_review_enabled",
     } <= columns
     with engine.connect() as connection:
         row = connection.execute(
             text(
-                "SELECT network_evidence_enabled, image_review_enabled, "
-                "allow_insecure_image_transport FROM evidence_configs WHERE id = 1"
+                "SELECT external_evidence_review_enabled "
+                "FROM evidence_configs WHERE id = 1"
             )
         ).one()
-    assert tuple(row) == (0, 0, 0)
+    assert tuple(row) == (0,)
+
+
+def test_legacy_evidence_flags_enable_combined_external_review() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE evidence_configs ("
+                "id INTEGER PRIMARY KEY, "
+                "network_evidence_enabled BOOLEAN NOT NULL DEFAULT 0, "
+                "image_review_enabled BOOLEAN NOT NULL DEFAULT 0"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO evidence_configs "
+                "(id, network_evidence_enabled, image_review_enabled) "
+                "VALUES (1, 1, 0)"
+            )
+        )
+
+    ensure_compatible_schema(engine)
+
+    with engine.connect() as connection:
+        enabled = connection.scalar(
+            text(
+                "SELECT external_evidence_review_enabled "
+                "FROM evidence_configs WHERE id = 1"
+            )
+        )
+    assert enabled == 1
 
 
 def test_equipment_serial_number_index_is_added_to_existing_schema() -> None:
@@ -94,6 +164,49 @@ def test_worker_claim_columns_are_added_to_existing_review_jobs() -> None:
         "ix_review_jobs_claimed_by",
         "ix_review_jobs_lease_expires_at",
     } <= indexes
+
+
+def test_pipeline_trace_column_is_added_to_existing_review_results() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE review_results ("
+                "id INTEGER PRIMARY KEY, "
+                "workspace_id INTEGER NULL, "
+                "review_policy_key VARCHAR(64) NOT NULL DEFAULT ''"
+                ")"
+            )
+        )
+
+    ensure_compatible_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("review_results")}
+    assert "pipeline_json" in columns
+
+
+def test_ai_review_settings_are_added_to_existing_config() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE ai_configs ("
+                "id INTEGER PRIMARY KEY, "
+                "enabled BOOLEAN NOT NULL DEFAULT 0"
+                ")"
+            )
+        )
+        connection.execute(text("INSERT INTO ai_configs (id) VALUES (1)"))
+
+    ensure_compatible_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("ai_configs")}
+    assert {"api_key", "review_concurrency"} <= columns
+    with engine.connect() as connection:
+        values = connection.execute(
+            text("SELECT api_key, review_concurrency FROM ai_configs WHERE id = 1")
+        ).one()
+    assert values == ("", 1)
 
 
 def test_sync_progress_columns_are_added_to_existing_sync_jobs() -> None:

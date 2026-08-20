@@ -1,0 +1,21 @@
+[skill]
+id = "equipment-role"
+name = "Equipment Role Review"
+version = "1.0.2"
+stage = "equipment_review"
+enabled = true
+
+[contract]
+version = "1"
+input_collection = "steps"
+output_collection = "decisions"
+identity_field = "review_step"
+
+[capabilities]
+required = ["review.step_text", "equipment.registry.candidates"]
+optional = ["equipment.previous_matches"]
+forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry.write"]
+
+[model]
+temperature = 0
+max_tokens = 1024

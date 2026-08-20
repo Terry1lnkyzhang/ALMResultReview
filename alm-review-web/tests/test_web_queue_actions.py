@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from fastapi import Request
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -12,9 +14,22 @@ from app.models import (
     RunRevision,
     SyncConfig,
     SyncJob,
+    WorkerHeartbeat,
     Workspace,
 )
-from app.web import create_workspace, import_snapshot, review_run_now, sync_alm
+from app.web import (
+    cancel_review_jobs,
+    create_workspace,
+    import_snapshot,
+    process_reviews,
+    queue_status,
+    retry_failed_reviews,
+    review_progress,
+    review_run_now,
+    save_configuration,
+    sync_alm,
+    update_workspace_queue,
+)
 
 
 def test_import_snapshot_requires_configured_path(monkeypatch) -> None:
@@ -93,6 +108,98 @@ def test_review_action_only_creates_a_database_job() -> None:
         assert job.status == "queued"
 
 
+def test_process_reviews_queues_only_latest_alm_changes(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add_all((workspace, AiConfig(id=1, enabled=True)))
+        db.commit()
+        called = []
+
+        def queue_latest(_db, workspace_id):
+            called.append(workspace_id)
+            return SimpleNamespace(
+                sync_id=7,
+                changed=19,
+                queued=9,
+                already_reviewed=10,
+                already_active=0,
+            )
+
+        monkeypatch.setattr("app.web.queue_latest_alm_changes", queue_latest)
+
+        response = process_reviews(db, workspace.id)
+
+        assert called == [workspace.id]
+        assert response.status_code == 303
+        assert "19%20review-content%20changes" in response.headers["location"]
+        assert "9%20queued" in response.headers["location"]
+
+
+def test_retry_failed_reviews_queues_only_current_failed_runs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        runs = []
+        for run_id in (41, 42):
+            run = AlmRun(
+                workspace_id=workspace.id,
+                run_id=run_id,
+                run_status="Passed",
+                source_hash=str(run_id) * 32,
+                review_hash=str(run_id) * 32,
+                raw_json="{}",
+            )
+            db.add(run)
+            db.flush()
+            revision = RunRevision(
+                run_id=run.run_id,
+                revision_number=1,
+                source_hash=run.source_hash,
+                review_hash=run.review_hash,
+                snapshot_json="{}",
+            )
+            db.add(revision)
+            db.flush()
+            run.current_revision_id = revision.id
+            runs.append(run)
+        db.add_all(
+            (
+                AiConfig(id=1, enabled=True),
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=runs[0].run_id,
+                    revision_id=runs[0].current_revision_id,
+                    status="failed",
+                    attempt_count=3,
+                    error_message="AI timeout",
+                ),
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=runs[1].run_id,
+                    revision_id=runs[1].current_revision_id,
+                    status="completed",
+                ),
+            )
+        )
+        db.commit()
+
+        response = retry_failed_reviews(workspace.id, db)
+
+        jobs = db.scalars(select(ReviewJob).order_by(ReviewJob.id)).all()
+        assert response.status_code == 303
+        assert response.headers["location"].startswith(f"/?workspace={workspace.id}")
+        assert [(job.run_id, job.status) for job in jobs] == [
+            (41, "failed"),
+            (42, "completed"),
+            (41, "queued"),
+        ]
+
+
 def test_create_workspace_creates_independent_sync_and_evidence_configs() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -113,3 +220,299 @@ def test_create_workspace_creates_independent_sync_and_evidence_configs() -> Non
         assert evidence_config is not None
         assert sync_config.id is not None
         assert evidence_config.id is not None
+
+
+def test_pause_review_queue_preserves_existing_jobs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(
+            ReviewJob(
+                workspace_id=workspace.id,
+                run_id=42,
+                revision_id=7,
+                status="queued",
+            )
+        )
+        db.commit()
+
+        response = update_workspace_queue(workspace.id, "pause-review", db)
+
+        db.refresh(workspace)
+        assert response.status_code == 303
+        assert workspace.review_queue_paused
+        assert db.scalar(select(ReviewJob)).status == "queued"
+
+
+def test_cancel_review_jobs_removes_waiting_job_but_not_running_job() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        queued_job = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=41,
+            revision_id=1,
+            status="queued",
+        )
+        running_job = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=42,
+            revision_id=2,
+            status="running",
+        )
+        db.add_all((queued_job, running_job))
+        db.commit()
+
+        response = cancel_review_jobs(workspace.id, queued_job.id, db)
+
+        remaining = db.scalars(select(ReviewJob)).all()
+        assert response.status_code == 303
+        assert response.headers["location"].startswith(f"/?workspace={workspace.id}")
+        assert [(job.run_id, job.status) for job in remaining] == [(42, "running")]
+
+
+def test_cancel_all_review_jobs_removes_only_workspace_waiting_jobs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        first = Workspace(name="Project A", slug="project-a")
+        second = Workspace(name="Project B", slug="project-b")
+        db.add_all((first, second))
+        db.flush()
+        db.add_all(
+            (
+                ReviewJob(
+                    workspace_id=first.id,
+                    run_id=41,
+                    revision_id=1,
+                    status="queued",
+                ),
+                ReviewJob(
+                    workspace_id=first.id,
+                    run_id=42,
+                    revision_id=2,
+                    status="running",
+                ),
+                ReviewJob(
+                    workspace_id=second.id,
+                    run_id=43,
+                    revision_id=3,
+                    status="queued",
+                ),
+            )
+        )
+        db.commit()
+
+        response = cancel_review_jobs(first.id, None, db)
+
+        remaining = db.scalars(select(ReviewJob).order_by(ReviewJob.run_id)).all()
+        assert response.status_code == 303
+        assert [(job.run_id, job.status) for job in remaining] == [
+            (42, "running"),
+            (43, "queued"),
+        ]
+
+
+def test_prioritize_workspace_resumes_review_and_sets_highest_priority() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        normal = Workspace(name="Normal", slug="normal", queue_priority=20)
+        urgent = Workspace(
+            name="Urgent",
+            slug="urgent",
+            queue_priority=0,
+            review_queue_paused=True,
+        )
+        db.add_all((normal, urgent))
+        db.commit()
+
+        response = update_workspace_queue(urgent.id, "prioritize", db)
+
+        db.refresh(urgent)
+        assert response.status_code == 303
+        assert not urgent.review_queue_paused
+        assert urgent.queue_priority == 30
+
+
+def test_queue_status_reports_live_counts_concurrency_and_worker(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add_all(
+            (
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=41,
+                    revision_id=1,
+                    status="queued",
+                ),
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=42,
+                    revision_id=2,
+                    status="running",
+                    lease_expires_at=datetime.utcnow() + timedelta(minutes=1),
+                ),
+                ReviewJob(
+                    workspace_id=workspace.id,
+                    run_id=43,
+                    revision_id=3,
+                    status="failed",
+                ),
+                AiConfig(id=1, enabled=True, review_concurrency=4),
+                WorkerHeartbeat(
+                    worker_id="worker-one",
+                    hostname="test-host",
+                    status="idle",
+                    last_seen_at=datetime.utcnow(),
+                ),
+            )
+        )
+        db.commit()
+        monkeypatch.setattr(
+            "app.web.get_settings",
+            lambda: SimpleNamespace(worker_poll_seconds=5),
+        )
+
+        status = queue_status(workspace.id, db)
+
+        assert status == {
+            "queued": 1,
+            "running": 1,
+            "review_concurrency": 4,
+            "worker_online": True,
+            "worker_status": "working",
+            "worker_id": "worker-one",
+        }
+
+
+def test_review_progress_reports_current_workspace_runs(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.commit()
+        monkeypatch.setattr(
+            "app.web.workspace_review_progress",
+            lambda _db, _workspace_id: SimpleNamespace(
+                total=10,
+                reviewed=7,
+                qualified=4,
+                force_qualified=1,
+                unqualified=2,
+                manual=1,
+                pending=2,
+                review_failed=1,
+                queued=2,
+                running=1,
+                percent=70.0,
+            ),
+        )
+
+        progress = review_progress(workspace.id, db)
+
+        assert progress == {
+            "available": True,
+            "total": 10,
+            "reviewed": 7,
+            "qualified": 4,
+            "force_qualified": 1,
+            "unqualified": 2,
+            "manual": 1,
+            "pending": 2,
+            "review_failed": 1,
+            "queued": 2,
+            "running": 1,
+            "percent": 70.0,
+        }
+
+
+def test_configuration_clamps_and_persists_review_concurrency() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(
+            SyncConfig(
+                workspace_id=workspace.id,
+                name="Project A",
+                server_url="http://alm.example.test",
+                domain="domain",
+                project="project",
+                folder_id=42,
+            )
+        )
+        db.commit()
+        request = Request(
+            {
+                "type": "http",
+                "app": SimpleNamespace(state=SimpleNamespace()),
+            }
+        )
+
+        def save(
+            review_concurrency: int,
+            ai_api_key: str = "",
+            clear_ai_api_key: bool = False,
+        ):
+            return save_configuration(
+                request=request,
+                workspace_id=workspace.id,
+                workspace_name="Project A",
+                server_url="http://alm.example.test",
+                domain="domain",
+                project="project",
+                folder_id=42,
+                folder_path="Root",
+                schedule_hour=1,
+                schedule_minute=30,
+                sync_enabled=False,
+                ai_base_url="http://ai.example.test/v1",
+                model_name="test-model",
+                timeout_seconds=120,
+                ai_api_key=ai_api_key,
+                clear_ai_api_key=clear_ai_api_key,
+                review_concurrency=review_concurrency,
+                ai_enabled=True,
+                allowed_network_root="",
+                local_html_fallback_root="",
+                external_evidence_review_enabled=False,
+                equipment_review_enabled=False,
+                equipment_area_filter="",
+                review_queue_paused=False,
+                sync_queue_paused=False,
+                queue_priority=0,
+                prompt_name="Test prompt",
+                prompt_template="Review {{RUN_CONTENT}}",
+                db=db,
+            )
+
+        assert save(10, ai_api_key="saved-key").status_code == 303
+        ai_config = db.get(AiConfig, 1)
+        assert ai_config.review_concurrency == 4
+        assert ai_config.api_key == "saved-key"
+        evidence_config = db.scalar(
+            select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
+        )
+        assert evidence_config is not None
+        assert save(0).status_code == 303
+        assert ai_config.review_concurrency == 1
+        assert ai_config.api_key == "saved-key"
+        assert save(
+            2,
+            clear_ai_api_key=True,
+        ).status_code == 303
+        assert ai_config.api_key == ""

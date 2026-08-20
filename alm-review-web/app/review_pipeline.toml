@@ -1,0 +1,39 @@
+# Declared review stage order. The executor refuses to build a trace whose stages
+# do not match this list exactly, so a new stage cannot ship undeclared.
+version = 1
+
+[[stage]]
+id = "routing"
+skill = ""
+gate = ""
+writes = ["evidence_routing", "reference_decisions"]
+
+[[stage]]
+id = "text_review"
+skill = "alm-text-review"
+gate = ""
+writes = ["applicability", "step_issues", "step_warnings"]
+
+[[stage]]
+id = "image_review"
+skill = "image-evidence-review"
+gate = "external_evidence_review_enabled"
+writes = ["step_issues.screenshot"]
+
+[[stage]]
+id = "report_review"
+skill = ""
+gate = "external_evidence_review_enabled"
+writes = ["html_evidence"]
+
+[[stage]]
+id = "equipment_review"
+skill = "equipment-role"
+gate = "equipment_review_enabled"
+writes = ["step_equipment"]
+
+[[stage]]
+id = "aggregation"
+skill = ""
+gate = ""
+writes = ["criteria", "issue_summary", "verdict"]

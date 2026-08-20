@@ -106,6 +106,54 @@ def test_unspecified_phantom_still_requires_reference_lookup() -> None:
     assert profile["reference_lookup_required"]
 
 
+def test_narrative_local_directory_is_not_declared_as_external_evidence() -> None:
+    profile = step_evidence_profile(
+        "Delete the report.",
+        r"The corresponding folder in D:\PerformanceData\Report is removed.",
+        r"The report and folder in D:\PerformanceData\Report were removed.",
+        "2026-08-06",
+        False,
+    )
+
+    assert [path["raw"] for path in profile["actual_paths"]] == [
+        r"D:\PerformanceData\Report"
+    ]
+    assert not profile["path_validation_required"]
+
+
+def test_screenshot_path_is_declared_as_external_evidence() -> None:
+    profile = step_evidence_profile(
+        "Take a screenshot.",
+        "The screenshot proves the result.",
+        r"Saved screenshots as follow path: C:\Evidence\step1.png",
+        "2026-08-06",
+        False,
+    )
+
+    assert profile["path_validation_required"]
+
+
+def test_direct_image_path_routes_to_visual_review_without_screenshot_wording() -> None:
+    profile = step_evidence_profile(
+        "Record the result.",
+        "The result is available.",
+        r"Result: \\server\approved\Step1.png",
+        "2026-08-06",
+        False,
+    )
+
+    assert profile["screenshot_review_required"]
+    assert profile["routing"] == {
+        "intent": "image_evidence",
+        "triggers": ["direct_image_path:.png"],
+        "actions": ["validate_path", "load_images", "send_to_visual_ai"],
+        "decision_source": "deterministic",
+        "confidence": 1.0,
+        "reason": "A direct image path was detected.",
+        "manual_required": False,
+    }
+
+
 def test_date_comparison_uses_alm_execution_date() -> None:
     dates = extract_dates("Executed 2026/07/30, checked 2026-07-29", "2026-07-30")
 

@@ -11,29 +11,38 @@ from app.models import (
     AiConfig,
     AlmRun,
     EquipmentRegistry,
-    PromptVersion,
     ReviewResult,
     Workspace,
 )
+from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.08.12.1"
+REVIEW_ENGINE_VERSION = "2026.08.20.2"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
+    _APP_DIRECTORY / "review_pipeline.toml",
     _APP_DIRECTORY / "hashing.py",
     _APP_DIRECTORY / "services" / "evidence.py",
     _APP_DIRECTORY / "services" / "equipment_review.py",
     _APP_DIRECTORY / "services" / "html_evidence.py",
     _APP_DIRECTORY / "services" / "image_evidence.py",
+    _APP_DIRECTORY / "services" / "review_pipeline.py",
+    _APP_DIRECTORY / "services" / "skill_runner.py",
     _APP_DIRECTORY / "services" / "reviews.py",
+    # Skill instructions, schemas and examples steer the verdict as much as the code.
+    *sorted(
+        path
+        for path in (_APP_DIRECTORY / "review_skills").rglob("*")
+        if path.is_file()
+    ),
 )
 
 
 def _review_implementation_hash() -> str:
     digest = hashlib.sha256()
     for path in _REVIEW_POLICY_FILES:
-        digest.update(path.name.encode("utf-8"))
+        digest.update(path.relative_to(_APP_DIRECTORY).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -43,12 +52,6 @@ def current_review_policy_key(
     workspace_id: int | None = None,
 ) -> str:
     workspace = resolve_workspace(db, workspace_id)
-    prompt = db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.is_active.is_(True))
-        .order_by(desc(PromptVersion.id))
-        .limit(1)
-    )
     ai_config = db.get(AiConfig, 1)
     evidence_config = workspace_evidence_config(db, workspace.id)
     equipment_statement = select(EquipmentRegistry).order_by(
@@ -83,25 +86,29 @@ def current_review_policy_key(
         }
         for item in equipment_registry
     ]
+    authoritative_skill_ids = ["alm-text-review"]
+    if (
+        evidence_config
+        and evidence_config.external_evidence_review_enabled
+    ):
+        authoritative_skill_ids.append("image-evidence-review")
+    if workspace.equipment_review_enabled:
+        authoritative_skill_ids.append("equipment-role")
     policy = {
         "workspace_id": workspace.id,
         "engine_version": REVIEW_ENGINE_VERSION,
         "implementation_hash": _review_implementation_hash(),
-        "prompt_id": prompt.id if prompt else None,
-        "prompt_template": prompt.template if prompt else None,
         "ai_base_url": ai_config.base_url if ai_config else None,
         "model_name": ai_config.model_name if ai_config else None,
+        "authoritative_skills": [
+            skill_policy_identity(skill_id)
+            for skill_id in authoritative_skill_ids
+        ],
         "allowed_network_root": (
             evidence_config.allowed_network_root if evidence_config else None
         ),
-        "network_evidence_enabled": bool(
-            evidence_config and evidence_config.network_evidence_enabled
-        ),
-        "image_review_enabled": bool(
-            evidence_config and evidence_config.image_review_enabled
-        ),
-        "allow_insecure_image_transport": bool(
-            evidence_config and evidence_config.allow_insecure_image_transport
+        "external_evidence_review_enabled": bool(
+            evidence_config and evidence_config.external_evidence_review_enabled
         ),
         "equipment_review_enabled": workspace.equipment_review_enabled,
         "equipment_area_filter": workspace.equipment_area_filter,

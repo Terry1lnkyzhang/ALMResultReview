@@ -7,7 +7,6 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from urllib.parse import urlparse
 
 from app.services.evidence import validate_network_evidence_path
 
@@ -18,7 +17,7 @@ _IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 _STEP_IMAGE_PATTERN = re.compile(
-    r"(?:^|[\\/_.\s-])step[\s_-]*0*(\d+)(?=$|[\\/_.\s-])",
+    r"(?:^|[\\/_.\s-])step[\s_-]*0*(\d+)[a-z]?(?=$|[\\/_.\s-])",
     re.IGNORECASE,
 )
 
@@ -230,16 +229,6 @@ class NetworkImageResolver:
             0,
         )
         return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
-
-
-def image_transport_allowed(base_url: str, *, allow_insecure: bool) -> bool:
-    parsed = urlparse(base_url)
-    if parsed.scheme.casefold() == "https":
-        return True
-    hostname = (parsed.hostname or "").casefold()
-    if hostname in {"localhost", "127.0.0.1", "::1"}:
-        return True
-    return allow_insecure
 
 
 def _has_valid_signature(content: bytes, media_type: str) -> bool:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import logging
 import mimetypes
 import xml.etree.ElementTree as ElementTree
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,16 +30,30 @@ class FolderCollectionProgress:
     folders_processed: int = 0
     test_sets_discovered: int = 0
     runs_discovered: int = 0
+    runs_skipped: int = 0
+
+
+@dataclass(frozen=True)
+class FolderBatch:
+    folder_id: str
+    folder_path: str
+    records: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    users: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 ProgressCallback = Callable[[FolderCollectionProgress, bool], None]
+UnchangedRunCheck = Callable[[dict[str, Any]], bool]
 
 
 class AlmClient:
     def __init__(self, config: SyncConfig) -> None:
         self.config = config
         self.base_url = config.server_url.rstrip("/")
-        self.client = httpx.Client(timeout=60, follow_redirects=True)
+        self.client = httpx.Client(
+            timeout=60,
+            follow_redirects=True,
+            trust_env=False,
+        )
 
     def __enter__(self) -> AlmClient:
         settings = get_settings()
@@ -242,17 +257,112 @@ def _run_location(run: dict[str, Any], location_field: str | None) -> str:
     return str(value or "").strip()
 
 
-def collect_folder(
+def _run_record(
+    alm: AlmClient,
+    folder: dict[str, Any],
+    test_set: dict[str, Any],
+    instance: dict[str, Any],
+    run: dict[str, Any],
+    location_field: str | None,
+    test_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble the importable record for one run; the shape feeds the source hash."""
+    location = _run_location(run, location_field)
+    if location:
+        run["location"] = location
+    run["steps"] = alm.entities(f"runs/{run['id']}/run-steps")
+    for step in run["steps"]:
+        if step.get("attachment") and CAPABILITIES.image_review:
+            step["attachmentContents"] = alm.image_attachments(
+                f"runs/{run['id']}/run-steps/{step['id']}/attachments"
+            )
+    test_id = str(run.get("test-id") or instance.get("test-id") or "")
+    if test_id and test_id not in test_cache:
+        test_cache[test_id] = alm.entity("tests", test_id)
+    return {
+        "folder": {"id": folder["id"], "path": folder["path"]},
+        "testSet": test_set,
+        "testInstance": instance,
+        "testOwner": (test_cache.get(test_id) or {}).get("owner"),
+        "run": run,
+    }
+
+
+def _record_users(
+    directory: list[dict[str, Any]],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    used_code1_ids = {
+        str(value).strip()
+        for record in records
+        for value in (
+            record.get("testOwner"),
+            (record.get("testInstance") or {}).get("owner"),
+            (record.get("testInstance") or {}).get("actual-tester"),
+            (record.get("run") or {}).get("owner"),
+        )
+        if value
+    }
+    return [user for user in directory if user["code1_id"] in used_code1_ids]
+
+
+def _location_field(alm: AlmClient) -> str | None:
+    try:
+        return alm.field_name_by_label("run", "Location")
+    except (httpx.HTTPError, ElementTree.ParseError):
+        logger.exception("ALM Run Location field lookup failed")
+        return None
+
+
+def collect_run(
+    config: SyncConfig,
+    test_instance_id: int,
+    folder_id: str,
+    folder_path: str,
+) -> dict[str, Any]:
+    """Fetch one Run so a single record can be refreshed without walking folders."""
+    with AlmClient(config) as alm:
+        location_field = _location_field(alm)
+        instance = alm.entity("test-instances", test_instance_id)
+        test_set = alm.entity("test-sets", instance["cycle-id"])
+        test_set["folderPath"] = folder_path
+        runs = alm.entities("runs", query=_query("testcycl-id", instance["id"]))
+        run = _latest_run(runs)
+        if run is None:
+            return {"users": [], "records": []}
+        record = _run_record(
+            alm,
+            {"id": folder_id, "path": folder_path},
+            test_set,
+            instance,
+            run,
+            location_field,
+            {},
+        )
+        try:
+            directory = alm.users()
+        except (httpx.HTTPError, ElementTree.ParseError):
+            logger.exception("ALM user directory synchronization failed")
+            directory = []
+    return {"users": _record_users(directory, [record]), "records": [record]}
+
+
+def iter_folder_batches(
     config: SyncConfig,
     progress_callback: ProgressCallback | None = None,
-) -> dict[str, Any]:
-    records: list[dict[str, Any]] = []
+    completed_folder_ids: Collection[str] = (),
+    is_unchanged_run: UnchangedRunCheck | None = None,
+) -> Iterator[FolderBatch]:
+    """Walk the Test Lab scope and yield one importable batch per folder."""
+    already_done = {str(folder_id) for folder_id in completed_folder_ids}
     folders: list[dict[str, Any]] = []
     test_sets: list[dict[str, Any]] = []
     test_cache: dict[str, dict[str, Any]] = {}
-    users: list[dict[str, Any]] = []
+    directory: list[dict[str, Any]] | None = None
     pending: deque[dict[str, Any]] = deque()
     folders_processed = 0
+    runs_collected = 0
+    runs_skipped = 0
 
     def report(stage: str, message: str, force: bool = False) -> None:
         if progress_callback is None:
@@ -264,18 +374,28 @@ def collect_folder(
                 folders_discovered=len(folders) + len(pending),
                 folders_processed=folders_processed,
                 test_sets_discovered=len(test_sets),
-                runs_discovered=len(records),
+                runs_discovered=runs_collected,
+                runs_skipped=runs_skipped,
             ),
             force,
         )
 
     report("connecting", "Connecting to ALM", True)
     with AlmClient(config) as alm:
-        try:
-            location_field = alm.field_name_by_label("run", "Location")
-        except (httpx.HTTPError, ElementTree.ParseError):
-            logger.exception("ALM Run Location field lookup failed")
-            location_field = None
+        location_field = _location_field(alm)
+
+        def batch_users(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            nonlocal directory
+            if not records:
+                return []
+            if directory is None:
+                try:
+                    directory = alm.users()
+                except (httpx.HTTPError, ElementTree.ParseError):
+                    logger.exception("ALM user directory synchronization failed")
+                    directory = []
+            return _record_users(directory, records)
+
         root = alm.entity("test-set-folders", config.folder_id)
         root["path"] = config.folder_path or str(root.get("name") or config.folder_id)
         pending.append(root)
@@ -292,6 +412,12 @@ def collect_folder(
                 pending.append(child)
             report("collecting", str(folder["path"]))
 
+            if str(folder["id"]) in already_done:
+                folders_processed += 1
+                report("collecting", str(folder["path"]), True)
+                continue
+
+            records: list[dict[str, Any]] = []
             folder_test_sets = alm.entities(
                 "test-sets", query=_query("parent-id", folder["id"])
             )
@@ -311,69 +437,48 @@ def collect_folder(
                     run = _latest_run(runs)
                     if run is None:
                         continue
-                    location = _run_location(run, location_field)
-                    if location:
-                        run["location"] = location
-                    run["steps"] = alm.entities(f"runs/{run['id']}/run-steps")
-                    for step in run["steps"]:
-                        if step.get("attachment") and CAPABILITIES.image_review:
-                            step["attachmentContents"] = alm.image_attachments(
-                                f"runs/{run['id']}/run-steps/{step['id']}/attachments"
-                            )
-
-                    test_id = str(run.get("test-id") or instance.get("test-id") or "")
-                    if test_id and test_id not in test_cache:
-                        test_cache[test_id] = alm.entity("tests", test_id)
+                    if is_unchanged_run is not None and is_unchanged_run(run):
+                        runs_skipped += 1
+                        report("collecting", str(folder["path"]))
+                        continue
                     records.append(
-                        {
-                            "folder": {"id": folder["id"], "path": folder["path"]},
-                            "testSet": test_set,
-                            "testInstance": instance,
-                            "testOwner": (test_cache.get(test_id) or {}).get("owner"),
-                            "run": run,
-                        }
+                        _run_record(
+                            alm,
+                            folder,
+                            test_set,
+                            instance,
+                            run,
+                            location_field,
+                            test_cache,
+                        )
                     )
+                    runs_collected += 1
                     report("collecting", str(folder["path"]))
-                    folders_processed += 1
-            report("collecting", str(folder["path"]), True)
 
-        used_code1_ids = {
-            str(value).strip()
-            for record in records
-            for value in (
-                record.get("testOwner"),
-                (record.get("testInstance") or {}).get("owner"),
-                (record.get("testInstance") or {}).get("actual-tester"),
-                (record.get("run") or {}).get("owner"),
+            folders_processed += 1
+            report("collecting", str(folder["path"]), True)
+            yield FolderBatch(
+                folder_id=str(folder["id"]),
+                folder_path=str(folder["path"]),
+                records=records,
+                users=batch_users(records),
             )
-            if value
-        }
-        try:
-            report("users", "Synchronizing ALM user directory", True)
-            users = [
-                user for user in alm.users() if user["code1_id"] in used_code1_ids
-            ]
-        except (httpx.HTTPError, ElementTree.ParseError):
-            logger.exception("ALM user directory synchronization failed")
 
     report("collected", "ALM collection complete", True)
 
-    return {
-        "metadata": {
-            "server": config.server_url,
-            "domain": config.domain,
-            "project": config.project,
-            "rootFolderId": str(config.folder_id),
-            "recursive": True,
-        },
-        "rootFolder": root,
-        "counts": {
-            "descendantFolders": max(0, len(folders) - 1),
-            "testSets": len(test_sets),
-            "selectedRuns": len(records),
-        },
-        "folders": folders,
-        "testSets": test_sets,
-        "users": users,
-        "records": records,
-    }
+
+def collect_folder(
+    config: SyncConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    users: list[dict[str, Any]] = []
+    seen_code1_ids: set[str] = set()
+    for batch in iter_folder_batches(config, progress_callback=progress_callback):
+        records.extend(batch.records)
+        for user in batch.users:
+            if user["code1_id"] in seen_code1_ids:
+                continue
+            seen_code1_ids.add(user["code1_id"])
+            users.append(user)
+    return {"users": users, "records": records}
