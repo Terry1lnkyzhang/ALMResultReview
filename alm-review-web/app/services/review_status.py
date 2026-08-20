@@ -8,6 +8,14 @@ from sqlalchemy.orm import Session, load_only
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
 from app.services.reviews import CurrentReview
 
+# Manual decisions that pin a Run to qualified against, or without, an AI verdict.
+FORCE_QUALIFIED_DECISIONS = frozenset({"override_qualified", "confirmed_qualified"})
+
+
+def is_force_qualified(review: CurrentReview) -> bool:
+    manual = review.manual_decision
+    return manual is not None and manual.decision in FORCE_QUALIFIED_DECISIONS
+
 
 def _review_from_result(
     result: ReviewResult,

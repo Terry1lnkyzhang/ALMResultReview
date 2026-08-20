@@ -11,7 +11,11 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=1800)
+engine_options: dict[str, object] = {"pool_pre_ping": True, "pool_recycle": 1800}
+if not settings.database_url.startswith("sqlite"):
+    # Room for concurrent review threads, the worker cycle and web requests.
+    engine_options |= {"pool_size": 10, "max_overflow": 20, "pool_timeout": 30}
+engine = create_engine(settings.database_url, **engine_options)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["steps"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["review_step", "description", "expected", "actual", "reported_identifiers", "previously_matched_equipment_ids", "candidate_equipment"],
+        "properties": {
+          "review_step": {"type": "integer", "minimum": 1},
+          "description": {"type": "string"},
+          "expected": {"type": "string"},
+          "actual": {"type": "string"},
+          "reported_identifiers": {"type": "array", "items": {"type": "string"}},
+          "previously_matched_equipment_ids": {"type": "array", "items": {"type": "string"}},
+          "candidate_equipment": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["equipment_id", "description", "model_number", "serial_number"],
+              "properties": {
+                "equipment_id": {"type": "string", "minLength": 1},
+                "description": {"type": "string"},
+                "model_number": {"type": "string"},
+                "serial_number": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

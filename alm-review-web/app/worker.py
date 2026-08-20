@@ -11,7 +11,7 @@ from app.services.review_policy import (
     adopt_legacy_workspace_policies,
     backfill_legacy_review_policy,
 )
-from app.services.scheduler import create_scheduler, run_worker_cycle
+from app.services.scheduler import create_scheduler
 from app.services.worker_tasks import current_worker_id, update_worker_heartbeat
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,6 @@ def main() -> None:
 
     worker_id = current_worker_id()
     logger.info("Starting ALM review worker id=%s", worker_id)
-    run_worker_cycle()
     scheduler.start()
     try:
         stop_event.wait()

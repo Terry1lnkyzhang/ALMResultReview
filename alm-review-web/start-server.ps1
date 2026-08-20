@@ -19,5 +19,11 @@ if ($listener) {
     throw "Port $Port is already in use by $processName (PID $($listener.OwningProcess))."
 }
 
+# ALM, AI and MySQL hosts are reachable directly; httpx would otherwise pick up the
+# Windows registry proxy and fail with WinError 10061 whenever that proxy is down.
+if (-not $env:NO_PROXY) {
+    $env:NO_PROXY = "*"
+}
+
 Set-Location $projectDirectory
 & $python -m uvicorn app.main:app --host $BindAddress --port $Port

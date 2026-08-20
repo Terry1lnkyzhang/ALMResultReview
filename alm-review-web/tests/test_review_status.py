@@ -11,13 +11,20 @@ from app.models import (
     ReviewJob,
     ReviewResult,
     RunRevision,
+    Workspace,
 )
+from app.services.review_operations import active_run_review_job
 from app.services.review_policy import (
     adopt_legacy_workspace_policies,
     current_review_policy_key,
 )
-from app.services.review_status import current_reviews, review_update_reasons
+from app.services.review_status import (
+    current_reviews,
+    is_force_qualified,
+    review_update_reasons,
+)
 from app.services.reviews import current_review, save_manual_decision
+from app.web import _matches_status
 
 
 def prepare_run(db: Session, verdict: str) -> AlmRun:
@@ -98,6 +105,47 @@ def test_qualified_result_rejects_manual_decision() -> None:
             save_manual_decision(db, run, "override_qualified", "operator", "No reason")
 
 
+def test_manual_decision_requires_a_reason_but_not_an_operator() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        with pytest.raises(ValueError, match="reason is required"):
+            save_manual_decision(db, run, "override_qualified", "10.0.0.1", "   ")
+
+        manual = save_manual_decision(db, run, "override_qualified", "  ", "Known tool defect")
+
+        assert manual.operator == "unknown"
+        assert manual.reason == "Known tool defect"
+
+
+def test_force_qualified_is_a_lens_over_qualified_runs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        assert not is_force_qualified(current_review(db, run))
+
+        save_manual_decision(db, run, "override_qualified", "10.0.0.1", "Known tool defect")
+        review = current_review(db, run)
+        item = {"final_status": review.final_status, "force_qualified": is_force_qualified(review)}
+
+        assert review.final_status == "qualified"
+        assert _matches_status(item, "qualified")
+        assert _matches_status(item, "force_qualified")
+        assert not _matches_status(item, "unqualified")
+
+
+def test_confirmed_unqualified_is_not_force_qualified() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "needs_manual_review")
+        save_manual_decision(db, run, "confirmed_unqualified", "10.0.0.1", "Evidence missing")
+
+        assert not is_force_qualified(current_review(db, run))
+
+
 def test_latest_result_remains_visible_after_review_policy_changes() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -112,6 +160,24 @@ def test_latest_result_remains_visible_after_review_policy_changes() -> None:
 
         assert review.result is result
         assert review.final_status == "qualified"
+
+
+def test_existing_result_stays_visible_while_a_re_review_is_queued() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified")
+        db.add(
+            ReviewJob(
+                run_id=run.run_id,
+                revision_id=run.current_revision_id,
+                status="queued",
+            )
+        )
+        db.commit()
+
+        assert current_review(db, run).final_status == "qualified"
+        assert active_run_review_job(db, run).status == "queued"
 
 
 def test_review_update_reasons_describe_detectable_setting_changes() -> None:
@@ -252,6 +318,25 @@ def test_evidence_configuration_change_updates_review_policy() -> None:
         db.commit()
 
         assert current_review_policy_key(db) != first_key
+
+
+def test_equipment_review_switch_updates_authoritative_policy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(
+            name="Equipment review",
+            slug="equipment-review",
+            equipment_review_enabled=True,
+        )
+        db.add(workspace)
+        db.commit()
+        first_key = current_review_policy_key(db, workspace.id)
+
+        workspace.equipment_review_enabled = False
+        db.commit()
+
+        assert current_review_policy_key(db, workspace.id) != first_key
 
 
 def test_equipment_registry_change_updates_review_policy() -> None:

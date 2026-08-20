@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,10 +19,8 @@ from app.models import (
     RunRevision,
     RunStep,
     SyncHistory,
-    Workspace,
     utcnow,
 )
-from app.services.review_policy import current_review_policy_key
 from app.services.rich_text import source_rich_text
 from app.services.workspaces import next_internal_run_id, resolve_workspace
 
@@ -32,6 +31,15 @@ class ImportResult:
     new_runs: int = 0
     changed_runs: int = 0
     unchanged_runs: int = 0
+
+
+@dataclass(frozen=True)
+class LatestAlmReviewQueueResult:
+    sync_id: int | None
+    changed: int
+    queued: int
+    already_reviewed: int
+    already_active: int
 
 
 def _integer(value: Any) -> int | None:
@@ -61,38 +69,6 @@ def _next_revision_number(db: Session, run_id: int) -> int:
         select(func.max(RunRevision.revision_number)).where(RunRevision.run_id == run_id)
     )
     return (latest or 0) + 1
-
-
-def _queue_review(
-    db: Session,
-    workspace_id: int,
-    run_id: int,
-    revision_id: int,
-    policy_key: str,
-) -> bool:
-    active_job = db.scalar(
-        select(ReviewJob).where(
-            ReviewJob.revision_id == revision_id,
-            ReviewJob.status.in_(("queued", "running", "superseded")),
-        )
-    )
-    current_result = db.scalar(
-        select(ReviewResult.id).where(
-            ReviewResult.revision_id == revision_id,
-            ReviewResult.review_policy_key == policy_key,
-        )
-    )
-    if active_job is not None or current_result is not None:
-        return False
-    db.add(
-        ReviewJob(
-            workspace_id=workspace_id,
-            run_id=run_id,
-            revision_id=revision_id,
-            status="queued",
-        )
-    )
-    return True
 
 
 def _add_revision(
@@ -137,38 +113,224 @@ def _add_revision(
     return revision
 
 
-def queue_stale_reviews(db: Session, workspace_id: int | None = None) -> int:
+def queue_latest_alm_changes(
+    db: Session,
+    workspace_id: int | None = None,
+) -> LatestAlmReviewQueueResult:
     workspace = resolve_workspace(db, workspace_id)
-    policy_key = current_review_policy_key(db, workspace.id)
-    runs = db.scalars(
-        select(AlmRun).where(
-            AlmRun.workspace_id == workspace.id,
-            AlmRun.current_revision_id.is_not(None),
-            AlmRun.run_status == "Passed",
+    latest_sync = db.scalar(
+        select(SyncHistory)
+        .where(
+            SyncHistory.workspace_id == workspace.id,
+            SyncHistory.status == "completed",
+            SyncHistory.source.like("alm:folder:%"),
+            SyncHistory.completed_at.is_not(None),
         )
-    ).all()
-    queued = sum(
-        _queue_review(
-            db,
-            workspace.id,
-            run.run_id,
-            run.current_revision_id,
-            policy_key,
-        )
-        for run in runs
-        if run.current_revision_id is not None
+        .order_by(SyncHistory.completed_at.desc(), SyncHistory.id.desc())
+        .limit(1)
     )
-    db.commit()
-    return queued
+    if latest_sync is None or latest_sync.completed_at is None:
+        return LatestAlmReviewQueueResult(None, 0, 0, 0, 0)
 
-
-def queue_all_stale_reviews(db: Session) -> int:
-    workspace_ids = db.scalars(
-        select(Workspace.id)
-        .where(Workspace.archived.is_(False))
-        .order_by(Workspace.id)
+    revisions = db.scalars(
+        select(RunRevision)
+        .join(AlmRun, AlmRun.run_id == RunRevision.run_id)
+        .where(
+            AlmRun.workspace_id == workspace.id,
+            AlmRun.current_revision_id == RunRevision.id,
+            AlmRun.run_status == "Passed",
+            RunRevision.created_at >= latest_sync.started_at,
+            RunRevision.created_at <= latest_sync.completed_at,
+        )
+        .order_by(RunRevision.id)
     ).all()
-    return sum(queue_stale_reviews(db, workspace_id) for workspace_id in workspace_ids)
+    changed_revisions = []
+    for revision in revisions:
+        previous_review_hash = db.scalar(
+            select(RunRevision.review_hash)
+            .where(
+                RunRevision.run_id == revision.run_id,
+                RunRevision.revision_number < revision.revision_number,
+            )
+            .order_by(RunRevision.revision_number.desc())
+            .limit(1)
+        )
+        if previous_review_hash is None or previous_review_hash != revision.review_hash:
+            changed_revisions.append(revision)
+
+    revision_ids = [revision.id for revision in changed_revisions]
+    active_revision_ids = set(
+        db.scalars(
+            select(ReviewJob.revision_id).where(
+                ReviewJob.revision_id.in_(revision_ids),
+                ReviewJob.status.in_(("queued", "running", "superseded")),
+            )
+        ).all()
+    )
+    reviewed_revision_ids = set(
+        db.scalars(
+            select(ReviewResult.revision_id).where(
+                ReviewResult.revision_id.in_(revision_ids)
+            )
+        ).all()
+    )
+    # Timestamp granularity can pull an earlier sync's revision into this window;
+    # anything already reviewed belongs to that earlier window, not to this one.
+    outstanding_revisions = [
+        revision
+        for revision in changed_revisions
+        if revision.id not in reviewed_revision_ids
+    ]
+    queued = 0
+    for revision in outstanding_revisions:
+        if revision.id in active_revision_ids:
+            continue
+        db.add(
+            ReviewJob(
+                workspace_id=workspace.id,
+                run_id=revision.run_id,
+                revision_id=revision.id,
+                status="queued",
+            )
+        )
+        queued += 1
+    db.commit()
+    return LatestAlmReviewQueueResult(
+        sync_id=latest_sync.id,
+        changed=len(outstanding_revisions),
+        queued=queued,
+        already_reviewed=len(reviewed_revision_ids),
+        already_active=len(active_revision_ids - reviewed_revision_ids),
+    )
+
+
+def unchanged_run_check(
+    db: Session,
+    workspace_id: int,
+) -> Callable[[dict[str, Any]], bool]:
+    """Skip ALM runs whose stored last-modified stamp already matches the server."""
+
+    def is_unchanged(run: dict[str, Any]) -> bool:
+        alm_run_id = _integer(run.get("id"))
+        last_modified = _date_time(run.get("last-modified"))
+        if alm_run_id is None or last_modified is None:
+            return False
+        row = db.execute(
+            select(AlmRun.alm_last_modified, AlmRun.current_revision_id).where(
+                AlmRun.workspace_id == workspace_id,
+                AlmRun.alm_run_id == alm_run_id,
+            )
+        ).first()
+        return bool(row and row[1] is not None and row[0] == last_modified)
+
+    return is_unchanged
+
+
+def import_batch(
+    db: Session,
+    data: dict[str, Any],
+    workspace_id: int,
+    result: ImportResult,
+) -> ImportResult:
+    for item in data.get("users") or []:
+        code1_id = normalize_text(item.get("code1_id"))
+        if not code1_id:
+            continue
+        user = db.get(AlmUser, code1_id)
+        if user is None:
+            user = AlmUser(code1_id=code1_id)
+            db.add(user)
+        user.full_name = normalize_text(item.get("full_name"))
+        user.email = normalize_text(item.get("email"))
+        user.active = bool(item.get("active", True))
+        user.synced_at = utcnow()
+
+    records = [
+        record
+        for record in data.get("records") or []
+        if normalize_text((record.get("run") or {}).get("status")).casefold()
+        == "passed"
+    ]
+    result.discovered_runs += len(records)
+    for record in records:
+        run = record.get("run") or {}
+        run_id = _integer(run.get("id"))
+        if run_id is None:
+            continue
+
+        test_instance = record.get("testInstance") or {}
+        test_set = record.get("testSet") or {}
+        folder = record.get("folder") or {}
+        raw_json = _raw(record)
+        current_source_hash = source_hash(record)
+        current_review_hash = review_hash(record)
+        run_row = db.scalar(
+            select(AlmRun).where(
+                AlmRun.workspace_id == workspace_id,
+                AlmRun.alm_run_id == run_id,
+            )
+        )
+        is_new = run_row is None
+
+        if is_new:
+            run_row = AlmRun(
+                run_id=next_internal_run_id(db, run_id),
+                workspace_id=workspace_id,
+                alm_run_id=run_id,
+                source_hash=current_source_hash,
+                review_hash=current_review_hash,
+                raw_json=raw_json,
+            )
+            db.add(run_row)
+            result.new_runs += 1
+        elif run_row.source_hash != current_source_hash:
+            result.changed_runs += 1
+        else:
+            result.unchanged_runs += 1
+
+        run_row.test_id = _integer(run.get("test-id") or test_instance.get("test-id"))
+        run_row.workspace_id = workspace_id
+        run_row.alm_run_id = run_id
+        run_row.test_instance_id = _integer(
+            run.get("testcycl-id") or test_instance.get("id")
+        )
+        run_row.test_set_id = _integer(test_set.get("id") or run.get("cycle-id"))
+        run_row.folder_id = _integer(folder.get("id"))
+        run_row.test_name = normalize_text(
+            run.get("test-name") or test_instance.get("name")
+        )
+        run_row.test_set_name = normalize_text(
+            test_set.get("name") or run.get("cycle-name")
+        )
+        run_row.folder_path = normalize_text(
+            folder.get("path") or test_set.get("folderPath")
+        )
+        run_row.execution_location = normalize_text(run.get("location"))
+        run_row.run_status = normalize_text(run.get("status"))
+        run_row.test_owner = normalize_text(record.get("testOwner"))
+        run_row.assigned_tester = normalize_text(test_instance.get("owner"))
+        run_row.actual_tester = normalize_text(
+            run.get("owner") or test_instance.get("actual-tester")
+        )
+        run_row.execution_at = _date_time(
+            run.get("execution-date"), run.get("execution-time")
+        )
+        run_row.alm_last_modified = _date_time(run.get("last-modified"))
+        run_row.synced_at = utcnow()
+
+        if is_new or run_row.source_hash != current_source_hash:
+            run_row.source_hash = current_source_hash
+            run_row.review_hash = current_review_hash
+            run_row.raw_json = raw_json
+            _add_revision(
+                db,
+                run_row,
+                record,
+                raw_json,
+                current_source_hash,
+                current_review_hash,
+            )
+    return result
 
 
 def import_data(
@@ -190,97 +352,7 @@ def import_data(
     db.flush()
 
     try:
-        for item in data.get("users") or []:
-            code1_id = normalize_text(item.get("code1_id"))
-            if not code1_id:
-                continue
-            user = db.get(AlmUser, code1_id)
-            if user is None:
-                user = AlmUser(code1_id=code1_id)
-                db.add(user)
-            user.full_name = normalize_text(item.get("full_name"))
-            user.email = normalize_text(item.get("email"))
-            user.active = bool(item.get("active", True))
-            user.synced_at = utcnow()
-
-        records = [
-            record
-            for record in data.get("records") or []
-            if normalize_text((record.get("run") or {}).get("status")).casefold()
-            == "passed"
-        ]
-        result.discovered_runs = len(records)
-        for record in records:
-            run = record.get("run") or {}
-            run_id = _integer(run.get("id"))
-            if run_id is None:
-                continue
-
-            test_instance = record.get("testInstance") or {}
-            test_set = record.get("testSet") or {}
-            folder = record.get("folder") or {}
-            raw_json = _raw(record)
-            current_source_hash = source_hash(record)
-            current_review_hash = review_hash(record)
-            run_row = db.scalar(
-                select(AlmRun).where(
-                    AlmRun.workspace_id == workspace.id,
-                    AlmRun.alm_run_id == run_id,
-                )
-            )
-            is_new = run_row is None
-
-            if is_new:
-                run_row = AlmRun(
-                    run_id=next_internal_run_id(db, run_id),
-                    workspace_id=workspace.id,
-                    alm_run_id=run_id,
-                    source_hash=current_source_hash,
-                    review_hash=current_review_hash,
-                    raw_json=raw_json,
-                )
-                db.add(run_row)
-                result.new_runs += 1
-            elif run_row.source_hash != current_source_hash:
-                result.changed_runs += 1
-            else:
-                result.unchanged_runs += 1
-
-            run_row.test_id = _integer(run.get("test-id") or test_instance.get("test-id"))
-            run_row.workspace_id = workspace.id
-            run_row.alm_run_id = run_id
-            run_row.test_instance_id = _integer(run.get("testcycl-id") or test_instance.get("id"))
-            run_row.test_set_id = _integer(test_set.get("id") or run.get("cycle-id"))
-            run_row.folder_id = _integer(folder.get("id"))
-            run_row.test_name = normalize_text(run.get("test-name") or test_instance.get("name"))
-            run_row.test_set_name = normalize_text(test_set.get("name") or run.get("cycle-name"))
-            run_row.folder_path = normalize_text(folder.get("path") or test_set.get("folderPath"))
-            run_row.execution_location = normalize_text(run.get("location"))
-            run_row.run_status = normalize_text(run.get("status"))
-            run_row.test_owner = normalize_text(record.get("testOwner"))
-            run_row.assigned_tester = normalize_text(test_instance.get("owner"))
-            run_row.actual_tester = normalize_text(
-                run.get("owner") or test_instance.get("actual-tester")
-            )
-            run_row.execution_at = _date_time(
-                run.get("execution-date"), run.get("execution-time")
-            )
-            run_row.alm_last_modified = _date_time(run.get("last-modified"))
-            run_row.synced_at = utcnow()
-
-            if is_new or run_row.source_hash != current_source_hash:
-                run_row.source_hash = current_source_hash
-                run_row.review_hash = current_review_hash
-                run_row.raw_json = raw_json
-                _add_revision(
-                    db,
-                    run_row,
-                    record,
-                    raw_json,
-                    current_source_hash,
-                    current_review_hash,
-                )
-
+        import_batch(db, data, workspace.id, result)
         history.status = "completed"
         history.discovered_runs = result.discovered_runs
         history.new_runs = result.new_runs

@@ -1,0 +1,10 @@
+[
+  {
+    "input": {"review_step": 1, "actual": "Measured with meter EQ-100.", "candidate_equipment": [{"equipment_id": "EQ-100", "description": "Digital meter"}]},
+    "output": {"review_step": 1, "role": "controlled_equipment", "required": true, "selected_equipment_ids": ["EQ-100"], "reason": "The referenced meter is a controlled measurement tool."}
+  },
+  {
+    "input": {"review_step": 2, "actual": "DUT serial is SN-42.", "candidate_equipment": []},
+    "output": {"review_step": 2, "role": "dut_or_other", "required": false, "selected_equipment_ids": [], "reason": "The identifier is explicitly the DUT serial."}
+  }
+]

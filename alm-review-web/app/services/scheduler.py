@@ -1,22 +1,68 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import SyncConfig
-from app.services.reviews import process_queued_jobs
+from app.models import AiConfig, SyncConfig
+from app.services.reviews import (
+    claim_next_review_job,
+    process_claimed_review_job,
+    reap_abandoned_review_jobs,
+)
 from app.services.worker_tasks import (
     current_worker_id,
     process_queued_sync_jobs,
     queue_sync_job,
+    reap_abandoned_sync_jobs,
     update_worker_heartbeat,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def process_review_queue(
+    *,
+    limit: int,
+    concurrency: int,
+    worker_id: str,
+    lease_seconds: int,
+) -> tuple[int, int]:
+    worker_count = max(1, min(4, concurrency, limit))
+
+    def process_claimed(job_id: int) -> tuple[int, int]:
+        with SessionLocal() as db:
+            return process_claimed_review_job(db, job_id)
+
+    completed = 0
+    failed = 0
+    claimed_count = 0
+    pending: set[Future[tuple[int, int]]] = set()
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="ai-review",
+    ) as executor:
+        while True:
+            with SessionLocal() as db:
+                while len(pending) < worker_count and claimed_count < limit:
+                    job = claim_next_review_job(db, worker_id, lease_seconds)
+                    if job is None:
+                        break
+                    claimed_count += 1
+                    pending.add(executor.submit(process_claimed, job.id))
+            if not pending:
+                break
+            # Refill a slot as soon as one job ends instead of waiting for the batch.
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                job_completed, job_failed = future.result()
+                completed += job_completed
+                failed += job_failed
+    return completed, failed
 
 
 def scheduled_heartbeat() -> None:
@@ -68,29 +114,47 @@ def queue_scheduled_workspace_sync(workspace_id: int) -> None:
             )
 
 
+def run_sync_cycle() -> None:
+    settings = get_settings()
+    with SessionLocal() as db:
+        try:
+            reap_abandoned_sync_jobs(db)
+            completed, failed = process_queued_sync_jobs(
+                db,
+                worker_id=current_worker_id(),
+                lease_seconds=settings.worker_lease_seconds,
+                limit=1,
+            )
+            if completed or failed:
+                logger.info("Worker sync cycle sync=%s/%s", completed, failed)
+        finally:
+            db.rollback()
+
+
 def run_worker_cycle() -> None:
     settings = get_settings()
     worker_id = current_worker_id()
     with SessionLocal() as db:
         update_worker_heartbeat(db, worker_id, status="working")
         try:
-            sync_completed, sync_failed = process_queued_sync_jobs(
-                db,
-                worker_id=worker_id,
-                lease_seconds=settings.worker_lease_seconds,
-                limit=1,
+            reap_abandoned_review_jobs(db)
+            ai_config = db.get(AiConfig, 1)
+            review_concurrency = (
+                ai_config.review_concurrency if ai_config is not None else 1
             )
-            review_completed, review_failed = process_queued_jobs(
-                db,
-                limit=10,
-                worker_id=worker_id,
-                lease_seconds=settings.worker_lease_seconds,
+            review_completed, review_failed = (
+                process_review_queue(
+                    limit=10,
+                    concurrency=review_concurrency,
+                    worker_id=worker_id,
+                    lease_seconds=settings.worker_lease_seconds,
+                )
+                if ai_config is not None and ai_config.enabled
+                else (0, 0)
             )
-            if sync_completed or sync_failed or review_completed or review_failed:
+            if review_completed or review_failed:
                 logger.info(
-                    "Worker cycle sync=%s/%s review=%s/%s",
-                    sync_completed,
-                    sync_failed,
+                    "Worker cycle review=%s/%s",
                     review_completed,
                     review_failed,
                 )
@@ -104,6 +168,7 @@ def configure_scheduler(scheduler: BackgroundScheduler) -> None:
         "daily-alm-sync",
         "queued-ai-reviews",
         "worker-queue-poll",
+        "worker-sync-poll",
         "worker-heartbeat",
     }
     managed_job_ids.update(
@@ -137,6 +202,16 @@ def configure_scheduler(scheduler: BackgroundScheduler) -> None:
         "interval",
         seconds=max(1, get_settings().worker_poll_seconds),
         id="worker-queue-poll",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    # Separate pump so a long ALM synchronization cannot stall the review queue.
+    scheduler.add_job(
+        run_sync_cycle,
+        "interval",
+        seconds=max(1, get_settings().worker_poll_seconds),
+        id="worker-sync-poll",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

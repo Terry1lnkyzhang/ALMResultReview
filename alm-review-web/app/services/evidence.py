@@ -27,7 +27,6 @@ _DATE_PATTERN = re.compile(
 )
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _HTML_SUFFIXES = {".html", ".htm"}
-_SCREENSHOT_TERMS = ("screenshot", "screen shot", "screen capture", "截图", "图片")
 _PHANTOM_TERMS = ("phantom", "模体")
 _PHANTOM_PART_NUMBER_PATTERN = re.compile(
     r"\bphantom\b.{0,80}\bpart\s*(?:number|no\.?)\s*(?:is|:)?\s*"
@@ -64,7 +63,7 @@ class DeferredExternalEvidenceResolver:
         return {
             "path": path,
             "status": "deferred",
-            "reason": "外部文件、文件夹、HTML 和图片审核将在后续阶段实现。",
+            "reason": "External file, folder, HTML and image review runs in a later stage.",
         }
 
 
@@ -205,14 +204,73 @@ def step_evidence_profile(
     attachment_declared: bool,
 ) -> dict[str, Any]:
     combined = "\n".join((description, expected, actual)).casefold()
+    actual_paths = extract_paths(actual)
+    image_paths = [path for path in actual_paths if path["kind"] == "image"]
+    html_paths = [path for path in actual_paths if path["kind"] == "html"]
+    candidate_paths = [
+        path
+        for path in actual_paths
+        if path["kind"] not in {"image", "html"}
+    ]
+    screenshot_review_required = bool(
+        attachment_declared or image_paths
+    )
+
+    triggers: list[str] = []
+    actions: list[str] = []
+    intents: list[str] = []
+    if attachment_declared:
+        triggers.append("alm_attachment_declared")
+        actions.append("review_attachment")
+        intents.append("image_evidence")
+    if image_paths:
+        triggers.extend(
+            f"direct_image_path:{PureWindowsPath(path['raw']).suffix.casefold()}"
+            for path in image_paths
+        )
+        intents.append("image_evidence")
+    if html_paths:
+        triggers.extend(
+            f"direct_html_path:{PureWindowsPath(path['raw']).suffix.casefold()}"
+            for path in html_paths
+        )
+        intents.append("html_report")
+
+    if "image_evidence" in intents and candidate_paths + image_paths:
+        actions.extend(("validate_path", "load_images", "send_to_visual_ai"))
+    if "html_report" in intents:
+        actions.extend(("validate_path", "parse_html_report"))
+    if len(set(intents)) > 1:
+        intent = "mixed_evidence"
+        reason = "The Step carries both image evidence and HTML report signals."
+    elif intents:
+        intent = intents[0]
+        reason = (
+            "A direct image path was detected."
+            if intent == "image_evidence"
+            else "A direct HTML report path was detected."
+        )
+    else:
+        intent = "none"
+        reason = "No external evidence signal requiring a read was detected."
+
     reference_lookup_required = any(term in combined for term in _PHANTOM_TERMS)
     if _PHANTOM_PART_NUMBER_PATTERN.search(combined):
         reference_lookup_required = False
     return {
-        "actual_paths": extract_paths(actual),
+        "actual_paths": actual_paths,
         "actual_dates": extract_dates(actual, execution_date),
         "attachment_declared": attachment_declared,
-        "screenshot_review_required": attachment_declared
-        or any(term in combined for term in _SCREENSHOT_TERMS),
+        "screenshot_review_required": screenshot_review_required,
+        "path_validation_required": "validate_path" in actions,
         "reference_lookup_required": reference_lookup_required,
+        "routing": {
+            "intent": intent,
+            "triggers": list(dict.fromkeys(triggers)),
+            "actions": list(dict.fromkeys(actions)),
+            "decision_source": "deterministic",
+            "confidence": 1.0 if intent != "pending_classification" else None,
+            "reason": reason,
+            "manual_required": False,
+        },
     }

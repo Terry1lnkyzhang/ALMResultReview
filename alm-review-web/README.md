@@ -104,18 +104,34 @@ Worker claims use database row locks and expiring leases so two Workers cannot n
 process the same job and interrupted work can be retried. Restart the Worker after changing
 the configured daily schedule so it reloads the Cron trigger.
 
+`Concurrent AI Reviews` in Configuration is a global Worker limit from 1 to 4. Each
+concurrent Review uses an independent database session; ALM synchronization remains serial.
+Start with 2 and increase only when the AI endpoint and database have enough capacity. The
+Worker reads this value at the start of every queue cycle, so later concurrency changes do
+not require a restart.
+
+The shared AI configuration can store an API key for the Worker. The page never displays a
+saved key: leave the field blank to keep it, enter a value to replace it, or select the clear
+option to remove it. A saved key takes precedence over `AI_API_KEY` in `.env`; the environment
+value remains the fallback for existing deployments.
+
+`Enable AI Review processing` is the global Worker gate for Review jobs. When disabled, workers
+do not claim queued Reviews and the batch/re-review actions reject new requests. Enabling it does
+not create Review jobs by itself.
+
 Do not expose Uvicorn or MySQL directly to the public Internet. Put the Web server behind
 company VPN/internal networking and an HTTPS reverse proxy. `APP_ROLE=web` requires HTTP
 Basic credentials, but TLS is still required to protect those credentials in transit.
 
-### Network image evidence
+### External evidence review
 
-Network image review is disabled by default and uses three independent settings:
+External evidence review is disabled by default. `Enable external evidence review` permits
+read-only HTML and image access below the approved roots and allows bounded images to be sent to
+`image-evidence-review`. The setting directly controls those checks for its Workspace. The
+configured AI endpoint is used directly; there is no separate HTTP transport approval setting.
 
-- `Read approved network evidence` permits read-only access below the configured UNC root.
-- `Send evidence images to AI` adds supported images to the review request.
-- `Allow image transfer over HTTP` explicitly accepts unencrypted image transport. HTTPS
-	and loopback endpoints do not require this exception.
+For the complete path-validation, directory-scanning, Step-matching, and Skill call flow, see
+[Image evidence review flow](docs/image-evidence-review-flow.md).
 
 The resolver reads only PNG, JPEG, and WebP files, recurses at most two directory levels,
 sends at most four images per Step and twelve per Run, and rejects images larger than 5 MB.
@@ -141,11 +157,12 @@ Each completed review displays nine independent checkpoints:
 8. `Reference data validation`: unresolved phantom or reference data requires manual review.
 9. `Equipment traceability`: controlled equipment identity and execution-date calibration validity.
 
-HTML reports are read only when `Read approved network evidence` is enabled. The parser reads at
+HTML reports are read only when `Enable external evidence review` is enabled. The parser reads at
 most 5 MB per file and extracts table text without executing scripts, loading linked content, or
 modifying the source. Missing reports, filename sequence gaps, missing result rows, and non-Passed
 results are unqualified; permission, network, oversized-file, and parse errors require manual
-review.
+review. `html-evidence-review@0.1.0` is listed as Planned; it has no instructions or contract and
+is not invoked yet, so deterministic parsing remains authoritative.
 
 ## Run
 
@@ -167,9 +184,9 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 
 - `Import ALM Word` accepts an ALM Design Verification Record `.docx` as an alternative
 	to a live ALM synchronization. It imports every Passed Test Run, creates immutable
-	revisions only when review content changes, and automatically queues new or changed
-	Runs for AI review. Re-importing the same content, even under a different filename,
-	does not create duplicate revisions.
+	revisions when source content changes, and does not automatically queue AI review.
+	Re-importing the same content, even under a different filename, does not create
+	duplicate revisions.
 - The Word importer reads Test Set, Test Case, Test Run, execution metadata, Step,
 	Expected, and Actual text from the standard export layout. UNC paths in Actual text
 	continue through the existing evidence pipeline. Embedded Word images are not stored;
@@ -177,12 +194,25 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 - `Sync ALM now` recursively refreshes the configured Test Lab scope. Only the latest
 	Passed Run for each Test Instance is imported by the Worker. The same synchronization reads the ALM
 	project user directory and displays people as `Full Name (CODE1 ID)`.
+- `Queue latest ALM changes` queues only current revisions whose AI review content changed
+	during the latest completed live ALM synchronization. Already reviewed, queued, or running
+	revisions are skipped. Review policy changes alone do not broaden this queue scope.
 - `Queue re-review` creates new review jobs while retaining all previous results. Scopes
 	are available for all Passed Runs, Unqualified only, Manual review only, or the combined
 	Unqualified and Manual set.
 - Runs already queued or running are skipped when a re-review scope is submitted again.
 	The Worker processes queued reviews in the background; queue counts are shown on the
 	Dashboard.
+- `Current Workspace Review` counts each Passed Run once using its current revision. It
+	shows current outcomes together with waiting and running jobs, regardless of which action
+	created those jobs.
+- Workspace queue controls on the Dashboard can pause new Review claims, resume them,
+	or make a Workspace the next priority. Pausing preserves queued jobs and lets an
+	already-running job finish safely. Higher numeric priorities run first; jobs within the
+	same priority remain FIFO. The queue preview shows the next queued Review jobs across
+	Workspaces. Waiting Review jobs can be removed individually or all at once for the
+	current Workspace; running jobs continue safely. Persistent Review and Sync pause
+	settings are also available in Workspace Configuration.
 - A temporary ALM user-directory failure does not block Run synchronization. Existing
 	cached names remain available and CODE1 IDs are used when no name is known.
 
@@ -198,11 +228,66 @@ Set-Location .\alm-review-web
 
 - `run_id` is the global primary key for the configured ALM project.
 - A changed source hash creates an immutable Run revision without queuing a review.
-- Reviews are queued only through the explicit Process reviews, Re-review, or Review now actions.
+- Reviews are queued only through the explicit latest ALM changes, Re-review, or Review now actions.
+- Isolated extra spaces, normal paragraph blank lines, trailing spaces, and minor indentation
+	are ignored. Whitespace formatting is reported only when repeated or extensive enough to
+	clearly disrupt reading, sentence continuity, list structure, or understanding.
 - AI `qualified` is final without manual confirmation.
 - AI `needs_manual_review` accepts qualified or unqualified confirmation.
 - AI `unqualified` remains unqualified unless an operator records a force-qualified override.
 - Manual decisions are bound to the current revision and source hash; a source change invalidates them.
+
+### Staged review pipeline
+
+Each explicit Review Job builds one plan and completes these stages before saving a result:
+
+1. Normalize ALM Description, Expected, Actual, numbered items, formatting signals, and
+	program-detected path and equipment candidates. Every candidate receives a stable ID.
+2. Run `alm-text-review` once. It reviews applicability, language quality, completeness, and
+	Expected/Actual support, then classifies the semantic role of every supplied candidate ID.
+3. Build the specialist plan from the validated first-pass output. ALM attachments remain
+	mandatory checks, while the application retains all path-access and final-routing authority.
+4. Resolve approved images with deterministic path, file-signature, count, byte, and pixel
+	guards. `image-evidence-review` sees only the bounded images granted by the application.
+5. Parse supported HTML Reports with deterministic code; Report review does not call AI.
+6. Validate equipment against the registry with deterministic rules. A clear first-pass role is
+	reused; only an uncertain role invokes `equipment-role`, which may select supplied IDs only.
+7. Aggregate all stage outcomes with code: any failure is Unqualified, otherwise any
+	manual outcome needs manual review, and all-pass results are Qualified.
+
+Each Review always runs `alm-text-review`. `Enable external evidence review` independently controls
+approved HTML parsing and image review; `Enable equipment registry validation` independently
+controls registry, calibration, and `equipment-role` checks. When both are disabled, the Review
+runs only `alm-text-review` and records both optional stages as `disabled` in the pipeline.
+
+The semantic Skill packages live under `app/review_skills/<skill-id>/`. Each package contains
+`skill.toml`, `instructions.md`, `input.schema.json`, `output.schema.json`, and `examples.json`.
+Changing semantic rules normally means editing `instructions.md` and examples, then bumping the
+manifest version. Contract field changes also require matching Python types and adapters. A
+manifest-only package with `status = "planned"` appears in the catalog but cannot be executed.
+
+Each text Review uses one AI call. Image batches and unresolved equipment roles add narrowly
+scoped calls only when applicable. Unknown or unreadable external evidence requires manual review
+rather than an unbounded AI fallback. Results retain each Skill version, policy/input/output
+hashes, capability grants, duration, output, stage status, and total AI call count in the pipeline
+trace.
+
+### Skill capabilities
+
+Skills declare required, optional, and forbidden capabilities in `skill.toml`, but they never
+execute filesystem, network, or database operations. The application orchestrator decides whether
+a Workspace policy grants a capability and executes the corresponding deterministic provider.
+
+- `evidence.path_metadata` supplies detected path text only; it does not permit path access.
+- `evidence.image.content` is granted only after the application validates the approved UNC root,
+	blocks traversal/reparse points, and enforces image budgets.
+- `equipment.registry.candidates` supplies read-only candidate snapshots selected by application
+	code. Returned IDs are checked again against that exact whitelist.
+- Missing or forbidden capabilities fail before an AI HTTP request. Skill failures never bypass
+	path security and are converted to the stage's defined failure or manual-review behavior.
+
+The Configuration page lists loaded packages and declared capabilities. A new Run Review displays
+a unified Skill execution trace. Historical Reviews retain the trace format used when they ran.
 
 ### Equipment registry validation
 

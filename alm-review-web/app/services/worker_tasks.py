@@ -1,21 +1,32 @@
 from __future__ import annotations
 
+import json
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
 
-from sqlalchemy import or_, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import SyncHistory, SyncJob, WorkerHeartbeat, utcnow
-from app.services.alm import FolderCollectionProgress, collect_folder
-from app.services.importer import ImportResult, import_data
+from app.models import (
+    AlmRun,
+    SyncConfig,
+    SyncHistory,
+    SyncJob,
+    WorkerHeartbeat,
+    Workspace,
+    utcnow,
+)
+from app.services.alm import FolderCollectionProgress, collect_run, iter_folder_batches
+from app.services.importer import ImportResult, import_batch, unchanged_run_check
+from app.services.review_operations import queue_run_review
 from app.services.workspaces import resolve_workspace, workspace_sync_config
 
 MAX_JOB_ATTEMPTS = 3
+FAILED_JOB_RETRY_BACKOFF_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -29,20 +40,57 @@ def current_worker_id() -> str:
     return configured or socket.gethostname()
 
 
+def reap_abandoned_sync_jobs(db: Session) -> int:
+    """Fail jobs left running by a stopped Worker so they stop blocking new ones."""
+    now = utcnow()
+    jobs = db.scalars(
+        select(SyncJob).where(
+            SyncJob.status == "running",
+            SyncJob.lease_expires_at.is_not(None),
+            SyncJob.lease_expires_at <= now,
+            SyncJob.attempt_count >= MAX_JOB_ATTEMPTS,
+        )
+    ).all()
+    for job in jobs:
+        job.status = "failed"
+        job.progress_stage = "failed"
+        job.progress_message = "Worker stopped before the synchronization finished."
+        job.error_message = (
+            f"Abandoned after {MAX_JOB_ATTEMPTS} attempts; the Worker lease expired "
+            "while the job was running."
+        )
+        job.active_key = None
+        job.claimed_by = None
+        job.lease_expires_at = None
+        job.completed_at = now
+    if jobs:
+        db.commit()
+    return len(jobs)
+
+
 def queue_sync_job(
     db: Session,
     requested_by: str = "web",
     workspace_id: int | None = None,
+    full_refresh: bool = False,
+    run_id: int | None = None,
 ) -> SyncQueueResult:
     workspace = resolve_workspace(db, workspace_id)
-    active_key = f"alm-sync:{workspace.id}"
+    reap_abandoned_sync_jobs(db)
+    active_key = (
+        f"alm-sync:{workspace.id}"
+        if run_id is None
+        else f"alm-run-sync:{workspace.id}:{run_id}"
+    )
     active = db.scalar(select(SyncJob).where(SyncJob.active_key == active_key))
     if active is not None:
         return SyncQueueResult(active, False)
     job = SyncJob(
         workspace_id=workspace.id,
         active_key=active_key,
+        run_id=run_id,
         status="queued",
+        full_refresh=full_refresh,
         requested_by=requested_by[:128],
     )
     db.add(job)
@@ -64,11 +112,20 @@ def claim_next_sync_job(
     lease_seconds: int,
 ) -> SyncJob | None:
     now = utcnow()
+    retry_after = now - timedelta(seconds=FAILED_JOB_RETRY_BACKOFF_SECONDS)
     job = db.scalar(
         select(SyncJob)
+        .outerjoin(Workspace, Workspace.id == SyncJob.workspace_id)
         .where(
             or_(
-                SyncJob.status.in_(("queued", "failed")),
+                SyncJob.status == "queued",
+                (
+                    (SyncJob.status == "failed")
+                    & (
+                        SyncJob.completed_at.is_(None)
+                        | (SyncJob.completed_at <= retry_after)
+                    )
+                ),
                 (
                     (SyncJob.status == "running")
                     & (SyncJob.lease_expires_at.is_not(None))
@@ -76,8 +133,13 @@ def claim_next_sync_job(
                 ),
             ),
             SyncJob.attempt_count < MAX_JOB_ATTEMPTS,
+            or_(Workspace.id.is_(None), Workspace.sync_queue_paused.is_(False)),
         )
-        .order_by(SyncJob.created_at, SyncJob.id)
+        .order_by(
+            desc(func.coalesce(Workspace.queue_priority, 0)),
+            SyncJob.created_at,
+            SyncJob.id,
+        )
         .with_for_update(skip_locked=True)
         .limit(1)
     )
@@ -91,6 +153,7 @@ def claim_next_sync_job(
     job.folders_processed = 0
     job.test_sets_discovered = 0
     job.runs_discovered = 0
+    job.runs_skipped = 0
     job.claimed_by = worker_id
     job.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
     job.started_at = now
@@ -102,11 +165,93 @@ def claim_next_sync_job(
     return job
 
 
+def _fail_sync_history(db: Session, history_id: int, exc: Exception) -> None:
+    failed_history = db.get(SyncHistory, history_id)
+    if failed_history is not None:
+        failed_history.status = "failed"
+        failed_history.error_message = str(exc)[:2000]
+        failed_history.completed_at = utcnow()
+        db.commit()
+
+
+def _finish_sync_job(
+    db: Session,
+    job_id: int,
+    history: SyncHistory,
+    result: ImportResult,
+    message: str,
+) -> None:
+    history.status = "completed"
+    history.discovered_runs = result.discovered_runs
+    history.new_runs = result.new_runs
+    history.changed_runs = result.changed_runs
+    history.unchanged_runs = result.unchanged_runs
+    history.completed_at = utcnow()
+    completed_job = db.get(SyncJob, job_id)
+    if completed_job is None:
+        raise ValueError("Sync job disappeared while it was running.")
+    completed_job.status = "completed"
+    completed_job.progress_stage = "completed"
+    completed_job.progress_message = message
+    completed_job.cursor_json = None
+    completed_job.active_key = None
+    completed_job.claimed_by = None
+    completed_job.lease_expires_at = None
+    completed_job.completed_at = utcnow()
+    db.commit()
+
+
+def _process_run_sync_job(
+    db: Session,
+    job: SyncJob,
+    workspace_id: int,
+    config: SyncConfig,
+) -> ImportResult:
+    """Refresh one Run from ALM and queue its AI review once the import lands."""
+    run_row = db.get(AlmRun, job.run_id)
+    if run_row is None:
+        raise ValueError(f"Run {job.run_id} no longer exists.")
+    if run_row.test_instance_id is None:
+        raise ValueError("The Run has no ALM test instance reference.")
+    label = run_row.alm_run_id or run_row.run_id
+    job.progress_stage = "collecting"
+    job.progress_message = f"Refreshing ALM Run {label}"
+    db.commit()
+    result = ImportResult()
+    history = SyncHistory(
+        workspace_id=workspace_id,
+        sync_config_id=config.id,
+        source=f"alm:run:{label}",
+        status="running",
+    )
+    db.add(history)
+    db.commit()
+    history_id = history.id
+    try:
+        data = collect_run(
+            config,
+            run_row.test_instance_id,
+            str(run_row.folder_id or ""),
+            run_row.folder_path,
+        )
+        import_batch(db, data, workspace_id, result)
+        db.commit()
+        queue_run_review(db, run_row)
+    except Exception as exc:
+        db.rollback()
+        _fail_sync_history(db, history_id, exc)
+        raise
+    _finish_sync_job(db, job.id, history, result, f"Run {label} refreshed")
+    return result
+
+
 def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
     workspace = resolve_workspace(db, job.workspace_id)
     config = workspace_sync_config(db, workspace.id)
     if config is None:
         raise ValueError("No ALM synchronization scope is configured.")
+    if job.run_id is not None:
+        return _process_run_sync_job(db, job, workspace.id, config)
     source = f"alm:folder:{config.folder_id}"
     last_progress_update = 0.0
 
@@ -124,51 +269,64 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
         active_job.folders_processed = progress.folders_processed
         active_job.test_sets_discovered = progress.test_sets_discovered
         active_job.runs_discovered = progress.runs_discovered
+        active_job.runs_skipped = progress.runs_skipped
         active_job.lease_expires_at = utcnow() + timedelta(
             seconds=max(1, get_settings().worker_lease_seconds)
         )
-        db.commit()
+        update_worker_heartbeat(
+            db,
+            active_job.claimed_by or current_worker_id(),
+            status="working",
+            current_job_type="sync",
+            current_job_id=active_job.id,
+        )
         last_progress_update = now
 
-    try:
-        data = collect_folder(config, progress_callback=persist_progress)
-    except Exception as exc:
-        db.rollback()
-        db.add(
-            SyncHistory(
-                sync_config_id=config.id,
-                workspace_id=workspace.id,
-                source=source,
-                status="failed",
-                error_message=str(exc)[:2000],
-                completed_at=utcnow(),
-            )
-        )
-        db.commit()
-        raise
-    importing_job = db.get(SyncJob, job.id)
-    if importing_job is not None:
-        importing_job.progress_stage = "importing"
-        importing_job.progress_message = "Importing Runs"
-        db.commit()
-    result = import_data(
-        data,
-        db,
-        source=source,
+    completed_folder_ids: list[str] = []
+    if job.cursor_json:
+        try:
+            completed_folder_ids = list(json.loads(job.cursor_json))
+        except (TypeError, ValueError):
+            completed_folder_ids = []
+    result = ImportResult()
+    history = SyncHistory(
         workspace_id=workspace.id,
         sync_config_id=config.id,
+        source=source,
+        status="running",
     )
-    completed_job = db.get(SyncJob, job.id)
-    if completed_job is None:
-        raise ValueError("Sync job disappeared while it was running.")
-    completed_job.status = "completed"
-    completed_job.progress_stage = "completed"
-    completed_job.progress_message = "Synchronization complete"
-    completed_job.active_key = None
-    completed_job.claimed_by = None
-    completed_job.lease_expires_at = None
-    completed_job.completed_at = utcnow()
+    db.add(history)
     db.commit()
+    try:
+        batches = iter_folder_batches(
+            config,
+            progress_callback=persist_progress,
+            completed_folder_ids=completed_folder_ids,
+            is_unchanged_run=(
+                None
+                if job.full_refresh
+                else unchanged_run_check(db, workspace.id)
+            ),
+        )
+        for batch in batches:
+            import_batch(
+                db,
+                {"users": batch.users, "records": batch.records},
+                workspace.id,
+                result,
+            )
+            completed_folder_ids.append(batch.folder_id)
+            active_job = db.get(SyncJob, job.id)
+            if active_job is not None:
+                active_job.cursor_json = json.dumps(completed_folder_ids)
+            # Commit per folder so an interrupted synchronization can resume.
+            db.commit()
+    except Exception as exc:
+        db.rollback()
+        _fail_sync_history(db, history.id, exc)
+        raise
+
+    _finish_sync_job(db, job.id, history, result, "Synchronization complete")
     return result
 
 

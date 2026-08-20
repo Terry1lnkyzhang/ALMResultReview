@@ -1,0 +1,89 @@
+[
+  {
+    "input": {
+      "review_step": 1,
+      "description": "Measure voltage using Fluke 87V.",
+      "expected": "Voltage shall be between 12.0 V and 13.0 V.",
+      "actual": "Voltage was 12.4 V. See \\\\server\\results\\screen.png.",
+      "actual_format": {"layout_text": "Voltage was 12.4 V.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": [
+        {"candidate_id": "eq-01", "type": "equipment", "value": "Fluke 87V", "source_field": "description", "detection_source": "equipment_registry_match"},
+        {"candidate_id": "img-01", "type": "image", "value": "\\\\server\\results\\screen.png", "source_field": "actual", "detection_source": "path_extension"}
+      ]
+    },
+    "output": {
+      "review_step": 1,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [
+        {"candidate_id": "eq-01", "role": "test_equipment", "requires_check": true, "reason": "The device is used to produce the recorded measurement."},
+        {"candidate_id": "img-01", "role": "result_evidence", "requires_check": true, "reason": "Actual cites the image as supporting result evidence."}
+      ],
+      "summary": "Actual records a value within the Expected range and identifies supporting evidence."
+    }
+  },
+  {
+    "input": {
+      "review_step": 2,
+      "description": "Record current and voltage.",
+      "expected": "1. Current is 2 A. 2. Voltage is 12 V.",
+      "actual": "1. Current was 2 A.",
+      "actual_format": {"layout_text": "1. Current was 2 A.", "signals": []},
+      "numbered_comparison": [
+        {"number": 1, "expected": "Current is 2 A.", "actual": "Current was 2 A."},
+        {"number": 2, "expected": "Voltage is 12 V.", "actual": ""}
+      ],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 2,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "actual_insufficient", "severity": "fail", "reason": "Actual omits the voltage required by numbered Expected item 2."}
+      ],
+      "reference_decisions": [],
+      "summary": "Actual only records one of the two required results."
+    }
+  },
+  {
+    "input": {
+      "review_step": 3,
+      "description": "Use the CDM Programming tool to update the CDM firmware for DMS. (only for Taichi)",
+      "expected": "All firmware using manual refresh software shall be updated successfully.",
+      "actual": "This was Earth.",
+      "actual_format": {"layout_text": "This was Earth.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 3,
+      "applicability": "not_applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "summary": "Description limits the Step to Taichi and Actual records that this execution was Earth."
+    }
+  },
+  {
+    "input": {
+      "review_step": 4,
+      "description": "Check the computer environment used.",
+      "expected": "The computer parameters are the same or higher than the following: CPU 1.7GHZ, RAM 16G. Record computer parameters: ______.",
+      "actual": "The computer parameters were the same or higher than the following: CPU 1.7GHZ, RAM 16G.\nRecorded computer parameters: \\\\code1\\results\\Cycle01\\70290\\Step1.ipg",
+      "actual_format": {"layout_text": "Recorded computer parameters:", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": [
+        {"candidate_id": "file-01", "type": "file", "value": "\\\\code1\\results\\Cycle01\\70290\\Step1.ipg", "source_field": "actual", "detection_source": "path_extension"}
+      ]
+    },
+    "output": {
+      "review_step": 4,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [
+        {"candidate_id": "file-01", "role": "result_evidence", "requires_check": true, "reason": "Actual answers the recording requirement by citing this captured evidence file."}
+      ],
+      "summary": "Actual confirms the required parameters and cites an evidence file for the recorded values."
+    }
+  }
+]

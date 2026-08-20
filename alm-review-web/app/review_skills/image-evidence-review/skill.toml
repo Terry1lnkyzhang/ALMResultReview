@@ -1,0 +1,21 @@
+[skill]
+id = "image-evidence-review"
+name = "Image Evidence Review"
+version = "1.0.2"
+stage = "image_review"
+enabled = true
+
+[contract]
+version = "1"
+input_collection = "steps"
+output_collection = "assessments"
+identity_field = "review_step"
+
+[capabilities]
+required = ["review.step_text", "evidence.image.metadata", "evidence.image.content"]
+optional = []
+forbidden = ["filesystem.read", "network.fetch", "equipment.registry"]
+
+[model]
+temperature = 0
+max_tokens = 1024

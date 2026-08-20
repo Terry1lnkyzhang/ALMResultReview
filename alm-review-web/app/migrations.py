@@ -5,8 +5,8 @@ def ensure_compatible_schema(engine: Engine) -> None:
     with engine.begin() as connection:
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
+        boolean_type = "BOOLEAN" if engine.dialect.name != "mysql" else "TINYINT(1)"
         if "workspaces" not in table_names:
-            boolean_type = "BOOLEAN" if engine.dialect.name != "mysql" else "TINYINT(1)"
             identity = (
                 "INTEGER PRIMARY KEY AUTOINCREMENT"
                 if engine.dialect.name == "sqlite"
@@ -21,6 +21,9 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     f"equipment_review_enabled {boolean_type} NOT NULL DEFAULT 1, "
                     "equipment_area_filter VARCHAR(255) NOT NULL DEFAULT '', "
                     f"legacy_policy_adopted {boolean_type} NOT NULL DEFAULT 0, "
+                    f"review_queue_paused {boolean_type} NOT NULL DEFAULT 0, "
+                    f"sync_queue_paused {boolean_type} NOT NULL DEFAULT 0, "
+                    "queue_priority INTEGER NOT NULL DEFAULT 0, "
                     f"archived {boolean_type} NOT NULL DEFAULT 0, "
                     "created_at DATETIME NOT NULL, "
                     "updated_at DATETIME NULL"
@@ -37,6 +40,19 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     "BOOLEAN NOT NULL DEFAULT 0"
                 )
             )
+        workspace_queue_columns = {
+            "review_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
+            "sync_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
+            "queue_priority": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column_name, column_definition in workspace_queue_columns.items():
+            if column_name not in workspace_columns:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE workspaces ADD COLUMN {column_name} "
+                        f"{column_definition}"
+                    )
+                )
         default_workspace_id = connection.execute(
             text("SELECT id FROM workspaces ORDER BY id LIMIT 1")
         ).scalar()
@@ -194,6 +210,9 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 "folders_processed": "INTEGER NOT NULL DEFAULT 0",
                 "test_sets_discovered": "INTEGER NOT NULL DEFAULT 0",
                 "runs_discovered": "INTEGER NOT NULL DEFAULT 0",
+                "full_refresh": f"{boolean_type} NOT NULL DEFAULT 0",
+                "cursor_json": "TEXT NULL",
+                "run_id": "BIGINT NULL",
             }
             for column_name, column_definition in sync_progress_columns.items():
                 if column_name not in columns:
@@ -249,12 +268,36 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     )
                 )
 
+        if "ai_configs" in table_names:
+            columns = {
+                column["name"] for column in inspector.get_columns("ai_configs")
+            }
+            if "api_key" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE ai_configs ADD COLUMN api_key "
+                        "VARCHAR(2000) NOT NULL DEFAULT ''"
+                    )
+                )
+            if "review_concurrency" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE ai_configs ADD COLUMN review_concurrency "
+                        "INTEGER NOT NULL DEFAULT 1"
+                    )
+                )
+
         if "review_results" in table_names:
             columns = {
                 column["name"] for column in inspector.get_columns("review_results")
             }
             column_type = "LONGTEXT" if engine.dialect.name == "mysql" else "TEXT"
-            required_columns = ("criteria_json", "step_results_json", "warnings_json")
+            required_columns = (
+                "criteria_json",
+                "step_results_json",
+                "warnings_json",
+                "pipeline_json",
+            )
             for column in required_columns:
                 if column not in columns:
                     connection.execute(
@@ -289,16 +332,22 @@ def ensure_compatible_schema(engine: Engine) -> None:
                         "INTEGER NOT NULL AUTO_INCREMENT"
                     )
                 )
-            required_flags = (
-                "network_evidence_enabled",
-                "image_review_enabled",
-                "allow_insecure_image_transport",
-            )
-            for column in required_flags:
-                if column not in columns:
+            if "external_evidence_review_enabled" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE evidence_configs ADD COLUMN "
+                        "external_evidence_review_enabled BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+                legacy_flags = {
+                    "network_evidence_enabled",
+                    "image_review_enabled",
+                }
+                if legacy_flags <= columns:
                     connection.execute(
                         text(
-                            f"ALTER TABLE evidence_configs ADD COLUMN {column} "
-                            "BOOLEAN NOT NULL DEFAULT 0"
+                            "UPDATE evidence_configs SET "
+                            "external_evidence_review_enabled = 1 WHERE "
+                            "network_evidence_enabled = 1 OR image_review_enabled = 1"
                         )
                     )
