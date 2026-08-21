@@ -58,6 +58,7 @@ from app.services.review_status import (
 )
 from app.services.reviews import (
     current_review,
+    manual_decision_locks_run,
     save_manual_decision,
     test_ai_connection,
 )
@@ -1024,6 +1025,14 @@ def review_run_now(
         )
     if run.current_revision_id is None:
         return _redirect(f"/runs/{run_id}", "The Run has no current revision.", "error")
+    manual = manual_decision_locks_run(db, run)
+    if manual is not None:
+        return _redirect(
+            f"/runs/{run_id}",
+            f"{manual.operator} already resolved this revision manually. "
+            "Refresh it from ALM first if the content changed.",
+            "error",
+        )
     queue_run_review(db, run)
     return _redirect(
         f"/runs/{run_id}",

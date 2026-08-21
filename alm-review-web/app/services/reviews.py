@@ -1796,6 +1796,25 @@ def test_ai_connection(config: AiConfig) -> str:
     return content
 
 
+class ManualDecisionLock(Exception):
+    """Raised when a Run was already resolved by an operator, so re-reviewing it would
+    orphan that decision. Enforced at execution time because a stale Web deployment can
+    still enqueue jobs that bypass the queueing-side guard."""
+
+
+def manual_decision_locks_run(db: Session, run: AlmRun) -> ManualDecision | None:
+    return db.scalar(
+        select(ManualDecision)
+        .where(
+            ManualDecision.run_id == run.run_id,
+            ManualDecision.revision_id == run.current_revision_id,
+            ManualDecision.source_hash == run.source_hash,
+        )
+        .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
+        .limit(1)
+    )
+
+
 def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> ReviewResult:
     run = db.get(AlmRun, job.run_id)
     revision = db.get(RunRevision, job.revision_id)
@@ -1815,6 +1834,16 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         job.completed_at = utcnow()
         db.commit()
         raise ValueError("Review job is outdated because the ALM run changed.")
+
+    manual = manual_decision_locks_run(db, run)
+    if manual is not None:
+        job.status = "cancelled"
+        job.completed_at = utcnow()
+        job.error_message = (
+            f"Skipped: {manual.operator} already resolved this revision as {manual.decision}."
+        )
+        db.commit()
+        raise ManualDecisionLock(job.error_message)
 
     prompt = db.scalar(
         select(PromptVersion).where(PromptVersion.is_active.is_(True)).order_by(desc(PromptVersion.id))
@@ -2142,6 +2171,8 @@ def process_claimed_review_job(db: Session, job_id: int) -> tuple[int, int]:
     try:
         process_job(db, job)
         return 1, 0
+    except ManualDecisionLock:
+        return 0, 0
     except Exception as exc:
         db.rollback()
         failed_job = db.get(ReviewJob, job_id)

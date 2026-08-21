@@ -1,7 +1,7 @@
 [skill]
 id = "image-evidence-review"
 name = "Image Evidence Review"
-version = "1.0.2"
+version = "1.0.3"
 stage = "image_review"
 enabled = true
 

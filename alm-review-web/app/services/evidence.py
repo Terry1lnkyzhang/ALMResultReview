@@ -121,9 +121,15 @@ def extract_paths(value: str) -> list[dict[str, str]]:
                 )
     selected: list[tuple[int, int, str, dict[str, str]]] = []
     seen: set[str] = set()
+    covered: list[tuple[int, int]] = []
     for candidate in sorted(candidates, key=lambda item: (item[1] - item[0]), reverse=True):
         start, end, key, _ = candidate
-        if key in seen or any(start >= item[0] and end <= item[1] for item in selected):
+        if any(start >= span[0] and end <= span[1] for span in covered):
+            continue
+        # Cover the span even when the text repeats, so a shorter regex cannot
+        # leak a truncated prefix out of a later occurrence of the same path.
+        covered.append((start, end))
+        if key in seen:
             continue
         selected.append(candidate)
         seen.add(key)

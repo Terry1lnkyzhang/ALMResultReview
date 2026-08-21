@@ -18,7 +18,7 @@ from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.08.20.2"
+REVIEW_ENGINE_VERSION = "2026.08.20.3"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",

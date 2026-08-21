@@ -85,5 +85,26 @@
       ],
       "summary": "Actual confirms the required parameters and cites an evidence file for the recorded values."
     }
+  },
+  {
+    "input": {
+      "review_step": 5,
+      "description": "Run the MPR recon and the volume batch.",
+      "expected": "1. Record batch name: _. 2. The mpr recon should be executed normally(Pending->Active->Failed). The volume batch should be able to complete recon successfully.",
+      "actual": "1. Record batch name: Oblique MPR, Volume Batch. 2. The MPR recon was executed normally(Pending->Active->Failed). The volume batch was able to complete recon successfully.",
+      "actual_format": {"layout_text": "1. Record batch name: Oblique MPR, Volume Batch.", "signals": []},
+      "numbered_comparison": [
+        {"number": 1, "expected": "Record batch name: _.", "actual": "Record batch name: Oblique MPR, Volume Batch."},
+        {"number": 2, "expected": "The mpr recon should be executed normally(Pending->Active->Failed). The volume batch should be able to complete recon successfully.", "actual": "The MPR recon was executed normally(Pending->Active->Failed). The volume batch was able to complete recon successfully."}
+      ],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 5,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "summary": "Expected prescribes the Pending->Active->Failed transition as the normal outcome and Actual reports exactly that, so the Step passes."
+    }
   }
 ]

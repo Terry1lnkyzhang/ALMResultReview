@@ -1,7 +1,7 @@
 [skill]
 id = "alm-text-review"
 name = "ALM Text Review and Evidence Planning"
-version = "1.2.0"
+version = "1.2.1"
 stage = "text_review"
 enabled = true
 
