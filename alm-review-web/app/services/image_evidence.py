@@ -11,6 +11,7 @@ from pathlib import Path, PureWindowsPath
 from app.services.evidence import validate_network_evidence_path
 
 _IMAGE_TYPES = {
+    ".jfif": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".jpg": "image/jpeg",
     ".png": "image/png",
@@ -179,18 +180,35 @@ class NetworkImageResolver:
         root = PureWindowsPath(allowed_root.strip().rstrip("\\/"))
         relative_parts = PureWindowsPath(value).relative_to(root).parts
         current = Path(str(root))
-        for part in relative_parts:
+        last_index = len(relative_parts) - 1
+        for index, part in enumerate(relative_parts):
             with os.scandir(current) as entries:
                 entry = next(
                     (item for item in entries if item.name.casefold() == part.casefold()),
                     None,
                 )
-                if entry is None:
-                    raise FileNotFoundError(str(current / part))
-                if self._is_reparse_point(entry):
-                    return None
-                current = Path(entry.path)
+            if entry is None and index == last_index:
+                # Testers routinely paste an evidence path without the file extension,
+                # so accept "...\step4" when only "...\step4.jpg" sits on the share.
+                entry = self._image_by_stem(current, part)
+            if entry is None:
+                raise FileNotFoundError(str(current / part))
+            if self._is_reparse_point(entry):
+                return None
+            current = Path(entry.path)
         return current
+
+    @staticmethod
+    def _image_by_stem(directory: Path, stem: str) -> os.DirEntry | None:
+        target = stem.casefold()
+        matches = []
+        with os.scandir(directory) as entries:
+            for item in entries:
+                name, extension = os.path.splitext(item.name)
+                if name.casefold() == target and extension.casefold() in _IMAGE_TYPES:
+                    matches.append(item)
+        matches.sort(key=lambda item: item.name.casefold())
+        return matches[0] if matches else None
 
     def _candidate_files(self, root: Path):
         pending = [(root, 0)]

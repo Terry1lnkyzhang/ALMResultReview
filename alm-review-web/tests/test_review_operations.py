@@ -14,7 +14,7 @@ from app.models import (
 )
 from app.services.review_operations import (
     cancel_queued_reviews,
-    delete_run,
+    delete_local_run,
     latest_rereview_progress,
     queue_rereviews,
     workspace_review_progress,
@@ -63,7 +63,7 @@ def add_reviewed_run(db: Session, run_id: int, verdict: str) -> AlmRun:
     return run
 
 
-def test_delete_run_leaves_no_orphaned_rows() -> None:
+def test_delete_local_run_leaves_no_orphaned_rows() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -71,7 +71,7 @@ def test_delete_run_leaves_no_orphaned_rows() -> None:
         kept = add_reviewed_run(db, 2, "qualified")
         revision_id = run.current_revision_id
         db.add(RunStep(revision_id=revision_id, step_id=10, name="Step 1"))
-        db.add(SyncJob(run_id=1, status="queued"))
+        db.add(SyncJob(run_id=1, status="completed"))
         result_id = db.scalar(select(ReviewResult.id).where(ReviewResult.run_id == 1))
         save_manual_decision(db, run, "override_qualified", "tester", "Checked by hand")
         db.commit()
@@ -79,12 +79,8 @@ def test_delete_run_leaves_no_orphaned_rows() -> None:
             select(ManualDecision).where(ManualDecision.run_id == 1)
         ) is not None
 
-        summary = delete_run(db, run)
+        delete_local_run(db, run)
 
-        assert summary.run_id == 1
-        assert (summary.revisions, summary.steps, summary.review_jobs) == (1, 1, 1)
-        assert (summary.review_results, summary.manual_decisions) == (1, 1)
-        assert summary.sync_jobs == 1
         assert db.get(AlmRun, 1) is None
         # Tables without a foreign key would silently keep orphans behind.
         for model, column in (

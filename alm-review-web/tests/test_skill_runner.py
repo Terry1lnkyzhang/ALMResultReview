@@ -64,7 +64,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.2.0"
+    assert definition.version == "1.4.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -72,16 +72,16 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.2.0",
+        "version": "1.4.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.2.0",
-        "equipment-role": "1.0.2",
-        "image-evidence-review": "1.0.2",
+        "alm-text-review": "1.4.0",
+        "equipment-role": "1.3.1",
+        "image-evidence-review": "1.1.0",
     }
 
     assert set(discover_skills()) == {*active, "html-evidence-review"}
@@ -152,7 +152,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.2.0"
+    assert trace["skill_version"] == "1.4.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64
@@ -164,6 +164,64 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     assert requests[0]["messages"][1]["role"] == "user"
     assert "Screenshots saved" not in requests[0]["messages"][0]["content"]
     assert "Screenshots saved" in requests[0]["messages"][1]["content"]
+
+
+def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) -> None:
+    definition = load_skill("alm-text-review")
+    requests: list[dict] = []
+
+    def post(*args, **kwargs):
+        payload = kwargs["json"]
+        requests.append(payload)
+        steps = json.loads(payload["messages"][1]["content"])["steps"]
+        return StubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": step["review_step"],
+                            "applicability": "applicable",
+                            "findings": [],
+                            "reference_decisions": [],
+                            "extracted_equipment": [],
+                            "summary": "Actual matches Expected.",
+                        }
+                        for step in steps
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+
+    def cap_for(step_count: int) -> int:
+        payload = skill_input()
+        template = payload["steps"][0]
+        payload["steps"] = [
+            {**template, "review_step": number, "reference_candidates": []}
+            for number in range(1, step_count + 1)
+        ]
+        trace = SkillRunner().run(
+            "alm-text-review",
+            payload,
+            endpoint="https://ai.example/v1/chat/completions",
+            model_name="test-model",
+            headers={},
+            timeout_seconds=30,
+            granted_capabilities={
+                "review.step_text",
+                "review.text_format",
+                "review.numbered_comparison",
+                "evidence.path_metadata",
+                "equipment.registry.candidates",
+            },
+        )
+        assert trace["status"] == "completed"
+        return trace["max_tokens"]
+
+    assert cap_for(1) == definition.max_tokens
+    assert cap_for(15) == definition.max_tokens_per_item * 15
+    assert requests[-1]["max_tokens"] > definition.max_tokens
 
 
 def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) -> None:
@@ -336,10 +394,11 @@ def test_image_skill_cannot_receive_media_without_image_capability() -> None:
 
 def test_equipment_skill_adapter_rejects_unavailable_equipment_id(monkeypatch) -> None:
     from app.models import AiConfig
-    from app.services.reviews import _request_equipment_disambiguation
+    from app.services.equipment_pipeline import request_equipment_disambiguation
+    from app.services.equipment_review import Candidate, OpenQuestion
 
     monkeypatch.setattr(
-        "app.services.reviews.httpx.post",
+        "app.services.equipment_pipeline.httpx.post",
         lambda *args, **kwargs: StubResponse(
             json.dumps(
                 {
@@ -349,6 +408,7 @@ def test_equipment_skill_adapter_rejects_unavailable_equipment_id(monkeypatch) -
                             "role": "controlled_equipment",
                             "required": True,
                             "selected_equipment_ids": ["INVENTED-DEVICE"],
+                            "selected_equipment_names": [],
                             "reason": "Invented selection.",
                         }
                     ]
@@ -358,24 +418,66 @@ def test_equipment_skill_adapter_rejects_unavailable_equipment_id(monkeypatch) -
     )
 
     with pytest.raises(ValueError, match="unavailable equipment ID"):
-        _request_equipment_disambiguation(
+        request_equipment_disambiguation(
             AiConfig(base_url="https://ai.example/v1", model_name="test"),
             [
-                {
-                    "step": 1,
-                    "description": "Record equipment.",
-                    "expected": "Equipment ID is recorded.",
-                    "actual": "Used equipment.",
-                    "reported_identifiers": [],
-                    "previously_matched_equipment_ids": [],
-                    "candidate_equipment": [
-                        {
-                            "equipment_id": "EQ-100",
-                            "description": "Meter",
-                            "model_number": "M1",
-                            "serial_number": "S1",
-                        }
-                    ],
-                }
+                OpenQuestion(
+                    review_step=1,
+                    kind="role",
+                    description="Record equipment.",
+                    expected="Equipment ID is recorded.",
+                    actual="Used equipment.",
+                    candidates=(
+                        Candidate(
+                            equipment_id="EQ-100",
+                            description="Meter",
+                            model_number="M1",
+                            serial_number="S1",
+                        ),
+                    ),
+                )
             ],
+            ["Meter"],
+        )
+
+
+def test_equipment_skill_adapter_rejects_a_name_outside_the_registry(monkeypatch) -> None:
+    from app.models import AiConfig
+    from app.services.equipment_pipeline import request_equipment_disambiguation
+    from app.services.equipment_review import OpenQuestion
+
+    monkeypatch.setattr(
+        "app.services.equipment_pipeline.httpx.post",
+        lambda *args, **kwargs: StubResponse(
+            json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "review_step": 1,
+                            "role": "controlled_equipment",
+                            "required": True,
+                            "selected_equipment_ids": [],
+                            "selected_equipment_names": ["Invented device"],
+                            "reason": "Invented selection.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="outside the registry vocabulary"):
+        request_equipment_disambiguation(
+            AiConfig(base_url="https://ai.example/v1", model_name="test"),
+            [
+                OpenQuestion(
+                    review_step=1,
+                    kind="name_mapping",
+                    description="Record equipment.",
+                    expected="Equipment ID is recorded.",
+                    actual="Used equipment.",
+                    device_names=("Meter",),
+                )
+            ],
+            ["Meter"],
         )

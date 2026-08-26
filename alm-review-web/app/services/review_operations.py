@@ -40,64 +40,6 @@ class RereviewQueueResult:
 
 
 @dataclass(frozen=True)
-class DeletedRunSummary:
-    run_id: int
-    alm_run_id: int | None
-    test_name: str
-    revisions: int
-    steps: int
-    review_jobs: int
-    review_results: int
-    manual_decisions: int
-    sync_jobs: int
-
-
-def delete_run(db: Session, run: AlmRun) -> DeletedRunSummary:
-    """Erase a Run and everything derived from it.
-
-    Child rows are removed explicitly: `manual_decisions`, `review_jobs` and
-    `sync_jobs` reference the Run without a foreign key, so database-level
-    cascades would leave them behind as orphans pointing at a missing Run.
-    """
-    run_id = run.run_id
-    revision_ids = list(
-        db.scalars(select(RunRevision.id).where(RunRevision.run_id == run_id))
-    )
-    steps = 0
-    if revision_ids:
-        steps = db.execute(
-            delete(RunStep).where(RunStep.revision_id.in_(revision_ids))
-        ).rowcount
-    review_results = db.execute(
-        delete(ReviewResult).where(ReviewResult.run_id == run_id)
-    ).rowcount
-    review_jobs = db.execute(
-        delete(ReviewJob).where(ReviewJob.run_id == run_id)
-    ).rowcount
-    manual_decisions = db.execute(
-        delete(ManualDecision).where(ManualDecision.run_id == run_id)
-    ).rowcount
-    sync_jobs = db.execute(delete(SyncJob).where(SyncJob.run_id == run_id)).rowcount
-    revisions = db.execute(
-        delete(RunRevision).where(RunRevision.run_id == run_id)
-    ).rowcount
-    summary = DeletedRunSummary(
-        run_id=run_id,
-        alm_run_id=run.alm_run_id,
-        test_name=run.test_name,
-        revisions=revisions,
-        steps=steps,
-        review_jobs=review_jobs,
-        review_results=review_results,
-        manual_decisions=manual_decisions,
-        sync_jobs=sync_jobs,
-    )
-    db.delete(run)
-    db.commit()
-    return summary
-
-
-@dataclass(frozen=True)
 class RereviewProgress:
     batch_id: str
     created_at: datetime
@@ -249,6 +191,40 @@ def active_run_review_job(db: Session, run: AlmRun) -> ReviewJob | None:
         .order_by(desc(ReviewJob.id))
         .limit(1)
     )
+
+
+def delete_local_run(db: Session, run: AlmRun) -> None:
+    """Delete a Run and its local history once no job can still use it."""
+    active_review = db.scalar(
+        select(ReviewJob.id).where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.status.in_(("queued", "running")),
+        )
+    )
+    active_sync = db.scalar(
+        select(SyncJob.id).where(
+            SyncJob.run_id == run.run_id,
+            SyncJob.status.in_(("queued", "running")),
+        )
+    )
+    if active_review is not None or active_sync is not None:
+        raise ValueError(
+            "This Run cannot be deleted while an ALM refresh or AI review is "
+            "queued or running. Remove or finish the active job first."
+        )
+
+    revision_ids = list(
+        db.scalars(select(RunRevision.id).where(RunRevision.run_id == run.run_id))
+    )
+    db.execute(delete(ManualDecision).where(ManualDecision.run_id == run.run_id))
+    db.execute(delete(ReviewResult).where(ReviewResult.run_id == run.run_id))
+    db.execute(delete(ReviewJob).where(ReviewJob.run_id == run.run_id))
+    db.execute(delete(SyncJob).where(SyncJob.run_id == run.run_id))
+    if revision_ids:
+        db.execute(delete(RunStep).where(RunStep.revision_id.in_(revision_ids)))
+    db.execute(delete(RunRevision).where(RunRevision.run_id == run.run_id))
+    db.delete(run)
+    db.commit()
 
 
 def cancel_queued_reviews(

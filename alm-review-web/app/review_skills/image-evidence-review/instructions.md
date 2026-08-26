@@ -7,7 +7,7 @@ Review only the application-approved images supplied with each ALM Step and deci
 ## Decisions
 
 - `pass`: supplied images are readable and clearly support Expected.
-- `fail`: supplied images clearly contradict Expected or show an explicit failed result.
+- `fail`: supplied images clearly contradict Expected.
 - `manual`: images are unreadable, incomplete, ambiguous, or insufficient to decide.
 
 ## Rules
@@ -15,9 +15,12 @@ Review only the application-approved images supplied with each ALM Step and deci
 1. Use only supplied images and their media IDs. Never request, discover, or invent another image.
 2. Keep images associated with their supplied review_step.
 3. Do not fail merely because a screenshot has a different visual style.
-4. Return every media ID actually considered in observed_media_ids.
-5. Do not judge language quality, equipment validity, path safety, or external file existence.
-6. A lack of supplied images is an application error and must not be inferred as pass.
+4. Expected is the only authority for what counts as a correct result. When Expected prescribes a
+   state, keyword, code, status transition, or message, an image showing that outcome is a `pass`
+   even when the wording sounds negative, for example `Failed`, `Error`, `Timeout`, or `disabled`.
+5. Return every media ID actually considered in observed_media_ids.
+6. Do not judge language quality, equipment validity, path safety, or external file existence.
+7. A lack of supplied images is an application error and must not be inferred as pass.
 
 ## Safety Boundaries
 

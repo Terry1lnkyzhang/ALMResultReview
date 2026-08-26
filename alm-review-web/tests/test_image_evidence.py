@@ -59,15 +59,16 @@ def test_resolver_only_reports_known_image_evidence_statuses() -> None:
 def test_collects_supported_images_with_depth_and_count_limits(tmp_path: Path) -> None:
     write_image(tmp_path / "01.png")
     write_image(tmp_path / "level1" / "02.jpg", JPEG_BYTES)
-    write_image(tmp_path / "level1" / "level2" / "03.webp", WEBP_BYTES)
+    write_image(tmp_path / "level1" / "03.jfif", JPEG_BYTES)
+    write_image(tmp_path / "level1" / "level2" / "04.webp", WEBP_BYTES)
     write_image(tmp_path / "level1" / "level2" / "level3" / "ignored.png")
-    write_image(tmp_path / "04.png")
     write_image(tmp_path / "05.png")
+    write_image(tmp_path / "06.png")
 
-    result = NetworkImageResolver(max_depth=2, max_images=4).collect(tmp_path)
+    result = NetworkImageResolver(max_depth=2, max_images=5).collect(tmp_path)
 
     assert result.status == "ready"
-    assert len(result.images) == 4
+    assert len(result.images) == 5
     assert {image.media_type for image in result.images} <= {
         "image/png",
         "image/jpeg",
@@ -317,3 +318,53 @@ def test_resolve_does_not_require_pathlib_resolve_for_approved_path(
 
     assert result.status == "ready"
     assert [image.relative_name for image in result.images] == ["evidence.png"]
+
+
+def test_extensionless_leaf_resolves_to_the_matching_image_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_image(tmp_path / "step4.jpg", JPEG_BYTES)
+    write_image(tmp_path / "step5.PNG")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    resolver = NetworkImageResolver()
+
+    result = resolver.resolve(str(tmp_path / "step4"), str(tmp_path))
+
+    assert result.status == "ready"
+    assert [image.relative_name for image in result.images] == ["step4.jpg"]
+
+
+def test_extensionless_leaf_stays_missing_when_no_image_shares_the_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_image(tmp_path / "step4.png")
+    (tmp_path / "step9.txt").write_text("not an image", encoding="utf-8")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    resolver = NetworkImageResolver()
+
+    assert resolver.resolve(str(tmp_path / "step9"), str(tmp_path)).status == "missing"
+
+
+def test_extensionless_folder_segment_is_not_matched_against_an_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    write_image(tmp_path / "step4.png")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    resolver = NetworkImageResolver()
+
+    assert resolver.resolve(str(tmp_path / "step4" / "shot"), str(tmp_path)).status == "missing"

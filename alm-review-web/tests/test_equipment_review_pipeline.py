@@ -17,8 +17,13 @@ from app.models import (
     RunRevision,
     Workspace,
 )
+from app.services.equipment_review import OpenQuestion
 from app.services.html_evidence import HtmlEvidenceResult
-from app.services.reviews import _build_review_plan, process_job
+from app.services.reviews import (
+    _build_review_plan,
+    _equipment_source_field,
+    process_job,
+)
 from app.services.workspaces import default_workspace
 
 
@@ -190,13 +195,38 @@ def test_review_plan_routes_text_report_and_equipment_steps() -> None:
             {"review_step": 1, "status": "not_applicable"},
             {"review_step": 2, "status": "manual"},
         ],
+        [
+            OpenQuestion(
+                review_step=1,
+                kind="name_mapping",
+                description="",
+                expected="",
+                actual="",
+            )
+        ],
     )
 
     assert plan.text_steps == (1, 2)
     assert [(item.review_step, item.paths) for item in plan.report_requests] == [
         (1, (r"\\server\reports\result.html",))
     ]
-    assert plan.equipment_steps == (2,)
+    assert plan.equipment_steps == (2, 1)
+
+
+def test_equipment_candidate_without_step_evidence_has_no_source_field() -> None:
+    step = {
+        "description": "Perform the scan with the head phantom.",
+        "expected": "The scan succeeds.",
+        "actual": "The result was recorded.",
+    }
+    previous_equipment = {
+        "equipment_id": "PHSZ-RD-VV-0-0119",
+        "description": "Anthropomorphic phantom (Full Body)- Sandy",
+        "model_number": "PBU-60",
+        "serial_number": "11A-09",
+    }
+
+    assert _equipment_source_field(step, previous_equipment) is None
 
 
 def test_process_job_exact_match_uses_only_main_ai_and_persists_equipment(

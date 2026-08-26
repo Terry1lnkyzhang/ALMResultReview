@@ -82,6 +82,23 @@ def test_extracts_unc_path_after_referred_to_prefix() -> None:
     assert [item["raw"] for item in paths] == [path]
 
 
+def test_repeated_path_with_spaces_does_not_leak_a_truncated_prefix() -> None:
+    path = (
+        r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Earth"
+        r"\System Verification Cycle01\SZbay08\58805_231421"
+    )
+    actual = (
+        "1.Layout tab was unavailable\n\nsaves screenshots as follow:\n\n"
+        + path
+        + "\n\n5.The layout tab was available.\n\nsaves screenshots as follow:\n\n"
+        + path
+    )
+
+    paths = extract_paths(actual)
+
+    assert [item["raw"] for item in paths] == [path]
+
+
 def test_explicit_phantom_part_number_does_not_require_reference_lookup() -> None:
     profile = step_evidence_profile(
         "Used phantom part number is PCCSY-RD-CT-0-20151202.",

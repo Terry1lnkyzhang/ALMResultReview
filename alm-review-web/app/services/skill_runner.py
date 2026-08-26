@@ -109,6 +109,16 @@ class ReferenceDecision(BaseModel):
     reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
 
 
+class ExtractedEquipment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_name: str = Field(default="", max_length=512)
+    equipment_id: str = Field(default="", max_length=128)
+    serial_number: str = Field(default="", max_length=255)
+    reported_calibration_due_date: str = Field(default="", max_length=32)
+    source_text: str = Field(min_length=1, max_length=512)
+
+
 class AlmTextAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -116,6 +126,9 @@ class AlmTextAssessment(BaseModel):
     applicability: Literal["applicable", "not_applicable", "manual"]
     findings: list[AlmTextFinding]
     reference_decisions: list[ReferenceDecision]
+    extracted_equipment: list[ExtractedEquipment] = Field(
+        default_factory=list, max_length=12
+    )
     summary: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
 
 
@@ -175,12 +188,14 @@ class EquipmentRoleStep(ReviewTextStep):
     reported_identifiers: list[str]
     previously_matched_equipment_ids: list[str]
     candidate_equipment: list[EquipmentCandidate]
+    extracted_device_names: list[str] = Field(default_factory=list)
 
 
 class EquipmentRoleInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     steps: list[EquipmentRoleStep] = Field(min_length=1)
+    registry_equipment_names: list[str] = Field(default_factory=list)
 
 
 class EquipmentRoleDecision(BaseModel):
@@ -190,6 +205,7 @@ class EquipmentRoleDecision(BaseModel):
     role: Literal["controlled_equipment", "dut_or_other", "uncertain"]
     required: bool
     selected_equipment_ids: list[str]
+    selected_equipment_names: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
 
 
@@ -214,6 +230,7 @@ class SkillDefinition:
     stage: str
     temperature: float
     max_tokens: int
+    max_tokens_per_item: int
     instructions: str
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
@@ -294,6 +311,14 @@ def _validated_output(
                 f"Requested {sorted(requested_ids)!r}, returned {sorted(returned_ids)!r}."
             )
     return validated
+
+
+def _max_tokens(definition: SkillDefinition, validated_input: dict[str, Any]) -> int:
+    """Grow the cap with the batch, but never shrink below the declared budget."""
+    if not definition.max_tokens_per_item or not definition.input_collection:
+        return definition.max_tokens
+    items = len(validated_input.get(definition.input_collection) or ())
+    return max(definition.max_tokens, definition.max_tokens_per_item * items)
 
 
 def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
@@ -395,6 +420,7 @@ def load_skill(skill_id: str) -> SkillDefinition:
         stage=str(metadata["stage"]),
         temperature=float(model.get("temperature", 0)),
         max_tokens=int(model.get("max_tokens", 1024)),
+        max_tokens_per_item=int(model.get("max_tokens_per_item", 0)),
         instructions=paths["instructions"].read_text(encoding="utf-8").strip(),
         input_schema=input_schema,
         output_schema=output_schema,
@@ -513,6 +539,8 @@ class SkillRunner:
             ]
             repairs: list[str] = []
             trace["repairs"] = repairs
+            max_tokens = _max_tokens(definition, validated_input)
+            trace["max_tokens"] = max_tokens
             for attempt in range(1, MAX_OUTPUT_REPAIR_ATTEMPTS + 1):
                 trace["ai_calls"] = attempt
                 response = (request_post or httpx.post)(
@@ -520,7 +548,7 @@ class SkillRunner:
                     json={
                         "model": model_name,
                         "temperature": definition.temperature,
-                        "max_tokens": definition.max_tokens,
+                        "max_tokens": max_tokens,
                         "chat_template_kwargs": {"enable_thinking": False},
                         "messages": messages,
                     },

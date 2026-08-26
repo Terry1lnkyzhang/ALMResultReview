@@ -10,8 +10,11 @@ from app.models import (
     AiConfig,
     AlmRun,
     EvidenceConfig,
+    ManualDecision,
     ReviewJob,
+    ReviewResult,
     RunRevision,
+    RunStep,
     SyncConfig,
     SyncJob,
     WorkerHeartbeat,
@@ -22,7 +25,7 @@ from app.web import (
     _run_sync_batch_progress,
     cancel_review_jobs,
     create_workspace,
-    delete_run_record,
+    delete_run,
     import_snapshot,
     process_reviews,
     queue_status,
@@ -111,6 +114,140 @@ def test_review_action_only_creates_a_database_job() -> None:
         assert job.status == "queued"
 
 
+def test_delete_run_removes_all_local_run_history() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        run = AlmRun(
+            run_id=42,
+            alm_run_id=155510,
+            workspace_id=workspace.id,
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        revision = RunRevision(
+            run_id=run.run_id,
+            revision_number=1,
+            source_hash=run.source_hash,
+            review_hash=run.review_hash,
+            snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        run.current_revision_id = revision.id
+        db.add(RunStep(revision_id=revision.id, step_order=1))
+        review_job = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            status="completed",
+        )
+        db.add(review_job)
+        db.flush()
+        result = ReviewResult(
+            workspace_id=workspace.id,
+            job_id=review_job.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            prompt_version_id=1,
+            source_hash=run.source_hash,
+            model_name="test-model",
+            verdict="qualified",
+        )
+        db.add(result)
+        db.flush()
+        db.add_all(
+            (
+                ManualDecision(
+                    workspace_id=workspace.id,
+                    run_id=run.run_id,
+                    revision_id=revision.id,
+                    review_result_id=result.id,
+                    decision="confirmed_qualified",
+                    operator="tester",
+                    reason="Reviewed",
+                    source_hash=run.source_hash,
+                    original_ai_verdict="qualified",
+                ),
+                SyncJob(
+                    workspace_id=workspace.id,
+                    run_id=run.run_id,
+                    status="completed",
+                ),
+            )
+        )
+        db.commit()
+
+        response = delete_run(run.run_id, "155510", db)
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith(
+            f"/?workspace={workspace.id}&message=Run%20155510"
+        )
+        for model in (
+            AlmRun,
+            RunRevision,
+            RunStep,
+            ReviewJob,
+            ReviewResult,
+            ManualDecision,
+            SyncJob,
+        ):
+            assert db.scalar(select(model)) is None
+
+
+def test_delete_run_requires_exact_display_id_confirmation() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = AlmRun(
+            run_id=42,
+            alm_run_id=155510,
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.commit()
+
+        response = delete_run(run.run_id, "42", db)
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/runs/42?message=")
+        assert "Nothing%20was%20deleted" in response.headers["location"]
+        assert db.get(AlmRun, run.run_id) is not None
+
+
+def test_delete_run_is_blocked_while_a_job_is_active() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = AlmRun(
+            run_id=42,
+            alm_run_id=155510,
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        db.add(SyncJob(run_id=run.run_id, status="running"))
+        db.commit()
+
+        response = delete_run(run.run_id, "155510", db)
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/runs/42?message=")
+        assert "cannot%20be%20deleted" in response.headers["location"]
+        assert db.get(AlmRun, run.run_id) is not None
+
+
 def test_process_reviews_queues_only_latest_alm_changes(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -138,38 +275,6 @@ def test_process_reviews_queues_only_latest_alm_changes(monkeypatch) -> None:
         assert response.status_code == 303
         assert "19%20review-content%20changes" in response.headers["location"]
         assert "9%20queued" in response.headers["location"]
-
-
-def test_delete_run_record_requires_a_matching_confirmation() -> None:
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    with Session(engine) as db:
-        workspace = Workspace(name="Project A", slug="project-a")
-        db.add(workspace)
-        db.flush()
-        run = AlmRun(
-            workspace_id=workspace.id,
-            run_id=77,
-            alm_run_id=153886,
-            run_status="Passed",
-            source_hash="a" * 64,
-            review_hash="b" * 64,
-            raw_json="{}",
-        )
-        db.add(run)
-        db.commit()
-
-        rejected = delete_run_record(77, "77", db)
-
-        assert rejected.status_code == 303
-        assert "Deletion%20cancelled" in rejected.headers["location"]
-        assert db.get(AlmRun, 77) is not None
-
-        accepted = delete_run_record(77, " 153886 ", db)
-
-        assert accepted.status_code == 303
-        assert accepted.headers["location"].startswith(f"/?workspace={workspace.id}")
-        assert db.get(AlmRun, 77) is None
 
 
 def test_retry_failed_reviews_queues_only_current_failed_runs() -> None:

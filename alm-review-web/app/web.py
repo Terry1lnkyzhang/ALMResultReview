@@ -45,7 +45,7 @@ from app.services.review_operations import (
     REREVIEW_SCOPES,
     active_run_review_job,
     cancel_queued_reviews,
-    delete_run,
+    delete_local_run,
     queue_failed_reviews,
     queue_rereviews,
     queue_rereviews_for_run_ids,
@@ -60,6 +60,7 @@ from app.services.review_status import (
 )
 from app.services.reviews import (
     current_review,
+    manual_decision_locks_run,
     save_manual_decision,
     test_ai_connection,
 )
@@ -1147,6 +1148,14 @@ def review_run_now(
         )
     if run.current_revision_id is None:
         return _redirect(f"/runs/{run_id}", "The Run has no current revision.", "error")
+    manual = manual_decision_locks_run(db, run)
+    if manual is not None:
+        return _redirect(
+            f"/runs/{run_id}",
+            f"{manual.operator} already resolved this revision manually. "
+            "Refresh it from ALM first if the content changed.",
+            "error",
+        )
     queue_run_review(db, run)
     return _redirect(
         f"/runs/{run_id}",
@@ -1180,28 +1189,31 @@ def refresh_run_from_alm(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/delete")
-def delete_run_record(
+def delete_run(
     run_id: int,
-    confirm_run_id: str = Form(""),
+    confirmation: str = Form(...),
     db: Session = Depends(get_db),
 ):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    expected = str(run.alm_run_id or run.run_id)
-    if confirm_run_id.strip() != expected:
+    display_id = str(run.alm_run_id or run.run_id)
+    if confirmation.strip() != display_id:
         return _redirect(
             f"/runs/{run_id}",
-            f"Deletion cancelled: type the Run ID {expected} to confirm.",
+            f"Run ID confirmation did not match {display_id}. Nothing was deleted.",
             "error",
         )
     workspace_id = run.workspace_id
-    summary = delete_run(db, run)
+    try:
+        delete_local_run(db, run)
+    except ValueError as exc:
+        return _redirect(f"/runs/{run_id}", str(exc), "error")
+    dashboard = f"/?workspace={workspace_id}" if workspace_id is not None else "/"
     return _redirect(
-        f"/?workspace={workspace_id}" if workspace_id else "/",
-        f"Run {summary.alm_run_id or summary.run_id} deleted with "
-        f"{summary.revisions} revision(s), {summary.review_jobs} review job(s) and "
-        f"{summary.manual_decisions} manual decision(s).",
+        dashboard,
+        f"Run {display_id} and its local review history were deleted. If the Run "
+        "still exists in ALM, a future sync may import it again.",
     )
 
 

@@ -11,6 +11,8 @@ from app.database import Base
 from app.models import (
     AlmRun,
     ReviewJob,
+    ReviewResult,
+    RunRevision,
     SyncConfig,
     SyncJob,
     WorkerHeartbeat,
@@ -19,7 +21,13 @@ from app.models import (
 )
 from app.services import reviews, scheduler, worker_tasks
 from app.services.alm import FolderBatch, FolderCollectionProgress
-from app.services.reviews import FAILED_JOB_RETRY_BACKOFF_SECONDS, claim_next_review_job
+from app.services.review_policy import current_review_policy_key
+from app.services.reviews import (
+    FAILED_JOB_RETRY_BACKOFF_SECONDS,
+    claim_next_review_job,
+    current_review,
+    save_manual_decision,
+)
 from app.services.skill_runner import SkillFailure
 from app.services.worker_tasks import (
     claim_next_sync_job,
@@ -192,6 +200,76 @@ def test_terminal_review_failure_is_not_retried(monkeypatch) -> None:
         job = db.get(ReviewJob, 1)
         assert job.status == "failed"
         assert job.attempt_count == reviews.MAX_REVIEW_JOB_ATTEMPTS
+        assert claim_next_review_job(db, "worker-one", lease_seconds=60) is None
+
+
+def test_worker_drops_a_review_job_for_a_manually_resolved_revision() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        run = AlmRun(
+            workspace_id=workspace.id,
+            run_id=42,
+            run_status="Passed",
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        revision = RunRevision(
+            run_id=run.run_id,
+            revision_number=1,
+            source_hash=run.source_hash,
+            review_hash=run.review_hash,
+            snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        run.current_revision_id = revision.id
+        reviewed = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            status="completed",
+        )
+        db.add(reviewed)
+        db.flush()
+        db.add(
+            ReviewResult(
+                workspace_id=workspace.id,
+                job_id=reviewed.id,
+                run_id=run.run_id,
+                revision_id=revision.id,
+                prompt_version_id=1,
+                source_hash=run.source_hash,
+                review_policy_key=current_review_policy_key(db, workspace.id),
+                model_name="test-model",
+                verdict="unqualified",
+            )
+        )
+        db.commit()
+        save_manual_decision(db, run, "override_qualified", "10.0.0.1", "Known tool defect")
+        # A stale Web deployment can still enqueue this, so the Worker must refuse it.
+        bypassed = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            status="running",
+            attempt_count=1,
+        )
+        db.add(bypassed)
+        db.commit()
+
+        assert reviews.process_claimed_review_job(db, bypassed.id) == (0, 0)
+
+        db.refresh(bypassed)
+        assert bypassed.status == "cancelled"
+        assert "already resolved this revision" in bypassed.error_message
+        assert current_review(db, run).final_status == "qualified"
         assert claim_next_review_job(db, "worker-one", lease_seconds=60) is None
 
 

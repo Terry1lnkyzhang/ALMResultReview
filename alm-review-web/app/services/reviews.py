@@ -10,7 +10,6 @@ import httpx
 from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.hashing import review_payload
 from app.models import (
     AiConfig,
@@ -25,10 +24,16 @@ from app.models import (
     Workspace,
     utcnow,
 )
-from app.services.equipment_review import (
-    analyze_equipment_steps,
-    apply_equipment_disambiguation,
+from app.services.ai_transport import ai_headers as _ai_headers
+from app.services.ai_transport import completion_url as _completion_url
+from app.services.ai_transport import skill_failure as _skill_failure
+from app.services.equipment_pipeline import (
+    absorb_first_pass as _absorb_first_pass_equipment,
 )
+from app.services.equipment_pipeline import (
+    run_equipment_pipeline as _run_equipment_pipeline,
+)
+from app.services.equipment_review import OpenQuestion, analyze_equipment_steps
 from app.services.evidence import (
     CAPABILITIES,
     analyze_html_path_sequences,
@@ -102,6 +107,40 @@ class ReviewPlan:
     text_steps: tuple[int, ...]
     report_requests: tuple[ReportReviewRequest, ...]
     equipment_steps: tuple[int, ...]
+
+
+@dataclass
+class ReviewContext:
+    """Everything one review run carries between stages.
+
+    Each stage reads what earlier stages left here and writes its own outputs
+    back, so `execute_review` stays a plain list of stage calls.
+    """
+
+    ai_config: AiConfig
+    content: dict[str, Any]
+    evidence_config: EvidenceConfig | None
+    equipment_enabled: bool
+    equipment_registry: list[EquipmentRegistry] = field(default_factory=list)
+    equipment_checks: list[dict[str, Any]] = field(default_factory=list)
+    open_questions: list[OpenQuestion] = field(default_factory=list)
+    text_result: dict[str, Any] = field(default_factory=dict)
+    raw_response: str = ""
+    plan: ReviewPlan = field(default_factory=lambda: ReviewPlan((), (), ()))
+    evidence: PreparedImageEvidence = field(
+        default_factory=lambda: PreparedImageEvidence(
+            external_review_enabled=False,
+            results={},
+        )
+    )
+    first_pass_resolved_steps: int = 0
+
+
+@dataclass(frozen=True)
+class PipelineOutcome:
+    parsed: dict[str, Any]
+    pipeline: dict[str, Any]
+    raw_response: str
 
 
 def _evidence_actions(profile: dict[str, Any]) -> set[str]:
@@ -229,18 +268,6 @@ def save_manual_decision(
     db.commit()
     db.refresh(manual)
     return manual
-
-
-def _completion_url(configured_url: str) -> str:
-    url = configured_url.rstrip("/")
-    return url if url.endswith("/chat/completions") else f"{url}/chat/completions"
-
-
-def _skill_failure(trace: dict[str, Any], fallback: str) -> SkillFailure:
-    return SkillFailure(
-        trace.get("error") or fallback,
-        retryable=bool(trace.get("retryable", True)),
-    )
 
 
 def _manual_criterion(summary: str, evidence: str) -> dict[str, str]:
@@ -750,83 +777,10 @@ def _apply_disabled_equipment_guards(parsed: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _ai_headers(ai_config: AiConfig) -> dict[str, str]:
-    api_key = (ai_config.api_key or "").strip() or get_settings().ai_api_key.strip()
-    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-
-def _request_equipment_disambiguation(
-    ai_config: AiConfig,
-    ambiguous: list[dict[str, Any]],
-) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
-    skill_input = {
-        "steps": [
-            {
-                "review_step": item["step"],
-                "description": str(item.get("description") or ""),
-                "expected": str(item.get("expected") or ""),
-                "actual": str(item.get("actual") or ""),
-                "reported_identifiers": list(item.get("reported_identifiers", [])),
-                "previously_matched_equipment_ids": list(
-                    item.get("previously_matched_equipment_ids", [])
-                ),
-                "candidate_equipment": [
-                    {
-                        "equipment_id": str(candidate.get("equipment_id") or ""),
-                        "description": str(candidate.get("description") or ""),
-                        "model_number": str(candidate.get("model_number") or ""),
-                        "serial_number": str(candidate.get("serial_number") or ""),
-                    }
-                    for candidate in item.get("candidate_equipment", [])
-                ],
-            }
-            for item in ambiguous
-        ]
-    }
-    trace = skill_runner.run(
-        "equipment-role",
-        skill_input,
-        endpoint=_completion_url(ai_config.base_url),
-        model_name=ai_config.model_name,
-        headers=_ai_headers(ai_config),
-        timeout_seconds=ai_config.timeout_seconds,
-        granted_capabilities={
-            "review.step_text",
-            "equipment.registry.candidates",
-            "equipment.previous_matches",
-        },
-        request_post=httpx.post,
-    )
-    if trace.get("status") != "completed":
-        raise _skill_failure(trace, "Equipment role Skill failed.")
-    expected = {int(item["step"]): item for item in ambiguous}
-    decisions: dict[int, dict[str, Any]] = {}
-    for decision in trace["output"]["decisions"]:
-        review_step = int(decision["review_step"])
-        allowed = {
-            candidate["equipment_id"]
-            for candidate in expected[review_step].get("candidate_equipment", [])
-        }
-        if any(
-            identifier not in allowed
-            for identifier in decision["selected_equipment_ids"]
-        ):
-            raise SkillFailure(
-                "Equipment role Skill selected an unavailable equipment ID.",
-                retryable=False,
-            )
-        decisions[review_step] = {
-            "role": decision["role"],
-            "required": decision["required"],
-            "selected_equipment_ids": decision["selected_equipment_ids"],
-            "reason": decision["reason"],
-        }
-    return decisions, trace
-
-
 def _build_review_plan(
     content: dict[str, Any],
     equipment_checks: list[dict[str, Any]],
+    open_questions: list[OpenQuestion] | None = None,
 ) -> ReviewPlan:
     text_steps = tuple(int(step["review_step"]) for step in content.get("steps", []))
     report_requests = tuple(
@@ -842,9 +796,14 @@ def _build_review_plan(
         if "parse_html_report" in _evidence_actions(step["evidence_profile"])
     )
     equipment_steps = tuple(
-        int(check["review_step"])
-        for check in equipment_checks
-        if check.get("status") != "not_applicable"
+        dict.fromkeys(
+            [
+                int(check["review_step"])
+                for check in equipment_checks
+                if check.get("status") != "not_applicable"
+            ]
+            + [question.review_step for question in open_questions or []]
+        )
     )
     return ReviewPlan(
         text_steps=text_steps,
@@ -867,47 +826,6 @@ def _run_report_pipeline(
         }
         for request in plan.report_requests
     }
-
-
-def _run_equipment_pipeline(
-    ai_config: AiConfig,
-    content: dict[str, Any],
-    checks: list[dict[str, Any]],
-    ambiguous: list[dict[str, Any]],
-    equipment_registry: list[EquipmentRegistry],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not ambiguous:
-        return checks, {
-            "skill_id": "equipment-role",
-            "status": "not_applicable",
-            "ai_calls": 0,
-        }
-    trace: dict[str, Any] = {
-        "skill_id": "equipment-role",
-        "status": "failed",
-        "ai_calls": 0,
-    }
-    try:
-        decisions, trace = _request_equipment_disambiguation(ai_config, ambiguous)
-        apply_equipment_disambiguation(
-            content,
-            checks,
-            decisions,
-            equipment_registry,
-        )
-    except Exception as exc:
-        ambiguous_steps = {item["step"] for item in ambiguous}
-        for check in checks:
-            if check["review_step"] not in ambiguous_steps:
-                continue
-            check["disambiguation_error"] = str(exc)[:300]
-            check["status"] = "manual"
-            check["code"] = "equipment_disambiguation_failed"
-            check["summary"] = (
-                "AI disambiguation of the equipment role failed; manual review needed."
-            )
-        trace["error"] = str(exc)[:1000]
-    return checks, trace
 
 
 def _prepare_image_evidence(
@@ -1157,7 +1075,7 @@ def _text_skill_batches(
 def _equipment_source_field(
     step: dict[str, Any],
     equipment: dict[str, Any],
-) -> str:
+) -> str | None:
     identifiers = [
         str(equipment.get(key) or "").strip().casefold()
         for key in ("equipment_id", "description", "model_number", "serial_number")
@@ -1167,19 +1085,19 @@ def _equipment_source_field(
         text = str(step.get(field_name) or "").casefold()
         if any(value in text for value in identifiers):
             return field_name
-    return "actual"
+    return None
 
 
 def _attach_reference_candidates(
     content: dict[str, Any],
     equipment_checks: list[dict[str, Any]],
-    ambiguous_equipment: list[dict[str, Any]],
+    open_questions: list[OpenQuestion],
 ) -> None:
     checks_by_step = {
         int(check["review_step"]): check for check in equipment_checks
     }
-    ambiguous_by_step = {
-        int(item["step"]): item for item in ambiguous_equipment
+    questions_by_step = {
+        question.review_step: question for question in open_questions
     }
     for step in content.get("steps", []):
         review_step = int(step["review_step"])
@@ -1233,18 +1151,26 @@ def _attach_reference_candidates(
             )
 
         check = checks_by_step.get(review_step, {})
+        question = questions_by_step.get(review_step)
         equipment_rows = [
             *check.get("matches", []),
-            *ambiguous_by_step.get(review_step, {}).get("candidate_equipment", []),
+            *(
+                [candidate.as_dict() for candidate in question.candidates]
+                if question
+                else []
+            ),
         ]
         for equipment in sorted(
             equipment_rows,
             key=lambda item: str(item.get("equipment_id") or "").casefold(),
         ):
+            source_field = _equipment_source_field(step, equipment)
+            if source_field is None:
+                continue
             add_candidate(
                 "equipment",
                 str(equipment.get("equipment_id") or ""),
-                _equipment_source_field(step, equipment),
+                source_field,
                 "equipment_registry_match",
             )
         for identifier in [
@@ -1402,76 +1328,6 @@ def _apply_reference_routing(content: dict[str, Any]) -> None:
         }
 
 
-def _apply_first_pass_equipment_decisions(
-    content: dict[str, Any],
-    checks: list[dict[str, Any]],
-    ambiguous: list[dict[str, Any]],
-    equipment_registry: list[EquipmentRegistry],
-) -> list[dict[str, Any]]:
-    registry_ids = {item.equipment_id for item in equipment_registry}
-    steps = {
-        int(step["review_step"]): step for step in content.get("steps", [])
-    }
-    remaining: list[dict[str, Any]] = []
-    resolved: dict[int, dict[str, Any]] = {}
-    for item in ambiguous:
-        review_step = int(item["step"])
-        step = steps[review_step]
-        candidates = {
-            candidate["candidate_id"]: candidate
-            for candidate in step.get("reference_candidates", [])
-        }
-        equipment_decisions = [
-            (candidates[decision["candidate_id"]], decision)
-            for decision in step.get("reference_decisions", [])
-            if candidates[decision["candidate_id"]]["type"] == "equipment"
-        ]
-        if not equipment_decisions or any(
-            decision["role"] == "uncertain"
-            for _, decision in equipment_decisions
-        ):
-            remaining.append(item)
-            continue
-        controlled = [
-            (candidate, decision)
-            for candidate, decision in equipment_decisions
-            if decision["role"] == "test_equipment"
-        ]
-        if controlled:
-            selected_ids = list(
-                dict.fromkeys(
-                    candidate["value"]
-                    for candidate, _ in controlled
-                    if candidate["value"] in registry_ids
-                )
-            )
-            resolved[review_step] = {
-                "role": "controlled_equipment",
-                "required": True,
-                "selected_equipment_ids": selected_ids,
-                "reason": " ".join(
-                    decision["reason"] for _, decision in controlled
-                )[:300],
-            }
-        else:
-            resolved[review_step] = {
-                "role": "dut_or_other",
-                "required": False,
-                "selected_equipment_ids": [],
-                "reason": " ".join(
-                    decision["reason"] for _, decision in equipment_decisions
-                )[:300],
-            }
-    if resolved:
-        apply_equipment_disambiguation(
-            content,
-            checks,
-            resolved,
-            equipment_registry,
-        )
-    return remaining
-
-
 def _run_text_semantic_skills(
     ai_config: AiConfig,
     content: dict[str, Any],
@@ -1553,6 +1409,9 @@ def _run_text_semantic_skills(
             )
         step["reference_decisions"] = decisions
         step["text_applicability"] = assessments[review_step]["applicability"]
+        step["extracted_equipment"] = assessments[review_step].get(
+            "extracted_equipment", []
+        )
 
     step_results = {
         int(step["review_step"]): {
@@ -1641,76 +1500,137 @@ def _run_text_semantic_skills(
     return parsed, traces
 
 
-def _run_image_reviews(
-    ai_config: AiConfig,
-    content: dict[str, Any],
-    prepared_evidence: PreparedImageEvidence,
-    text_result: dict[str, Any],
-) -> int:
-    image_calls = 0
-    for batch in _image_review_batches(prepared_evidence):
-        trace = _run_image_review_skill(ai_config, batch, content)
-        prepared_evidence.image_skill_traces.append(trace)
-        _merge_image_skill_trace(text_result, trace)
-        image_calls += 1
-    return image_calls
-
-
-def _aggregate_review_pipeline(
-    text_result: dict[str, Any],
-    content: dict[str, Any],
-    evidence_config: EvidenceConfig | None,
-    prepared_evidence: PreparedImageEvidence,
-    equipment_enabled: bool,
-    equipment_checks: list[dict[str, Any]],
-) -> dict[str, Any]:
+def _aggregate_review_pipeline(ctx: ReviewContext) -> dict[str, Any]:
     guarded = _apply_capability_guards(
-        text_result,
-        content,
-        evidence_config,
-        prepared_evidence,
+        ctx.text_result,
+        ctx.content,
+        ctx.evidence_config,
+        ctx.evidence,
     )
     return (
-        _apply_equipment_guards(guarded, equipment_checks)
-        if equipment_enabled
+        _apply_equipment_guards(guarded, ctx.equipment_checks)
+        if ctx.equipment_enabled
         else _apply_disabled_equipment_guards(guarded)
     )
 
 
-def _routing_stage(
-    content: dict[str, Any],
-    decision_skill: dict[str, Any],
-) -> dict[str, Any]:
+def _prepare_stage(ctx: ReviewContext) -> None:
+    """Deterministic registry work the first AI call already needs as input."""
+    if ctx.equipment_enabled:
+        ctx.equipment_checks, ctx.open_questions = analyze_equipment_steps(
+            ctx.content,
+            ctx.equipment_registry,
+        )
+    _attach_reference_candidates(
+        ctx.content,
+        ctx.equipment_checks,
+        ctx.open_questions,
+    )
+    ctx.content["review_plan"] = {
+        "text_steps": [
+            int(step["review_step"]) for step in ctx.content.get("steps", [])
+        ],
+        "report_steps": [],
+        "equipment_steps": [],
+    }
+
+
+def _text_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    ctx.text_result, traces = _run_text_semantic_skills(ctx.ai_config, ctx.content)
+    ctx.content["text_skill_traces"] = traces
+    ctx.raw_response = json.dumps(
+        {trace["skill_id"]: trace["output"] for trace in traces},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return {
+        "status": "completed",
+        "ai_calls": len(traces),
+        "steps": len(ctx.content["review_plan"]["text_steps"]),
+        "skills": traces,
+    }
+
+
+def _routing_stage(ctx: ReviewContext) -> dict[str, Any]:
+    # Reference roles arrive inside the text pass answer, so this stage consumes
+    # that answer instead of spending an AI call of its own.
+    _apply_reference_routing(ctx.content)
     return {
         "status": "completed",
         "ai_calls": 0,
-        "decision_skill": decision_skill,
+        "decision_skill": {
+            "skill_id": "alm-text-review",
+            "status": "completed",
+            "mode": "authoritative",
+            "ai_calls": 0,
+            "affects_routing": True,
+            "affects_verdict": True,
+            "reason": "The first text pass returns candidate reference roles and "
+            "specialist check requests.",
+        },
         "steps": [
             {
                 "review_step": step["review_step"],
                 "paths": step["evidence_profile"]["actual_paths"],
                 **step["evidence_profile"].get("routing", {}),
             }
-            for step in content.get("steps", [])
+            for step in ctx.content.get("steps", [])
         ],
     }
 
 
-def _text_review_stage(content: dict[str, Any], plan: ReviewPlan) -> dict[str, Any]:
-    traces = content.get("text_skill_traces", [])
-    return {
-        "status": "completed",
-        "ai_calls": len(traces),
-        "steps": len(plan.text_steps),
-        "skills": traces,
+def _plan_specialist_passes(ctx: ReviewContext) -> None:
+    """Turn the first pass answer into the work list for the specialist stages."""
+    if ctx.equipment_enabled:
+        original_question_steps = {
+            question.review_step for question in ctx.open_questions
+        }
+        ctx.open_questions = _absorb_first_pass_equipment(
+            ctx.content,
+            ctx.equipment_checks,
+            ctx.open_questions,
+            ctx.equipment_registry,
+        )
+        remaining_question_steps = {
+            question.review_step for question in ctx.open_questions
+        }
+        ctx.first_pass_resolved_steps = len(
+            original_question_steps - remaining_question_steps
+        )
+    ctx.plan = _build_review_plan(
+        ctx.content,
+        ctx.equipment_checks,
+        ctx.open_questions,
+    )
+    ctx.content["review_plan"] = {
+        "text_steps": list(ctx.plan.text_steps),
+        "report_steps": [
+            request.review_step for request in ctx.plan.report_requests
+        ],
+        "equipment_steps": list(ctx.plan.equipment_steps),
     }
+    ctx.evidence = _prepare_image_evidence(ctx.content, ctx.evidence_config)
+    external = ctx.evidence.external_review_enabled
+    ctx.content["review_capabilities"].update(
+        {
+            "path_access": external,
+            "folder_scan": external,
+            "image_review": external,
+            "html_review": bool(ctx.plan.report_requests and external),
+        }
+    )
+    ctx.content["external_evidence_phase"] = "active" if external else "deferred"
 
 
-def _image_review_stage(
-    prepared_evidence: PreparedImageEvidence,
-    ai_calls: int,
-) -> dict[str, Any]:
-    if not prepared_evidence.external_review_enabled:
+def _image_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    ai_calls = 0
+    for batch in _image_review_batches(ctx.evidence):
+        trace = _run_image_review_skill(ctx.ai_config, batch, ctx.content)
+        ctx.evidence.image_skill_traces.append(trace)
+        _merge_image_skill_trace(ctx.text_result, trace)
+        ai_calls += 1
+    ctx.text_result = _recalculate_result(ctx.text_result)
+    if not ctx.evidence.external_review_enabled:
         status = "disabled"
     elif ai_calls:
         status = "completed"
@@ -1719,29 +1639,27 @@ def _image_review_stage(
     return {
         "status": status,
         "ai_calls": ai_calls,
-        "skills": prepared_evidence.image_skill_traces,
+        "skills": ctx.evidence.image_skill_traces,
     }
 
 
-def _report_review_stage(
-    plan: ReviewPlan,
-    prepared_evidence: PreparedImageEvidence,
-) -> dict[str, Any]:
-    if not prepared_evidence.external_review_enabled:
+def _report_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    ctx.evidence.html_results = _run_report_pipeline(ctx.plan, ctx.evidence_config)
+    if not ctx.evidence.external_review_enabled:
         status = "disabled"
-    elif plan.report_requests:
+    elif ctx.plan.report_requests:
         status = "completed"
     else:
         status = "not_applicable"
     report_statuses = [
         result.status
-        for step_results in prepared_evidence.html_results.values()
+        for step_results in ctx.evidence.html_results.values()
         for result in step_results.values()
     ]
     return {
         "status": status,
         "ai_calls": 0,
-        "reports": sum(len(request.paths) for request in plan.report_requests),
+        "reports": sum(len(request.paths) for request in ctx.plan.report_requests),
         "result_statuses": {
             status_name: report_statuses.count(status_name)
             for status_name in sorted(set(report_statuses))
@@ -1749,28 +1667,68 @@ def _report_review_stage(
     }
 
 
-def _equipment_review_stage(
-    plan: ReviewPlan,
-    *,
-    enabled: bool,
-    ambiguous_steps: int,
-    first_pass_resolved_steps: int,
-    skill_trace: dict[str, Any],
-) -> dict[str, Any]:
-    if not enabled:
-        status = "disabled"
-    elif plan.equipment_steps:
-        status = "completed"
+def _equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    if ctx.equipment_enabled:
+        ctx.equipment_checks, skill_trace = _run_equipment_pipeline(
+            ctx.ai_config,
+            ctx.content,
+            ctx.equipment_checks,
+            ctx.open_questions,
+            ctx.equipment_registry,
+        )
+        status = "completed" if ctx.plan.equipment_steps else "not_applicable"
     else:
-        status = "not_applicable"
+        skill_trace = {
+            "skill_id": "equipment-role",
+            "status": "disabled",
+            "ai_calls": 0,
+            "reason": "Equipment registry validation is disabled for this Workspace.",
+        }
+        status = "disabled"
     return {
         "status": status,
-        "ai_calls": 1 if enabled and ambiguous_steps else 0,
-        "steps": len(plan.equipment_steps),
-        "ambiguous_steps": ambiguous_steps,
-        "first_pass_resolved_steps": first_pass_resolved_steps,
+        # The second pass is chunked, so only the Skill trace knows the call count.
+        "ai_calls": int(skill_trace.get("ai_calls", 0)) if ctx.equipment_enabled else 0,
+        "steps": len(ctx.plan.equipment_steps),
+        "ambiguous_steps": len(ctx.open_questions),
+        "first_pass_resolved_steps": ctx.first_pass_resolved_steps,
         "skill": skill_trace,
     }
+
+
+def execute_review(ctx: ReviewContext) -> PipelineOutcome:
+    """Run one review end to end; the caller owns the Job and the database."""
+    _prepare_stage(ctx)
+    text_trace = _text_review_stage(ctx)
+    routing_trace = _routing_stage(ctx)
+    _plan_specialist_passes(ctx)
+    image_trace = _image_review_stage(ctx)
+    report_trace = _report_review_stage(ctx)
+    equipment_trace = _equipment_review_stage(ctx)
+    parsed = _aggregate_review_pipeline(ctx)
+    pipeline = build_pipeline_trace(
+        gates={
+            "external_evidence_review_enabled": (
+                ctx.evidence.external_review_enabled
+            ),
+            "equipment_review_enabled": ctx.equipment_enabled,
+        },
+        plan=ctx.content["review_plan"],
+        stages={
+            "routing": routing_trace,
+            "text_review": text_trace,
+            "image_review": image_trace,
+            "report_review": report_trace,
+            "equipment_review": equipment_trace,
+            "aggregation": {"status": "completed", "ai_calls": 0},
+        },
+    )
+    return PipelineOutcome(
+        parsed=parsed,
+        pipeline=pipeline,
+        raw_response=ctx.raw_response,
+    )
+
 
 
 def test_ai_connection(config: AiConfig) -> str:
@@ -1796,6 +1754,25 @@ def test_ai_connection(config: AiConfig) -> str:
     return content
 
 
+class ManualDecisionLock(Exception):
+    """Raised when a Run was already resolved by an operator, so re-reviewing it would
+    orphan that decision. Enforced at execution time because a stale Web deployment can
+    still enqueue jobs that bypass the queueing-side guard."""
+
+
+def manual_decision_locks_run(db: Session, run: AlmRun) -> ManualDecision | None:
+    return db.scalar(
+        select(ManualDecision)
+        .where(
+            ManualDecision.run_id == run.run_id,
+            ManualDecision.revision_id == run.current_revision_id,
+            ManualDecision.source_hash == run.source_hash,
+        )
+        .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
+        .limit(1)
+    )
+
+
 def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> ReviewResult:
     run = db.get(AlmRun, job.run_id)
     revision = db.get(RunRevision, job.revision_id)
@@ -1816,6 +1793,16 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         db.commit()
         raise ValueError("Review job is outdated because the ALM run changed.")
 
+    manual = manual_decision_locks_run(db, run)
+    if manual is not None:
+        job.status = "cancelled"
+        job.completed_at = utcnow()
+        job.error_message = (
+            f"Skipped: {manual.operator} already resolved this revision as {manual.decision}."
+        )
+        db.commit()
+        raise ManualDecisionLock(job.error_message)
+
     prompt = db.scalar(
         select(PromptVersion).where(PromptVersion.is_active.is_(True)).order_by(desc(PromptVersion.id))
     )
@@ -1831,9 +1818,7 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         db.commit()
 
     snapshot = json.loads(revision.snapshot_json)
-    evidence_config = workspace_evidence_config(db, workspace.id)
-    structured_content = review_payload(snapshot)
-    equipment_checks: list[dict[str, Any]] = []
+    equipment_registry: list[EquipmentRegistry] = []
     if workspace.equipment_review_enabled:
         equipment_statement = select(EquipmentRegistry).order_by(
             EquipmentRegistry.equipment_id
@@ -1842,151 +1827,18 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
             equipment_statement = equipment_statement.where(
                 EquipmentRegistry.subordinate_area == workspace.equipment_area_filter
             )
-        equipment_registry = db.scalars(equipment_statement).all()
-        equipment_checks, ambiguous_equipment = analyze_equipment_steps(
-            structured_content,
-            equipment_registry,
-        )
-    else:
-        equipment_registry = []
-        ambiguous_equipment = []
-    _attach_reference_candidates(
-        structured_content,
-        equipment_checks,
-        ambiguous_equipment,
+        equipment_registry = list(db.scalars(equipment_statement).all())
+    ctx = ReviewContext(
+        ai_config=ai_config,
+        content=review_payload(snapshot),
+        evidence_config=workspace_evidence_config(db, workspace.id),
+        equipment_enabled=workspace.equipment_review_enabled,
+        equipment_registry=equipment_registry,
     )
-    structured_content["review_plan"] = {
-        "text_steps": [
-            int(step["review_step"])
-            for step in structured_content.get("steps", [])
-        ],
-        "report_steps": [],
-        "equipment_steps": [],
-    }
     started = time.perf_counter()
     try:
-        text_result, text_skill_traces = _run_text_semantic_skills(
-            ai_config,
-            structured_content,
-        )
-        structured_content["text_skill_traces"] = text_skill_traces
-        raw_response = json.dumps(
-            {trace["skill_id"]: trace["output"] for trace in text_skill_traces},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        _apply_reference_routing(structured_content)
-        first_pass_routing_skill = {
-            "skill_id": "alm-text-review",
-            "status": "completed",
-            "mode": "authoritative",
-            "ai_calls": 0,
-            "affects_routing": True,
-            "affects_verdict": True,
-            "reason": "The first text pass returns candidate reference roles and "
-            "specialist check requests.",
-        }
-        initial_ambiguous_equipment_count = len(ambiguous_equipment)
-        if workspace.equipment_review_enabled:
-            ambiguous_equipment = _apply_first_pass_equipment_decisions(
-                structured_content,
-                equipment_checks,
-                ambiguous_equipment,
-                equipment_registry,
-            )
-        plan = _build_review_plan(
-            structured_content,
-            equipment_checks,
-        )
-        structured_content["review_plan"] = {
-            "text_steps": list(plan.text_steps),
-            "report_steps": [
-                request.review_step for request in plan.report_requests
-            ],
-            "equipment_steps": list(plan.equipment_steps),
-        }
-        prepared_evidence = _prepare_image_evidence(
-            structured_content,
-            evidence_config,
-        )
-        structured_content["review_capabilities"].update(
-            {
-                "path_access": prepared_evidence.external_review_enabled,
-                "folder_scan": prepared_evidence.external_review_enabled,
-                "image_review": prepared_evidence.external_review_enabled,
-                "html_review": bool(
-                    plan.report_requests
-                    and prepared_evidence.external_review_enabled
-                ),
-            }
-        )
-        structured_content["external_evidence_phase"] = (
-            "active" if prepared_evidence.external_review_enabled else "deferred"
-        )
-        image_ai_calls = _run_image_reviews(
-            ai_config,
-            structured_content,
-            prepared_evidence,
-            text_result,
-        )
-        text_result = _recalculate_result(text_result)
-        prepared_evidence.html_results = _run_report_pipeline(
-            plan,
-            evidence_config,
-        )
-        if workspace.equipment_review_enabled:
-            equipment_checks, equipment_skill_trace = _run_equipment_pipeline(
-                ai_config,
-                structured_content,
-                equipment_checks,
-                ambiguous_equipment,
-                equipment_registry,
-            )
-        else:
-            equipment_skill_trace = {
-                "skill_id": "equipment-role",
-                "status": "disabled",
-                "ai_calls": 0,
-                "reason": "Equipment registry validation is disabled for this "
-                "Workspace.",
-            }
-        parsed = _aggregate_review_pipeline(
-            text_result,
-            structured_content,
-            evidence_config,
-            prepared_evidence,
-            workspace.equipment_review_enabled,
-            equipment_checks,
-        )
-        pipeline = build_pipeline_trace(
-            gates={
-                "external_evidence_review_enabled": (
-                    prepared_evidence.external_review_enabled
-                ),
-                "equipment_review_enabled": workspace.equipment_review_enabled,
-            },
-            plan=structured_content["review_plan"],
-            stages={
-                "routing": _routing_stage(
-                    structured_content, first_pass_routing_skill
-                ),
-                "text_review": _text_review_stage(structured_content, plan),
-                "image_review": _image_review_stage(
-                    prepared_evidence, image_ai_calls
-                ),
-                "report_review": _report_review_stage(plan, prepared_evidence),
-                "equipment_review": _equipment_review_stage(
-                    plan,
-                    enabled=workspace.equipment_review_enabled,
-                    ambiguous_steps=len(ambiguous_equipment),
-                    first_pass_resolved_steps=(
-                        initial_ambiguous_equipment_count - len(ambiguous_equipment)
-                    ),
-                    skill_trace=equipment_skill_trace,
-                ),
-                "aggregation": {"status": "completed", "ai_calls": 0},
-            },
-        )
+        outcome = execute_review(ctx)
+        parsed = outcome.parsed
         duration_ms = round((time.perf_counter() - started) * 1000)
         result = ReviewResult(
             workspace_id=workspace.id,
@@ -2002,8 +1854,8 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
             criteria_json=json.dumps(parsed["criteria"], ensure_ascii=False),
             step_results_json=json.dumps(parsed["step_results"], ensure_ascii=False),
             warnings_json=json.dumps(parsed["warnings"], ensure_ascii=False),
-            pipeline_json=json.dumps(pipeline, ensure_ascii=False),
-            raw_response=raw_response,
+            pipeline_json=json.dumps(outcome.pipeline, ensure_ascii=False),
+            raw_response=outcome.raw_response,
             duration_ms=duration_ms,
         )
         db.add(result)
@@ -2142,6 +1994,8 @@ def process_claimed_review_job(db: Session, job_id: int) -> tuple[int, int]:
     try:
         process_job(db, job)
         return 1, 0
+    except ManualDecisionLock:
+        return 0, 0
     except Exception as exc:
         db.rollback()
         failed_job = db.get(ReviewJob, job_id)
