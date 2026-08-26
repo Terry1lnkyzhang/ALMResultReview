@@ -16,6 +16,43 @@
   <form method="post" action="/runs/{{ run.run_id }}/refresh"><button class="button secondary" type="submit"{% if active_sync_job %} disabled{% endif %}>Refresh from ALM &amp; review</button></form>
 </section>
 
+<section class="delete-run-panel">
+  <div><p class="eyebrow">DELETE LOCAL RUN</p><p>Permanently removes this Run, its revisions, reviews, decisions, and queue history from this application. If it still exists in ALM, a later sync can import it again.</p></div>
+  <button class="button danger" type="button" data-open-delete-run{% if active_sync_job or active_review_job %} disabled title="Finish or remove the active job before deleting this Run"{% endif %}>Delete local Run</button>
+</section>
+<dialog class="delete-run-dialog" data-delete-run-dialog>
+  <form method="post" action="/runs/{{ run.run_id }}/delete" data-delete-run-form data-confirm-run-id="{{ run.alm_run_id or run.run_id }}">
+    <div><p class="eyebrow">PERMANENT DELETION</p><h2>Delete local Run {{ run.alm_run_id or run.run_id }}?</h2><p>This removes all local revisions and review history. It does not delete anything from ALM.</p></div>
+    <label><span>Type Run ID {{ run.alm_run_id or run.run_id }} to confirm</span><input name="confirmation" required autocomplete="off" inputmode="numeric"></label>
+    <div class="delete-run-dialog-actions"><button class="button secondary" type="button" data-close-delete-run>Cancel</button><button class="button danger" type="submit">Delete permanently</button></div>
+  </form>
+</dialog>
+<script>
+  (() => {
+    const open = document.querySelector("[data-open-delete-run]");
+    const dialog = document.querySelector("[data-delete-run-dialog]");
+    const form = document.querySelector("[data-delete-run-form]");
+    if (!open || !dialog || !form) return;
+    const input = form.elements.confirmation;
+    const expected = form.dataset.confirmRunId;
+    open.addEventListener("click", () => {
+      input.value = "";
+      input.setCustomValidity("");
+      dialog.showModal();
+      input.focus();
+    });
+    dialog.querySelector("[data-close-delete-run]").addEventListener("click", () => dialog.close());
+    input.addEventListener("input", () => input.setCustomValidity(""));
+    form.addEventListener("submit", (event) => {
+      if (input.value.trim() !== expected) {
+        event.preventDefault();
+        input.setCustomValidity(`Enter Run ID ${expected} exactly.`);
+        input.reportValidity();
+      }
+    });
+  })();
+</script>
+
 <dl class="fact-strip">
   <div><dt>Test case</dt><dd>{{ run.test_id or '-' }}</dd></div><div><dt>Location</dt><dd>{{ run.execution_location or '-' }}</dd></div><div><dt>Test owner</dt><dd>{{ test_owner_label }}</dd></div><div><dt>Assigned tester</dt><dd>{{ assigned_tester_label }}</dd></div><div><dt>Actual tester</dt><dd>{{ actual_tester_label }}</dd></div><div><dt>ALM result</dt><dd>{{ run.run_status }}</dd></div><div><dt>Executed</dt><dd>{{ run.execution_at.strftime('%Y-%m-%d %H:%M') if run.execution_at else '-' }}</dd></div>
 </dl>

@@ -8,6 +8,7 @@ from app.services.html_evidence import HtmlEvidenceResult
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
 from app.services.reviews import (
     PreparedImageEvidence,
+    ReviewContext,
     _ai_headers,
     _apply_capability_guards,
     _apply_equipment_guards,
@@ -15,8 +16,8 @@ from app.services.reviews import (
     _attach_reference_candidates,
     _completion_url,
     _image_review_batches,
+    _image_review_stage,
     _recalculate_result,
-    _run_image_reviews,
     _run_text_semantic_skills,
 )
 
@@ -74,7 +75,7 @@ def text_review_result(
 
 def test_saved_ai_api_key_takes_precedence_over_environment(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.reviews.get_settings",
+        "app.services.ai_transport.get_settings",
         lambda: SimpleNamespace(ai_api_key="environment-key"),
     )
 
@@ -778,8 +779,16 @@ def test_text_and_image_reviews_use_separate_bounded_requests(monkeypatch) -> No
     ai_config = AiConfig(base_url="https://ai.example/v1", model_name="test")
     text_result, text_skill_traces = _run_text_semantic_skills(ai_config, content)
     content["text_skill_traces"] = text_skill_traces
-    image_calls = _run_image_reviews(ai_config, content, prepared, text_result)
-    parsed = _recalculate_result(text_result)
+    ctx = ReviewContext(
+        ai_config=ai_config,
+        content=content,
+        evidence_config=None,
+        equipment_enabled=False,
+        text_result=text_result,
+        evidence=prepared,
+    )
+    image_calls = _image_review_stage(ctx)["ai_calls"]
+    parsed = ctx.text_result
 
     assert image_calls == 3
     assert len(requests) == 4

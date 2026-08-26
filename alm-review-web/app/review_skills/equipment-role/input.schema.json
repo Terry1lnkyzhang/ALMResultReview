@@ -4,6 +4,10 @@
   "additionalProperties": false,
   "required": ["steps"],
   "properties": {
+    "registry_equipment_names": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
     "steps": {
       "type": "array",
       "minItems": 1,
@@ -17,6 +21,7 @@
           "expected": {"type": "string"},
           "actual": {"type": "string"},
           "reported_identifiers": {"type": "array", "items": {"type": "string"}},
+          "extracted_device_names": {"type": "array", "items": {"type": "string", "minLength": 1}},
           "previously_matched_equipment_ids": {"type": "array", "items": {"type": "string"}},
           "candidate_equipment": {
             "type": "array",

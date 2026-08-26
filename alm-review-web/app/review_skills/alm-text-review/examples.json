@@ -20,6 +20,9 @@
         {"candidate_id": "eq-01", "role": "test_equipment", "requires_check": true, "reason": "The device is used to produce the recorded measurement."},
         {"candidate_id": "img-01", "role": "result_evidence", "requires_check": true, "reason": "Actual cites the image as supporting result evidence."}
       ],
+      "extracted_equipment": [
+        {"device_name": "Fluke 87V", "equipment_id": "", "serial_number": "", "reported_calibration_due_date": "", "source_text": "Measure voltage using Fluke 87V."}
+      ],
       "summary": "Actual records a value within the Expected range and identifies supporting evidence."
     }
   },
@@ -43,6 +46,7 @@
         {"code": "actual_insufficient", "severity": "fail", "reason": "Actual omits the voltage required by numbered Expected item 2."}
       ],
       "reference_decisions": [],
+      "extracted_equipment": [],
       "summary": "Actual only records one of the two required results."
     }
   },
@@ -61,6 +65,7 @@
       "applicability": "not_applicable",
       "findings": [],
       "reference_decisions": [],
+      "extracted_equipment": [],
       "summary": "Description limits the Step to Taichi and Actual records that this execution was Earth."
     }
   },
@@ -83,6 +88,7 @@
       "reference_decisions": [
         {"candidate_id": "file-01", "role": "result_evidence", "requires_check": true, "reason": "Actual answers the recording requirement by citing this captured evidence file."}
       ],
+      "extracted_equipment": [],
       "summary": "Actual confirms the required parameters and cites an evidence file for the recorded values."
     }
   },
@@ -104,7 +110,29 @@
       "applicability": "applicable",
       "findings": [],
       "reference_decisions": [],
+      "extracted_equipment": [],
       "summary": "Expected prescribes the Pending->Active->Failed transition as the normal outcome and Actual reports exactly that, so the Step passes."
+    }
+  },
+  {
+    "input": {
+      "review_step": 6,
+      "description": "Record the stopwatch used for the timing measurement.",
+      "expected": "Record equipment and calibration due date: ______.",
+      "actual": "Stop watch S/N: C1221B993G, Calibration Due date: 2027/07/05. Elapsed time was 4.2 s.",
+      "actual_format": {"layout_text": "Stop watch S/N: C1221B993G", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 6,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "extracted_equipment": [
+        {"device_name": "Stop watch", "equipment_id": "", "serial_number": "C1221B993G", "reported_calibration_due_date": "2027-07-05", "source_text": "Stop watch S/N: C1221B993G, Calibration Due date: 2027/07/05."}
+      ],
+      "summary": "Actual records the stopwatch, its serial number and the calibration due date required by Expected."
     }
   }
 ]

@@ -66,6 +66,34 @@ the supplied text cannot support a reliable conclusion. Return no finding when t
 7. Do not claim that a path exists, a file is readable, equipment is calibrated, or evidence
    supports Expected. Those facts belong to downstream program-controlled checks.
 
+## Equipment Extraction
+
+1. Return `extracted_equipment` for every Step. Use an empty array when the Step records no
+   controlled measuring or test equipment.
+2. Only record a device that this Step used to produce or verify the result. Never record the
+   product under test, a software build, an order number, or a room.
+3. A phantom, water phantom, 模体, simulator, dosimeter, or stop watch used to produce or verify
+   the result is such a device and must be recorded, even when the Step gives it no identifier.
+   Use the exact wording the Step uses, for example `system phantom` or `body phantom`. On a
+   scanner test the product under test is the scanner or its software, never the phantom.
+4. Copy `device_name`, `equipment_id` and `serial_number` verbatim from the Step text. Do not
+   translate, reformat, expand, abbreviate, or repair them. Leave a field empty when the Step
+   does not state it. A later application-controlled pass maps the name to the registry.
+   A part number, P/N, model number,料号, or exam card name is none of these three fields and
+   must be left out; only a code the Step labels as an asset ID or a serial number qualifies.
+5. Every value must come from the Step you are answering for. A request carries several Steps;
+   never copy a name, equipment ID, serial number, or due date that appears only in another Step.
+   A Step that names a device without repeating its ID must return an empty `equipment_id`.
+6. Set `reported_calibration_due_date` to the due date the Step text states, normalized to
+   `YYYY-MM-DD`. Leave it empty when the Step states no due date. This is what the Step claims,
+   not what the registry holds; never supply a date the text does not contain.
+7. `source_text` must be a verbatim span copied from Description, Expected, or Actual that carries
+   the recorded values. The application rejects any entry whose `source_text` is not found in the
+   Step text.
+8. Return one entry per physical device. Do not merge two devices into one entry.
+9. Do not decide whether the calibration is valid, whether the device is in the registry, or
+   whether the Step passes. The application performs the registry lookup and the date comparison.
+
 ## Safety Boundaries
 
 Do not access files, folders, URLs, images, HTML, databases, equipment registries, or external

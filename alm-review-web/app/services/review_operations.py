@@ -7,7 +7,15 @@ from uuid import uuid4
 from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import AlmRun, ReviewJob
+from app.models import (
+    AlmRun,
+    ManualDecision,
+    ReviewJob,
+    ReviewResult,
+    RunRevision,
+    RunStep,
+    SyncJob,
+)
 from app.services.review_policy import current_review_policy_key
 from app.services.review_status import current_reviews, is_force_qualified
 from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
@@ -182,6 +190,40 @@ def active_run_review_job(db: Session, run: AlmRun) -> ReviewJob | None:
         .order_by(desc(ReviewJob.id))
         .limit(1)
     )
+
+
+def delete_local_run(db: Session, run: AlmRun) -> None:
+    """Delete a Run and its local history once no job can still use it."""
+    active_review = db.scalar(
+        select(ReviewJob.id).where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.status.in_(("queued", "running")),
+        )
+    )
+    active_sync = db.scalar(
+        select(SyncJob.id).where(
+            SyncJob.run_id == run.run_id,
+            SyncJob.status.in_(("queued", "running")),
+        )
+    )
+    if active_review is not None or active_sync is not None:
+        raise ValueError(
+            "This Run cannot be deleted while an ALM refresh or AI review is "
+            "queued or running. Remove or finish the active job first."
+        )
+
+    revision_ids = list(
+        db.scalars(select(RunRevision.id).where(RunRevision.run_id == run.run_id))
+    )
+    db.execute(delete(ManualDecision).where(ManualDecision.run_id == run.run_id))
+    db.execute(delete(ReviewResult).where(ReviewResult.run_id == run.run_id))
+    db.execute(delete(ReviewJob).where(ReviewJob.run_id == run.run_id))
+    db.execute(delete(SyncJob).where(SyncJob.run_id == run.run_id))
+    if revision_ids:
+        db.execute(delete(RunStep).where(RunStep.revision_id.in_(revision_ids)))
+    db.execute(delete(RunRevision).where(RunRevision.run_id == run.run_id))
+    db.delete(run)
+    db.commit()
 
 
 def cancel_queued_reviews(

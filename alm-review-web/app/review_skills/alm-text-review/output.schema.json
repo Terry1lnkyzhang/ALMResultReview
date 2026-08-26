@@ -9,7 +9,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["review_step", "applicability", "findings", "reference_decisions", "summary"],
+        "required": ["review_step", "applicability", "findings", "reference_decisions", "extracted_equipment", "summary"],
         "properties": {
           "review_step": {"type": "integer", "minimum": 1},
           "applicability": {"enum": ["applicable", "not_applicable", "manual"]},
@@ -37,6 +37,22 @@
                 "role": {"enum": ["test_equipment", "dut_or_other", "result_evidence", "reference_document", "result_evidence_location", "unrelated", "uncertain"]},
                 "requires_check": {"type": "boolean"},
                 "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+              }
+            }
+          },
+          "extracted_equipment": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["device_name", "equipment_id", "serial_number", "reported_calibration_due_date", "source_text"],
+              "properties": {
+                "device_name": {"type": "string", "maxLength": 512},
+                "equipment_id": {"type": "string", "maxLength": 128},
+                "serial_number": {"type": "string", "maxLength": 255},
+                "reported_calibration_due_date": {"type": "string", "maxLength": 32},
+                "source_text": {"type": "string", "minLength": 1, "maxLength": 512}
               }
             }
           },

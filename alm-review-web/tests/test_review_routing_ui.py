@@ -53,3 +53,20 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "Skill execution trace" in source
     assert "review_skill_traces" in source
     assert "trace.get('capabilities', {}).get('granted', [])" in source
+
+
+def test_run_detail_exposes_guarded_local_delete_action() -> None:
+    template = templates.get_template("run_detail.html")
+    source, _, _ = templates.env.loader.get_source(
+        templates.env,
+        template.name,
+    )
+
+    assert 'action="/runs/{{ run.run_id }}/delete"' in source
+    assert 'name="confirmation"' in source
+    assert "data-confirm-run-id" in source
+    assert "Delete local Run" in source
+    assert "If it still exists in ALM" in source
+    assert "data-delete-run-dialog" in source
+    assert "dialog.showModal()" in source
+    assert "window.prompt" not in source

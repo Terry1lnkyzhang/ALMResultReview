@@ -45,6 +45,7 @@ from app.services.review_operations import (
     REREVIEW_SCOPES,
     active_run_review_job,
     cancel_queued_reviews,
+    delete_local_run,
     queue_failed_reviews,
     queue_rereviews,
     queue_run_review,
@@ -1062,6 +1063,35 @@ def refresh_run_from_alm(run_id: int, db: Session = Depends(get_db)):
     return _redirect(
         f"/runs/{run_id}",
         "ALM refresh queued. The Worker will re-import this Run and then review it.",
+    )
+
+
+@router.post("/runs/{run_id}/delete")
+def delete_run(
+    run_id: int,
+    confirmation: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    run = db.get(AlmRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    display_id = str(run.alm_run_id or run.run_id)
+    if confirmation.strip() != display_id:
+        return _redirect(
+            f"/runs/{run_id}",
+            f"Run ID confirmation did not match {display_id}. Nothing was deleted.",
+            "error",
+        )
+    workspace_id = run.workspace_id
+    try:
+        delete_local_run(db, run)
+    except ValueError as exc:
+        return _redirect(f"/runs/{run_id}", str(exc), "error")
+    dashboard = f"/?workspace={workspace_id}" if workspace_id is not None else "/"
+    return _redirect(
+        dashboard,
+        f"Run {display_id} and its local review history were deleted. If the Run "
+        "still exists in ALM, a future sync may import it again.",
     )
 
 

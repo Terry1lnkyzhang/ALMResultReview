@@ -1,7 +1,7 @@
 [skill]
 id = "equipment-role"
 name = "Equipment Role Review"
-version = "1.0.2"
+version = "1.3.1"
 stage = "equipment_review"
 enabled = true
 
@@ -12,10 +12,11 @@ output_collection = "decisions"
 identity_field = "review_step"
 
 [capabilities]
-required = ["review.step_text", "equipment.registry.candidates"]
+required = ["review.step_text", "equipment.registry.candidates", "equipment.registry.names"]
 optional = ["equipment.previous_matches"]
 forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry.write"]
 
 [model]
 temperature = 0
-max_tokens = 1024
+max_tokens = 2048
+max_tokens_per_item = 384

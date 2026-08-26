@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
@@ -382,6 +384,25 @@ def test_disabled_equipment_review_excludes_registry_from_workspace_policy() -> 
         db.commit()
 
         assert current_review_policy_key(db, workspace.id) == first_key
+
+
+def test_every_verdict_module_is_hashed_into_the_review_policy() -> None:
+    from app.services.review_policy import _REVIEW_POLICY_FILES
+
+    # Transport and orchestration cannot change a verdict, so they stay out.
+    exempt = {"ai_transport", "review_policy", "workspaces", "worker_tasks"}
+    hashed = {path.stem for path in _REVIEW_POLICY_FILES if path.suffix == ".py"}
+    imported = {
+        match.group(1)
+        for path in _REVIEW_POLICY_FILES
+        if path.suffix == ".py"
+        for match in re.finditer(
+            r"^from app\.services\.(\w+) import", path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    }
+
+    assert imported - hashed - exempt == set()
 
 
 def test_legacy_workspace_policy_is_adopted_only_once() -> None:
