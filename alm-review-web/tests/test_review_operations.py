@@ -2,9 +2,19 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models import AlmRun, ReviewJob, ReviewResult, RunRevision, Workspace
+from app.models import (
+    AlmRun,
+    ManualDecision,
+    ReviewJob,
+    ReviewResult,
+    RunRevision,
+    RunStep,
+    SyncJob,
+    Workspace,
+)
 from app.services.review_operations import (
     cancel_queued_reviews,
+    delete_run,
     latest_rereview_progress,
     queue_rereviews,
     workspace_review_progress,
@@ -51,6 +61,46 @@ def add_reviewed_run(db: Session, run_id: int, verdict: str) -> AlmRun:
     )
     db.commit()
     return run
+
+
+def test_delete_run_leaves_no_orphaned_rows() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = add_reviewed_run(db, 1, "unqualified")
+        kept = add_reviewed_run(db, 2, "qualified")
+        revision_id = run.current_revision_id
+        db.add(RunStep(revision_id=revision_id, step_id=10, name="Step 1"))
+        db.add(SyncJob(run_id=1, status="queued"))
+        result_id = db.scalar(select(ReviewResult.id).where(ReviewResult.run_id == 1))
+        save_manual_decision(db, run, "override_qualified", "tester", "Checked by hand")
+        db.commit()
+        assert db.scalar(
+            select(ManualDecision).where(ManualDecision.run_id == 1)
+        ) is not None
+
+        summary = delete_run(db, run)
+
+        assert summary.run_id == 1
+        assert (summary.revisions, summary.steps, summary.review_jobs) == (1, 1, 1)
+        assert (summary.review_results, summary.manual_decisions) == (1, 1)
+        assert summary.sync_jobs == 1
+        assert db.get(AlmRun, 1) is None
+        # Tables without a foreign key would silently keep orphans behind.
+        for model, column in (
+            (RunRevision, RunRevision.run_id),
+            (ReviewJob, ReviewJob.run_id),
+            (ReviewResult, ReviewResult.run_id),
+            (ManualDecision, ManualDecision.run_id),
+            (SyncJob, SyncJob.run_id),
+        ):
+            assert db.scalars(select(model).where(column == 1)).all() == []
+        assert db.scalars(
+            select(RunStep).where(RunStep.revision_id == revision_id)
+        ).all() == []
+        assert result_id is not None
+        assert db.get(AlmRun, kept.run_id) is not None
+        assert db.scalars(select(ReviewJob).where(ReviewJob.run_id == 2)).all() != []
 
 
 def test_queue_rereviews_filters_final_status_and_preserves_history() -> None:

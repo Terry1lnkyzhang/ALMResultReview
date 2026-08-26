@@ -21,7 +21,11 @@ from app.services import reviews, scheduler, worker_tasks
 from app.services.alm import FolderBatch, FolderCollectionProgress
 from app.services.reviews import FAILED_JOB_RETRY_BACKOFF_SECONDS, claim_next_review_job
 from app.services.skill_runner import SkillFailure
-from app.services.worker_tasks import claim_next_sync_job, queue_sync_job
+from app.services.worker_tasks import (
+    claim_next_sync_job,
+    queue_run_sync_jobs,
+    queue_sync_job,
+)
 from app.web import sync_progress
 
 
@@ -353,6 +357,42 @@ def test_sync_jobs_are_deduplicated_per_workspace() -> None:
             first_workspace.id,
             second_workspace.id,
         }
+
+
+def test_batch_run_sync_queues_one_refresh_per_run_and_skips_unsyncable() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add_all(
+            AlmRun(
+                run_id=run_id,
+                workspace_id=workspace.id,
+                alm_run_id=7000 + run_id,
+                test_instance_id=test_instance_id,
+                folder_id=42,
+                folder_path="Project A",
+                run_status="Passed",
+                source_hash="stale",
+                review_hash="stale",
+                raw_json="{}",
+            )
+            for run_id, test_instance_id in ((1, 91), (2, 92), (3, None))
+        )
+        db.commit()
+
+        result = queue_run_sync_jobs(db, [1, 2, 3], workspace.id)
+
+        assert (result.matched, result.queued, result.skipped) == (3, 2, 1)
+        assert {job.run_id for job in db.query(SyncJob).all()} == {1, 2}
+
+        # Re-queuing the same Runs must reuse the active jobs instead of duplicating.
+        repeat = queue_run_sync_jobs(db, [1, 2, 3], workspace.id)
+
+        assert (repeat.queued, repeat.already_active) == (0, 2)
+        assert db.query(SyncJob).count() == 2
 
 
 def test_review_claim_skips_paused_workspace_and_prefers_priority() -> None:

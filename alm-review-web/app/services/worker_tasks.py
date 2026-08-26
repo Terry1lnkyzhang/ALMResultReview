@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
@@ -33,6 +34,14 @@ FAILED_JOB_RETRY_BACKOFF_SECONDS = 60
 class SyncQueueResult:
     job: SyncJob
     created: bool
+
+
+@dataclass(frozen=True)
+class RunSyncQueueResult:
+    matched: int
+    queued: int
+    already_active: int
+    skipped: int
 
 
 def current_worker_id() -> str:
@@ -104,6 +113,45 @@ def queue_sync_job(
         return SyncQueueResult(active, False)
     db.refresh(job)
     return SyncQueueResult(job, True)
+
+
+def queue_run_sync_jobs(
+    db: Session,
+    run_ids: Sequence[int],
+    workspace_id: int | None = None,
+    requested_by: str = "web",
+) -> RunSyncQueueResult:
+    """Refresh each Run from ALM; the Worker queues its AI review after the import."""
+    workspace = resolve_workspace(db, workspace_id)
+    if not run_ids:
+        return RunSyncQueueResult(0, 0, 0, 0)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            AlmRun.run_id.in_(run_ids),
+            AlmRun.workspace_id == workspace.id,
+        )
+        .order_by(AlmRun.run_id)
+    ).all()
+    queued = 0
+    already_active = 0
+    skipped = 0
+    for run in runs:
+        if run.test_instance_id is None:
+            # Without a test instance the Worker cannot pull the Run back from ALM.
+            skipped += 1
+            continue
+        result = queue_sync_job(
+            db,
+            requested_by=requested_by,
+            workspace_id=workspace.id,
+            run_id=run.run_id,
+        )
+        if result.created:
+            queued += 1
+        else:
+            already_active += 1
+    return RunSyncQueueResult(len(runs), queued, already_active, skipped)
 
 
 def claim_next_sync_job(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
@@ -7,7 +8,15 @@ from uuid import uuid4
 from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.models import AlmRun, ReviewJob
+from app.models import (
+    AlmRun,
+    ManualDecision,
+    ReviewJob,
+    ReviewResult,
+    RunRevision,
+    RunStep,
+    SyncJob,
+)
 from app.services.review_policy import current_review_policy_key
 from app.services.review_status import current_reviews, is_force_qualified
 from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
@@ -28,6 +37,64 @@ class RereviewQueueResult:
     already_active: int
     manually_resolved: int
     batch_id: str | None
+
+
+@dataclass(frozen=True)
+class DeletedRunSummary:
+    run_id: int
+    alm_run_id: int | None
+    test_name: str
+    revisions: int
+    steps: int
+    review_jobs: int
+    review_results: int
+    manual_decisions: int
+    sync_jobs: int
+
+
+def delete_run(db: Session, run: AlmRun) -> DeletedRunSummary:
+    """Erase a Run and everything derived from it.
+
+    Child rows are removed explicitly: `manual_decisions`, `review_jobs` and
+    `sync_jobs` reference the Run without a foreign key, so database-level
+    cascades would leave them behind as orphans pointing at a missing Run.
+    """
+    run_id = run.run_id
+    revision_ids = list(
+        db.scalars(select(RunRevision.id).where(RunRevision.run_id == run_id))
+    )
+    steps = 0
+    if revision_ids:
+        steps = db.execute(
+            delete(RunStep).where(RunStep.revision_id.in_(revision_ids))
+        ).rowcount
+    review_results = db.execute(
+        delete(ReviewResult).where(ReviewResult.run_id == run_id)
+    ).rowcount
+    review_jobs = db.execute(
+        delete(ReviewJob).where(ReviewJob.run_id == run_id)
+    ).rowcount
+    manual_decisions = db.execute(
+        delete(ManualDecision).where(ManualDecision.run_id == run_id)
+    ).rowcount
+    sync_jobs = db.execute(delete(SyncJob).where(SyncJob.run_id == run_id)).rowcount
+    revisions = db.execute(
+        delete(RunRevision).where(RunRevision.run_id == run_id)
+    ).rowcount
+    summary = DeletedRunSummary(
+        run_id=run_id,
+        alm_run_id=run.alm_run_id,
+        test_name=run.test_name,
+        revisions=revisions,
+        steps=steps,
+        review_jobs=review_jobs,
+        review_results=review_results,
+        manual_decisions=manual_decisions,
+        sync_jobs=sync_jobs,
+    )
+    db.delete(run)
+    db.commit()
+    return summary
 
 
 @dataclass(frozen=True)
@@ -235,6 +302,50 @@ def queue_rereviews(
             manually_resolved += 1
             continue
         matched_runs.append(run)
+    return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
+
+
+def queue_rereviews_for_run_ids(
+    db: Session,
+    run_ids: Sequence[int],
+    workspace_id: int | None = None,
+) -> RereviewQueueResult:
+    """Queue a re-review for an explicit set of Runs, e.g. a dashboard filter."""
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
+    if not run_ids:
+        return RereviewQueueResult(0, 0, 0, 0, None)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            AlmRun.run_id.in_(run_ids),
+            or_(
+                AlmRun.workspace_id == workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            ),
+            AlmRun.run_status == "Passed",
+            AlmRun.current_revision_id.is_not(None),
+        )
+        .order_by(AlmRun.run_id)
+    ).all()
+    matched_runs = []
+    manually_resolved = 0
+    for run in runs:
+        review = current_review(db, run, policy_key)
+        if review.manual_decision is not None:
+            manually_resolved += 1
+            continue
+        matched_runs.append(run)
+    return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
+
+
+def _queue_rereview_batch(
+    db: Session,
+    workspace_id: int,
+    matched_runs: Sequence[AlmRun],
+    manually_resolved: int,
+) -> RereviewQueueResult:
     active_revision_ids = set(
         db.scalars(
             select(ReviewJob.revision_id).where(
@@ -252,7 +363,7 @@ def queue_rereviews(
     for run in runs_to_queue:
         db.add(
             ReviewJob(
-                workspace_id=workspace.id,
+                workspace_id=workspace_id,
                 batch_id=batch_id,
                 run_id=run.run_id,
                 revision_id=run.current_revision_id,

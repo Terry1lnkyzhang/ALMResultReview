@@ -18,8 +18,11 @@ from app.models import (
     Workspace,
 )
 from app.web import (
+    _current_sync_job,
+    _run_sync_batch_progress,
     cancel_review_jobs,
     create_workspace,
+    delete_run_record,
     import_snapshot,
     process_reviews,
     queue_status,
@@ -135,6 +138,38 @@ def test_process_reviews_queues_only_latest_alm_changes(monkeypatch) -> None:
         assert response.status_code == 303
         assert "19%20review-content%20changes" in response.headers["location"]
         assert "9%20queued" in response.headers["location"]
+
+
+def test_delete_run_record_requires_a_matching_confirmation() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        run = AlmRun(
+            workspace_id=workspace.id,
+            run_id=77,
+            alm_run_id=153886,
+            run_status="Passed",
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.commit()
+
+        rejected = delete_run_record(77, "77", db)
+
+        assert rejected.status_code == 303
+        assert "Deletion%20cancelled" in rejected.headers["location"]
+        assert db.get(AlmRun, 77) is not None
+
+        accepted = delete_run_record(77, " 153886 ", db)
+
+        assert accepted.status_code == 303
+        assert accepted.headers["location"].startswith(f"/?workspace={workspace.id}")
+        assert db.get(AlmRun, 77) is None
 
 
 def test_retry_failed_reviews_queues_only_current_failed_runs() -> None:
@@ -389,11 +424,69 @@ def test_queue_status_reports_live_counts_concurrency_and_worker(monkeypatch) ->
         assert status == {
             "queued": 1,
             "running": 1,
+            "review_paused": False,
+            "pending_run_sync": 0,
             "review_concurrency": 4,
             "worker_online": True,
             "worker_status": "working",
             "worker_id": "worker-one",
         }
+
+
+def test_run_sync_batch_progress_aggregates_the_batch_and_tracks_the_oldest_job() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.commit()
+        queued_at = datetime(2026, 8, 25, 7, 26, 18)
+        db.add(
+            SyncJob(
+                workspace_id=workspace.id,
+                run_id=100,
+                status="completed",
+                created_at=queued_at - timedelta(hours=1),
+            )
+        )
+        statuses = ["completed", "completed", "running", "queued", "queued", "failed"]
+        for offset, job_status in enumerate(statuses):
+            db.add(
+                SyncJob(
+                    workspace_id=workspace.id,
+                    run_id=200 + offset,
+                    status=job_status,
+                    created_at=queued_at,
+                )
+            )
+        db.commit()
+
+        batch = _run_sync_batch_progress(db, workspace.id)
+
+        assert batch == {
+            "active": True,
+            "total": 6,
+            "done": 2,
+            "queued": 2,
+            "running": 1,
+            "failed": 1,
+            "percent": 33,
+        }
+        # The panel must follow the job the worker is on, not the newest row.
+        assert _current_sync_job(db, workspace.id).run_id == 202
+
+
+def test_run_sync_batch_progress_is_inactive_without_pending_runs() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.commit()
+        db.add(SyncJob(workspace_id=workspace.id, run_id=100, status="completed"))
+        db.commit()
+
+        assert _run_sync_batch_progress(db, workspace.id)["active"] is False
 
 
 def test_review_progress_reports_current_workspace_runs(monkeypatch) -> None:

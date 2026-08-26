@@ -37,12 +37,25 @@
       <strong class="sync-progress-status" data-sync-status>{% if active_sync_job %}{{ active_sync_job.status|upper }}{% elif latest_sync_job %}{{ latest_sync_job.status|upper }}{% else %}NOT STARTED{% endif %}</strong>
     </div>
     <p class="sync-progress-message" data-sync-message>{% if active_sync_job %}{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}{% elif latest_sync_job %}{% if sync_display_at %}{% if latest_sync_job.completed_at %}Completed{% else %}Started{% endif %} {{ sync_display_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}{% if latest_sync_job.status == 'completed' %} &middot; {{ latest_sync_job.runs_discovered }} Passed Runs selected{% elif latest_sync_job.status == 'failed' and latest_sync_job.error_message %} &middot; {{ latest_sync_job.error_message }}{% endif %}{% else %}No synchronization has run yet. Use Sync from ALM to import Passed Runs.{% endif %}</p>
+    {% if run_sync_batch.active %}
+    <div class="sync-batch" data-sync-batch>
+      <div class="sync-batch-heading">
+        <span>Run refresh from ALM</span>
+        <strong><span data-sync-batch-done>{{ run_sync_batch.done }}</span> / <span data-sync-batch-total>{{ run_sync_batch.total }}</span></strong>
+      </div>
+      <progress data-sync-batch-bar max="{{ run_sync_batch.total }}" value="{{ run_sync_batch.done }}">{{ run_sync_batch.percent }}%</progress>
+      <div class="sync-batch-facts">
+        <span><strong data-sync-batch-running>{{ run_sync_batch.running }}</strong> running</span>
+        <span><strong data-sync-batch-queued>{{ run_sync_batch.queued }}</strong> waiting</span>
+        <span><strong data-sync-batch-failed>{{ run_sync_batch.failed }}</strong> failed</span>
+      </div>
+    </div>
+    {% endif %}
     {% if active_sync_job %}
     <div class="sync-progress-facts">
       <span><strong data-sync-folders-processed>{{ active_sync_job.folders_processed }}</strong> / <strong data-sync-folders-discovered>{{ active_sync_job.folders_discovered }}</strong> folders</span>
       <span><strong data-sync-test-sets>{{ active_sync_job.test_sets_discovered }}</strong> Test Sets</span>
       <span><strong data-sync-runs>{{ active_sync_job.runs_discovered }}</strong> Runs selected</span>
-      <span><strong data-sync-skipped>{{ active_sync_job.runs_skipped }}</strong> unchanged skipped</span>
     </div>
     {% endif %}
     {% if active_sync_job and active_sync_job.status == 'queued' and not worker_online %}<p class="queue-warning">Worker is offline; this synchronization starts when the Worker connects.</p>{% endif %}
@@ -61,7 +74,8 @@
       <span><strong data-review-queued>{{ review_job_counts.get('queued', 0) }}</strong> queued</span>
       <span><strong data-review-running>{{ review_job_counts.get('running', 0) }}</strong> / <strong data-review-concurrency>{{ ai_config.review_concurrency if ai_config else 1 }}</strong> running</span>
       <span><strong data-review-failed>{{ review_progress.review_failed or 0 }}</strong> Runs failed</span>
-      <span class="queue-warning" data-queue-warning{% if worker_online or not review_job_counts.get('queued', 0) %} hidden{% endif %}>Worker is offline; queued jobs will wait.</span>
+      <span class="queue-hint-inline" data-review-pending-sync{% if not run_sync_batch.active %} hidden{% endif %}><strong data-review-pending-sync-count>{{ run_sync_batch.queued + run_sync_batch.running }}</strong> Runs still refreshing from ALM before review</span>
+      <span class="queue-warning" data-queue-warning{% if not review_job_counts.get('queued', 0) or (worker_online and not current_workspace.review_queue_paused) %} hidden{% endif %}>{% if current_workspace.review_queue_paused %}Review queue is paused; queued jobs stay in the queue until you resume it.{% else %}Worker is offline; queued jobs will wait.{% endif %}</span>
     </div>
   </article>
 </section>
@@ -78,7 +92,16 @@
         panel.querySelector("[data-review-queued]").textContent = status.queued;
         panel.querySelector("[data-review-running]").textContent = status.running;
         panel.querySelector("[data-review-concurrency]").textContent = status.review_concurrency;
-        panel.querySelector("[data-queue-warning]").hidden = status.worker_online || status.queued === 0;
+        const pendingSync = panel.querySelector("[data-review-pending-sync]");
+        if (pendingSync) {
+          panel.querySelector("[data-review-pending-sync-count]").textContent = status.pending_run_sync;
+          pendingSync.hidden = !status.pending_run_sync;
+        }
+        const warning = panel.querySelector("[data-queue-warning]");
+        warning.textContent = status.review_paused
+          ? "Review queue is paused; queued jobs stay in the queue until you resume it."
+          : "Worker is offline; queued jobs will wait.";
+        warning.hidden = status.queued === 0 || (status.worker_online && !status.review_paused);
       } catch (_) {
         return;
       }
@@ -93,7 +116,7 @@
     <div><p class="eyebrow">WORKSPACE QUEUE</p><h2 id="queue-operations-title">{{ current_workspace.name }}</h2></div>
     <div class="queue-badges"><span>Priority <strong>{{ current_workspace.queue_priority }}</strong></span><span>Review <strong>{{ 'paused' if current_workspace.review_queue_paused else 'active' }}</strong></span><span>Sync <strong>{{ 'paused' if current_workspace.sync_queue_paused else 'active' }}</strong></span></div>
   </div>
-  {% if current_workspace.review_queue_paused and review_job_counts.get('running', 0) %}<p class="queue-note">Paused for new Review jobs. The current running job will finish safely.</p>{% endif %}
+  {% if current_workspace.review_queue_paused %}<p class="queue-note">Review queue is paused. {{ review_job_counts.get('queued', 0) }} queued job(s) stay in the queue and start when you resume it.{% if review_job_counts.get('running', 0) %} The running job will finish safely.{% endif %}</p>{% endif %}
   <div class="queue-actions" role="group" aria-label="Queue review work">
     <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Review new &amp; changed Runs</button></form>
     <form class="rereview-action" method="post" action="/actions/rereview">
@@ -145,25 +168,45 @@
 </section>
 {% endif %}
 
-{% if active_sync_job %}
+{% if active_sync_job or run_sync_batch.active %}
 <script>
   (() => {
     const panel = document.querySelector("[data-sync-progress]");
     const terminalStatuses = new Set(["completed", "failed"]);
+    const setText = (selector, value) => {
+      const node = panel.querySelector(selector);
+      if (node) node.textContent = value;
+    };
     const refreshSyncProgress = async () => {
       try {
         const response = await fetch("/api/sync-progress?workspace={{ current_workspace.id }}", { cache: "no-store" });
         if (!response.ok) return;
         const progress = await response.json();
+        const batch = progress.batch;
+        if (batch && batch.active) {
+          setText("[data-sync-batch-done]", batch.done);
+          setText("[data-sync-batch-total]", batch.total);
+          setText("[data-sync-batch-running]", batch.running);
+          setText("[data-sync-batch-queued]", batch.queued);
+          setText("[data-sync-batch-failed]", batch.failed);
+          const bar = panel.querySelector("[data-sync-batch-bar]");
+          if (bar) {
+            bar.max = batch.total;
+            bar.value = batch.done;
+          }
+        } else if (batch && !batch.active && {{ 'true' if run_sync_batch.active else 'false' }}) {
+          window.location.reload();
+          return;
+        }
         if (!progress.available) return;
-        panel.querySelector("[data-sync-stage]").textContent = progress.stage.replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
-        panel.querySelector("[data-sync-status]").textContent = progress.status.toUpperCase();
-        panel.querySelector("[data-sync-message]").textContent = progress.message || "Waiting for progress data from the worker";
-        panel.querySelector("[data-sync-folders-processed]").textContent = progress.folders_processed;
-        panel.querySelector("[data-sync-folders-discovered]").textContent = progress.folders_discovered;
-        panel.querySelector("[data-sync-test-sets]").textContent = progress.test_sets_discovered;
-        panel.querySelector("[data-sync-runs]").textContent = progress.runs_discovered;
-        panel.querySelector("[data-sync-skipped]").textContent = progress.runs_skipped;
+        setText("[data-sync-stage]", progress.stage.replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase()));
+        setText("[data-sync-status]", progress.status.toUpperCase());
+        setText("[data-sync-message]", progress.message || "Waiting for progress data from the worker");
+        setText("[data-sync-folders-processed]", progress.folders_processed);
+        setText("[data-sync-folders-discovered]", progress.folders_discovered);
+        setText("[data-sync-test-sets]", progress.test_sets_discovered);
+        setText("[data-sync-runs]", progress.runs_discovered);
+        if (batch && batch.active) return;
         if (terminalStatuses.has(progress.status)) window.clearInterval(timer);
         if (progress.status === "completed") window.location.reload();
       } catch (_) {
@@ -233,7 +276,28 @@
       <button class="button secondary" type="submit">Apply</button>
       <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}">Export CSV</a>
     </form>
-    <div class="table-heading"><h2>Runs</h2><span>{{ runs|length }} shown</span></div>
+    <div class="table-heading">
+      <h2>Runs</h2>
+      <div class="table-heading-actions">
+        <span>{{ runs|length }} shown</span>
+        <form method="post" action="/actions/sync-review-filtered" onsubmit="return confirm('Refresh the {{ runs|length }} filtered Runs from ALM and review each one afterwards?');">
+          <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
+          <input type="hidden" name="status" value="{{ selected_status }}">
+          <input type="hidden" name="tester" value="{{ selected_tester }}">
+          <input type="hidden" name="owner" value="{{ selected_owner }}">
+          <input type="hidden" name="query" value="{{ query }}">
+          <button class="button secondary" type="submit">Sync ALM &amp; review</button>
+        </form>
+        <form method="post" action="/actions/rereview-filtered" onsubmit="return confirm('Queue AI review for the {{ runs|length }} filtered Runs?');">
+          <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
+          <input type="hidden" name="status" value="{{ selected_status }}">
+          <input type="hidden" name="tester" value="{{ selected_tester }}">
+          <input type="hidden" name="owner" value="{{ selected_owner }}">
+          <input type="hidden" name="query" value="{{ query }}">
+          <button class="button primary" type="submit">Review these Runs</button>
+        </form>
+      </div>
+    </div>
     <div class="table-scroll">
       <table>
         <thead><tr><th>Run</th><th>Test case</th><th>Location</th><th>Actual tester</th><th>Test owner</th><th>ALM result</th><th>Final review</th><th>Review summary</th><th>Executed</th></tr></thead>

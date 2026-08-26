@@ -3,6 +3,18 @@ from datetime import datetime
 from app.web import templates
 
 
+def _idle_run_sync_batch() -> dict[str, int | bool]:
+    return {
+        "active": False,
+        "total": 0,
+        "done": 0,
+        "queued": 0,
+        "running": 0,
+        "failed": 0,
+        "percent": 0,
+    }
+
+
 def test_dashboard_uses_workspace_review_progress_and_latest_alm_action() -> None:
     template = templates.get_template("dashboard.html")
     source, _, _ = templates.env.loader.get_source(templates.env, template.name)
@@ -51,6 +63,7 @@ def test_dashboard_shows_completed_sync_time() -> None:
         )(),
         sync_display_at=completed_at,
         active_sync_job=None,
+        run_sync_batch=_idle_run_sync_batch(),
         review_job_counts={},
         review_update_count=0,
         review_progress=type("Progress", (), {"total": 0})(),
@@ -103,6 +116,7 @@ def test_dashboard_distinguishes_queued_sync_from_review_jobs() -> None:
         latest_sync_job=queued_sync,
         sync_display_at=None,
         active_sync_job=queued_sync,
+        run_sync_batch=_idle_run_sync_batch(),
         review_job_counts={"queued": 1},
         review_update_count=0,
         review_progress=type("Progress", (), {"total": 0})(),

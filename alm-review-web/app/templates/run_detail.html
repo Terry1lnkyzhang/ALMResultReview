@@ -16,6 +16,15 @@
   <form method="post" action="/runs/{{ run.run_id }}/refresh"><button class="button secondary" type="submit"{% if active_sync_job %} disabled{% endif %}>Refresh from ALM &amp; review</button></form>
 </section>
 
+<details class="danger-zone">
+  <summary>Delete this Run</summary>
+  <p class="subtle">Use this when the Run no longer exists in ALM. This permanently removes the Run, all of its revisions and steps, every AI review job and result, any queued refresh, and <strong>all manual decisions recorded by reviewers</strong>. It cannot be undone and the Run will come back if a later ALM sync still finds it.</p>
+  <form method="post" action="/runs/{{ run.run_id }}/delete" onsubmit="return confirm('Permanently delete Run {{ run.alm_run_id or run.run_id }} and its entire review history?');">
+    <label><span>Type the Run ID <strong>{{ run.alm_run_id or run.run_id }}</strong> to confirm</span><input type="text" name="confirm_run_id" autocomplete="off" required></label>
+    <button class="button danger" type="submit">Delete permanently</button>
+  </form>
+</details>
+
 <dl class="fact-strip">
   <div><dt>Test case</dt><dd>{{ run.test_id or '-' }}</dd></div><div><dt>Location</dt><dd>{{ run.execution_location or '-' }}</dd></div><div><dt>Test owner</dt><dd>{{ test_owner_label }}</dd></div><div><dt>Assigned tester</dt><dd>{{ assigned_tester_label }}</dd></div><div><dt>Actual tester</dt><dd>{{ actual_tester_label }}</dd></div><div><dt>ALM result</dt><dd>{{ run.run_status }}</dd></div><div><dt>Executed</dt><dd>{{ run.execution_at.strftime('%Y-%m-%d %H:%M') if run.execution_at else '-' }}</dd></div>
 </dl>

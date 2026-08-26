@@ -45,8 +45,10 @@ from app.services.review_operations import (
     REREVIEW_SCOPES,
     active_run_review_job,
     cancel_queued_reviews,
+    delete_run,
     queue_failed_reviews,
     queue_rereviews,
+    queue_rereviews_for_run_ids,
     queue_run_review,
     workspace_review_progress,
 )
@@ -68,7 +70,7 @@ from app.services.skill_runner import (
     load_skill,
     skill_manifest_metadata,
 )
-from app.services.worker_tasks import queue_sync_job
+from app.services.worker_tasks import queue_run_sync_jobs, queue_sync_job
 from app.services.workspaces import (
     resolve_workspace,
     workspace_evidence_config,
@@ -250,6 +252,123 @@ def _matches_dashboard_filters(
             or normalized_query in item["test_owner_label"].casefold()
             or normalized_query in item["review_summary"].casefold()
         )
+    )
+
+
+def _dashboard_filter_path(
+    workspace_id: int,
+    status: str,
+    tester: str,
+    owner: str,
+    query: str,
+) -> str:
+    return (
+        f"/?workspace={workspace_id}&status={quote(status)}&tester={quote(tester)}"
+        f"&owner={quote(owner)}&query={quote(query)}"
+    )
+
+
+def _filtered_run_ids(
+    db: Session,
+    workspace_id: int,
+    include_legacy: bool,
+    status: str,
+    tester: str,
+    owner: str,
+    query: str,
+) -> list[int]:
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            or_(
+                AlmRun.workspace_id == workspace_id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            )
+        )
+        .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
+    ).all()
+    policy_key = current_review_policy_key(db, workspace_id)
+    users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    return [
+        item["run"].run_id
+        for run in runs
+        if _matches_dashboard_filters(
+            item := _run_view(db, run, policy_key, users),
+            status,
+            tester,
+            owner,
+            query,
+        )
+    ]
+
+
+def _run_sync_batch_progress(db: Session, workspace_id: int) -> dict[str, Any]:
+    """Aggregate the per-Run ALM refresh batch that is still being processed.
+
+    `queue_run_sync_jobs` writes one row per Run inside a single transaction, so a
+    batch is identified by its shared `created_at`.
+    """
+    batch_created_at = db.scalar(
+        select(func.min(SyncJob.created_at)).where(
+            SyncJob.workspace_id == workspace_id,
+            SyncJob.run_id.is_not(None),
+            SyncJob.status.in_(("queued", "running")),
+        )
+    )
+    if batch_created_at is None:
+        return {
+            "active": False,
+            "total": 0,
+            "done": 0,
+            "queued": 0,
+            "running": 0,
+            "failed": 0,
+            "percent": 0,
+        }
+    counts = dict(
+        db.execute(
+            select(SyncJob.status, func.count())
+            .where(
+                SyncJob.workspace_id == workspace_id,
+                SyncJob.run_id.is_not(None),
+                SyncJob.created_at == batch_created_at,
+            )
+            .group_by(SyncJob.status)
+        ).all()
+    )
+    total = sum(counts.values())
+    done = counts.get("completed", 0)
+    return {
+        "active": True,
+        "total": total,
+        "done": done,
+        "queued": counts.get("queued", 0),
+        "running": counts.get("running", 0),
+        "failed": counts.get("failed", 0),
+        "percent": round(done * 100 / total) if total else 0,
+    }
+
+
+def _current_sync_job(db: Session, workspace_id: int) -> SyncJob | None:
+    """Pick the job the worker is actually on.
+
+    Jobs are claimed oldest-first, so the newest row is the last one to run and
+    would keep the progress panel stuck on "queued" for a whole batch.
+    """
+    for condition in (SyncJob.status == "running", SyncJob.status == "queued"):
+        job = db.scalar(
+            select(SyncJob)
+            .where(SyncJob.workspace_id == workspace_id, condition)
+            .order_by(SyncJob.created_at, SyncJob.id)
+            .limit(1)
+        )
+        if job is not None:
+            return job
+    return db.scalar(
+        select(SyncJob)
+        .where(SyncJob.workspace_id == workspace_id)
+        .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
+        .limit(1)
     )
 
 
@@ -526,12 +645,14 @@ def dashboard(
         .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
         .limit(1)
     )
+    current_sync_job = _current_sync_job(db, current_workspace.id)
     active_sync_job = (
-        latest_sync_job
-        if latest_sync_job is not None
-        and latest_sync_job.status in ("queued", "running", "failed")
+        current_sync_job
+        if current_sync_job is not None
+        and current_sync_job.status in ("queued", "running", "failed")
         else None
     )
+    run_sync_batch = _run_sync_batch_progress(db, current_workspace.id)
     sync_display_at = None
     if latest_sync_job is not None:
         sync_timestamp = latest_sync_job.completed_at or latest_sync_job.started_at
@@ -594,6 +715,7 @@ def dashboard(
             "review_update_reason_counts": review_update_reason_counts,
             "active_sync_job": active_sync_job,
             "latest_sync_job": latest_sync_job,
+            "run_sync_batch": run_sync_batch,
             "sync_display_at": sync_display_at,
             "ai_config": ai_config,
             "worker_heartbeat": worker_heartbeat,
@@ -662,6 +784,7 @@ def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
         .limit(1)
     )
     worker_has_active_job = bool(active_review or active_sync)
+    sync_batch = _run_sync_batch_progress(db, current_workspace.id)
     worker_online = bool(
         worker_has_active_job
         or (
@@ -674,6 +797,8 @@ def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
     return {
         "queued": counts.get("queued", 0),
         "running": counts.get("running", 0),
+        "review_paused": current_workspace.review_queue_paused,
+        "pending_run_sync": sync_batch["queued"] + sync_batch["running"],
         "review_concurrency": max(
             1, min(4, ai_config.review_concurrency if ai_config is not None else 1)
         ),
@@ -692,14 +817,10 @@ def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
 @router.get("/api/sync-progress")
 def sync_progress(workspace: int | None = None, db: Session = Depends(get_db)):
     current_workspace = resolve_workspace(db, workspace)
-    job = db.scalar(
-        select(SyncJob)
-        .where(SyncJob.workspace_id == current_workspace.id)
-        .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
-        .limit(1)
-    )
+    batch = _run_sync_batch_progress(db, current_workspace.id)
+    job = _current_sync_job(db, current_workspace.id)
     if job is None:
-        return {"available": False}
+        return {"available": False, "batch": batch}
     legacy_running_job = (
         job.status == "running"
         and job.progress_stage == "queued"
@@ -720,6 +841,8 @@ def sync_progress(workspace: int | None = None, db: Session = Depends(get_db)):
         "folders_processed": job.folders_processed,
         "test_sets_discovered": job.test_sets_discovered,
         "runs_discovered": job.runs_discovered,
+        "run_id": job.run_id,
+        "batch": batch,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error": job.error_message,
@@ -1056,6 +1179,32 @@ def refresh_run_from_alm(run_id: int, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/runs/{run_id}/delete")
+def delete_run_record(
+    run_id: int,
+    confirm_run_id: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    run = db.get(AlmRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    expected = str(run.alm_run_id or run.run_id)
+    if confirm_run_id.strip() != expected:
+        return _redirect(
+            f"/runs/{run_id}",
+            f"Deletion cancelled: type the Run ID {expected} to confirm.",
+            "error",
+        )
+    workspace_id = run.workspace_id
+    summary = delete_run(db, run)
+    return _redirect(
+        f"/?workspace={workspace_id}" if workspace_id else "/",
+        f"Run {summary.alm_run_id or summary.run_id} deleted with "
+        f"{summary.revisions} revision(s), {summary.review_jobs} review job(s) and "
+        f"{summary.manual_decisions} manual decision(s).",
+    )
+
+
 @router.post("/actions/import-snapshot")
 def import_snapshot(
     db: Session = Depends(get_db),
@@ -1222,13 +1371,89 @@ def rereview_runs(
     if scope not in REREVIEW_SCOPES:
         return _redirect(redirect_path, "Invalid re-review scope.", "error")
     result = queue_rereviews(db, scope, workspace.id)
-    return _redirect(
-        redirect_path,
+    message = (
         f"Re-review queued: {result.queued} of {result.matched} matching Runs. "
         f"{result.already_active} already active, "
         f"{result.manually_resolved} skipped as manually resolved. "
-        "Previous results were retained.",
+        "Previous results were retained."
     )
+    if result.queued and workspace.review_queue_paused:
+        message += " The Review queue is paused, so these jobs wait until you resume it."
+    return _redirect(redirect_path, message)
+
+
+@router.post("/actions/rereview-filtered")
+def rereview_filtered_runs(
+    status: str = Form(default="all"),
+    tester: str = Form(default="all"),
+    owner: str = Form(default="all"),
+    query: str = Form(default=""),
+    db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
+):
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = _dashboard_filter_path(workspace.id, status, tester, owner, query)
+    ai_config = db.get(AiConfig, 1)
+    if ai_config is None or not ai_config.enabled:
+        return _redirect(
+            redirect_path,
+            "AI review is disabled. Configure the model before re-reviewing.",
+            "error",
+        )
+    run_ids = _filtered_run_ids(
+        db, workspace.id, include_legacy, status, tester, owner, query
+    )
+    result = queue_rereviews_for_run_ids(db, run_ids, workspace.id)
+    message = (
+        f"Filtered re-review queued: {result.queued} of {result.matched} matching Runs. "
+        f"{result.already_active} already active, "
+        f"{result.manually_resolved} skipped as manually resolved. "
+        "Previous results were retained."
+    )
+    if result.queued and workspace.review_queue_paused:
+        message += " The Review queue is paused, so these jobs wait until you resume it."
+    return _redirect(redirect_path, message)
+
+
+@router.post("/actions/sync-review-filtered")
+def sync_and_review_filtered_runs(
+    status: str = Form(default="all"),
+    tester: str = Form(default="all"),
+    owner: str = Form(default="all"),
+    query: str = Form(default=""),
+    db: Session = Depends(get_db),
+    workspace_id: int | None = Form(None),
+):
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = _dashboard_filter_path(workspace.id, status, tester, owner, query)
+    if workspace_sync_config(db, workspace.id) is None:
+        return _redirect(
+            redirect_path,
+            "No ALM synchronization scope is configured.",
+            "error",
+        )
+    ai_config = db.get(AiConfig, 1)
+    if ai_config is None or not ai_config.enabled:
+        return _redirect(
+            redirect_path,
+            "AI review is disabled. Configure the model before re-reviewing.",
+            "error",
+        )
+    run_ids = _filtered_run_ids(
+        db, workspace.id, include_legacy, status, tester, owner, query
+    )
+    result = queue_run_sync_jobs(db, run_ids, workspace.id)
+    message = (
+        f"ALM refresh queued for {result.queued} of {result.matched} matching Runs; "
+        "each one is reviewed automatically once its import lands. "
+        f"{result.already_active} already queued, "
+        f"{result.skipped} skipped without an ALM test instance."
+    )
+    if result.queued and workspace.sync_queue_paused:
+        message += " The Sync queue is paused, so these jobs wait until you resume it."
+    return _redirect(redirect_path, message)
 
 
 @router.get("/ops/equipment")
