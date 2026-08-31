@@ -29,7 +29,7 @@ from app.services.reviews import current_review, save_manual_decision
 from app.web import _matches_status
 
 
-def prepare_run(db: Session, verdict: str) -> AlmRun:
+def prepare_run(db: Session, verdict: str, warnings_json: str | None = None) -> AlmRun:
     run = AlmRun(
         run_id=42,
         source_hash="a" * 64,
@@ -61,6 +61,7 @@ def prepare_run(db: Session, verdict: str) -> AlmRun:
             review_policy_key=current_review_policy_key(db),
             model_name="test-model",
             verdict=verdict,
+            warnings_json=warnings_json,
         )
     )
     db.commit()
@@ -146,6 +147,40 @@ def test_confirmed_unqualified_is_not_force_qualified() -> None:
         save_manual_decision(db, run, "confirmed_unqualified", "10.0.0.1", "Evidence missing")
 
         assert not is_force_qualified(current_review(db, run))
+
+
+@pytest.mark.parametrize(
+    ("verdict", "warnings_json", "expected"),
+    [
+        ("qualified", '[{"step": 1, "type": "minor_language", "summary": "Typo"}]', True),
+        ("unqualified", '[{"step": 2, "type": "equipment_status", "summary": "Active"}]', True),
+        ("qualified", "[]", False),
+        ("qualified", None, False),
+    ],
+)
+def test_warning_is_a_lens_over_every_final_status(
+    verdict: str,
+    warnings_json: str | None,
+    expected: bool,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, verdict, warnings_json)
+        policy_key = current_review_policy_key(db)
+        single = current_review(db, run, policy_key)
+        batched = current_reviews(db, [run], policy_key)[run.run_id]
+
+        assert single.has_warning is expected
+        assert batched.has_warning is expected
+
+        item = {
+            "final_status": batched.final_status,
+            "force_qualified": False,
+            "has_warning": batched.has_warning,
+        }
+        assert _matches_status(item, "warning") is expected
+        assert _matches_status(item, verdict)
 
 
 def test_latest_result_remains_visible_after_review_policy_changes() -> None:
