@@ -98,6 +98,12 @@ class CurrentReview:
     result: ReviewResult | None
     manual_decision: ManualDecision | None
     final_status: str
+    has_warning: bool = False
+
+
+def has_review_warning(warnings_json: str | None) -> bool:
+    """An empty warning list is stored as '[]', so a non-empty string is not enough."""
+    return bool(warnings_json) and warnings_json.strip() not in ("", "[]")
 
 
 @dataclass
@@ -249,7 +255,12 @@ def current_review(
         final_status = "unqualified"
     else:
         final_status = "needs_manual_review"
-    return CurrentReview(result, manual, final_status)
+    return CurrentReview(
+        result,
+        manual,
+        final_status,
+        has_review_warning(result.warnings_json),
+    )
 
 
 def save_manual_decision(

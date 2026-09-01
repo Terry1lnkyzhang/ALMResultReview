@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import case, desc, select, tuple_
+from sqlalchemy import case, desc, func, select, tuple_
 from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
@@ -10,6 +10,10 @@ from app.services.reviews import CurrentReview
 
 # Manual decisions that pin a Run to qualified against, or without, an AI verdict.
 FORCE_QUALIFIED_DECISIONS = frozenset({"override_qualified", "confirmed_qualified"})
+
+# The dashboard must not load `warnings_json`, so ask the database whether it holds
+# anything beyond the two characters of an empty list.
+_HAS_WARNING = func.length(func.coalesce(ReviewResult.warnings_json, "")) > 2
 
 
 def is_force_qualified(review: CurrentReview) -> bool:
@@ -20,6 +24,7 @@ def is_force_qualified(review: CurrentReview) -> bool:
 def _review_from_result(
     result: ReviewResult,
     manual: ManualDecision | None,
+    has_warning: bool,
 ) -> CurrentReview:
     if result.verdict == "qualified":
         final_status = "qualified"
@@ -35,7 +40,7 @@ def _review_from_result(
         final_status = "unqualified"
     else:
         final_status = "needs_manual_review"
-    return CurrentReview(result, manual, final_status)
+    return CurrentReview(result, manual, final_status, has_warning)
 
 
 def review_update_reasons(
@@ -73,8 +78,8 @@ def current_reviews(
     review_keys = [
         (run.run_id, run.current_revision_id, run.source_hash) for run in active_runs
     ]
-    results = db.scalars(
-        select(ReviewResult)
+    rows = db.execute(
+        select(ReviewResult, _HAS_WARNING.label("has_warning"))
         .options(
             load_only(
                 ReviewResult.id,
@@ -109,8 +114,12 @@ def current_reviews(
         )
     ).all()
     results_by_run: dict[int, ReviewResult] = {}
-    for result in results:
-        results_by_run.setdefault(result.run_id, result)
+    warning_by_result_id: dict[int, bool] = {}
+    for result, has_warning in rows:
+        if result.run_id in results_by_run:
+            continue
+        results_by_run[result.run_id] = result
+        warning_by_result_id[result.id] = bool(has_warning)
 
     manuals_by_result: dict[int, ManualDecision] = {}
     if results_by_run:
@@ -174,6 +183,7 @@ def current_reviews(
             reviews[run.run_id] = _review_from_result(
                 result,
                 manuals_by_result.get(result.id),
+                warning_by_result_id.get(result.id, False),
             )
         elif run.current_revision_id in failed_revision_ids:
             reviews[run.run_id] = CurrentReview(None, None, "review_failed")

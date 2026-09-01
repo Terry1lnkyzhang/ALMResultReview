@@ -65,6 +65,7 @@ class WorkspaceReviewProgress:
     manual: int
     pending: int
     review_failed: int
+    warning: int
     queued: int
     running: int
     percent: float
@@ -128,6 +129,7 @@ def workspace_review_progress(
         manual=status_counts["needs_manual_review"],
         pending=status_counts["pending_review"],
         review_failed=status_counts["review_failed"],
+        warning=sum(review.has_warning for review in reviews.values()),
         queued=job_counts.get("queued", 0),
         running=job_counts.get("running", 0),
         percent=round(reviewed * 100 / total, 1) if total else 0.0,

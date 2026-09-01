@@ -178,6 +178,7 @@ STATUS_LABELS = {
     "needs_manual_review": "需人工复核",
     "pending_review": "待评审",
     "review_failed": "评审失败",
+    "warning": "有警告",
 }
 
 
@@ -224,6 +225,7 @@ def _run_view(
         "review_summary": review.result.issue_summary if review.result else "",
         "final_status": review.final_status,
         "force_qualified": is_force_qualified(review),
+        "has_warning": review.has_warning,
         "status_label": STATUS_LABELS[review.final_status],
         "review_update_reasons": review_update_reasons(
             review.result,
@@ -235,9 +237,11 @@ def _run_view(
 
 
 def _matches_status(item: dict, status: str) -> bool:
-    # Force qualified is a lens over qualified Runs, not a separate final status.
+    # Force qualified and warning are lenses over the final statuses, not statuses.
     if status == "force_qualified":
         return item["force_qualified"]
+    if status == "warning":
+        return item["has_warning"]
     return status == "all" or item["final_status"] == status
 
 
@@ -578,6 +582,7 @@ def dashboard(
     )
     status_counts = Counter(item["final_status"] for item in all_views)
     status_counts["force_qualified"] = sum(item["force_qualified"] for item in all_views)
+    status_counts["warning"] = sum(item["has_warning"] for item in all_views)
     tester_scope = [
         item
         for item in all_views
@@ -763,6 +768,7 @@ def review_progress(workspace: int | None = None, db: Session = Depends(get_db))
         "manual": progress.manual,
         "pending": progress.pending,
         "review_failed": progress.review_failed,
+        "warning": progress.warning,
         "queued": progress.queued,
         "running": progress.running,
         "percent": progress.percent,
