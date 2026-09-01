@@ -64,7 +64,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.4.0"
+    assert definition.version == "1.5.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -72,19 +72,20 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.4.0",
-        "equipment-role": "1.3.1",
-        "image-evidence-review": "1.1.0",
+        "alm-text-review": "1.5.0",
+        "equipment-role": "1.4.1",
+        "html-evidence-review": "1.6.0",
+        "image-evidence-review": "1.2.0",
     }
 
-    assert set(discover_skills()) == {*active, "html-evidence-review"}
+    assert set(discover_skills()) == set(active)
     for skill_id, version in active.items():
         definition = load_skill(skill_id)
         assert definition.version == version
@@ -95,12 +96,12 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
             set(definition.required_capabilities)
             & set(definition.forbidden_capabilities)
         )
+        assert "Simplified Chinese" in definition.instructions
 
-    planned = skill_manifest_metadata("html-evidence-review")
-    assert planned["status"] == "planned"
-    assert planned["version"] == "0.1.0"
-    with pytest.raises(ValueError, match="Unsupported review Skill"):
-        load_skill("html-evidence-review")
+    html = skill_manifest_metadata("html-evidence-review")
+    assert html["status"] == "available"
+    assert html["version"] == "1.6.0"
+    assert load_skill("html-evidence-review").max_tokens == 32768
 
 
 def test_skill_runner_validates_input_output_and_separates_untrusted_data(
@@ -152,7 +153,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.4.0"
+    assert trace["skill_version"] == "1.5.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64

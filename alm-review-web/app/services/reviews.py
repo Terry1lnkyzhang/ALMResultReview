@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import PureWindowsPath
 from typing import Any
 
 import httpx
@@ -27,6 +29,10 @@ from app.models import (
 from app.services.ai_transport import ai_headers as _ai_headers
 from app.services.ai_transport import completion_url as _completion_url
 from app.services.ai_transport import skill_failure as _skill_failure
+from app.services.automation_release import (
+    assess_automation_release,
+    load_automation_releases,
+)
 from app.services.equipment_pipeline import (
     absorb_first_pass as _absorb_first_pass_equipment,
 )
@@ -36,7 +42,11 @@ from app.services.equipment_pipeline import (
 from app.services.equipment_review import OpenQuestion, analyze_equipment_steps
 from app.services.evidence import (
     CAPABILITIES,
+    analyze_html_filename_anomalies,
     analyze_html_path_sequences,
+    html_filename_testcase_ids,
+    html_path_testcase_ids,
+    is_html_report_path,
     validate_network_evidence_path,
 )
 from app.services.html_evidence import HtmlEvidenceResolver, HtmlEvidenceResult
@@ -44,6 +54,7 @@ from app.services.image_evidence import (
     ImageEvidenceResult,
     NetworkImageResolver,
     ResolvedImage,
+    embedded_image,
 )
 from app.services.review_pipeline import build_pipeline_trace
 from app.services.review_policy import current_review_policy_key
@@ -71,6 +82,7 @@ _EVIDENCE_SUPERSEDED_CODES = {"actual_insufficient", "evidence_reference_missing
 STEP_FIELD_CHAR_LIMIT = 6000
 TEXT_BATCH_CHAR_BUDGET = 24000
 TEXT_BATCH_MAX_STEPS = 15
+HTML_SKILL_CHAR_BUDGET = 30000
 VALID_MANUAL_DECISIONS = {
     "needs_manual_review": {"confirmed_qualified", "confirmed_unqualified"},
     "unqualified": {"override_qualified"},
@@ -93,7 +105,9 @@ class PreparedImageEvidence:
     external_review_enabled: bool
     results: dict[int, dict[str, ImageEvidenceResult]]
     html_results: dict[int, dict[str, HtmlEvidenceResult]] = field(default_factory=dict)
+    html_assessments: dict[int, dict[str, Any]] = field(default_factory=dict)
     image_skill_traces: list[dict[str, Any]] = field(default_factory=list)
+    html_skill_traces: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -122,6 +136,9 @@ class ReviewContext:
     evidence_config: EvidenceConfig | None
     equipment_enabled: bool
     equipment_registry: list[EquipmentRegistry] = field(default_factory=list)
+    automation_release_assessments: dict[int, dict[str, Any]] = field(
+        default_factory=dict
+    )
     equipment_checks: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[OpenQuestion] = field(default_factory=list)
     text_result: dict[str, Any] = field(default_factory=dict)
@@ -295,29 +312,29 @@ def _append_step_issue(
 def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
     criteria = {
         "language_quality": _criterion(
-            "pass", "No language problem that affects the conclusion."
+            "pass", "未发现影响结论的语言问题。"
         ),
-        "expected_vs_actual": _criterion("pass", "Actual answers Expected."),
+        "expected_vs_actual": _criterion("pass", "Actual 已回应 Expected。"),
         "screenshot_evidence": _criterion(
-            "not_applicable", "No screenshot evidence requirement detected."
+            "not_applicable", "未检测到截图证据要求。"
         ),
         "path_validation": _criterion(
-            "not_applicable", "No external path detected in Actual."
+            "not_applicable", "Actual 中未检测到外部路径。"
         ),
         "html_report_sequence": _criterion(
-            "not_applicable", "No automation HTML report sequence detected."
+            "not_applicable", "未检测到自动化 HTML 报告序列。"
         ),
         "automation_results": _criterion(
-            "not_applicable", "No automation HTML report result detected."
+            "not_applicable", "未检测到自动化 HTML 报告结果。"
         ),
         "automation_timing": _criterion(
-            "not_applicable", "Date review rules are not enabled yet."
+            "not_applicable", "日期评审规则尚未启用。"
         ),
         "phantom_information": _criterion(
-            "not_applicable", "No reference data requirement detected."
+            "not_applicable", "未检测到参考数据要求。"
         ),
         "equipment_traceability": _criterion(
-            "not_applicable", "No controlled equipment requires registry checks."
+            "not_applicable", "没有需要台账校验的受控设备。"
         ),
     }
     criterion_by_type = {
@@ -328,6 +345,8 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "folder": "screenshot_evidence",
         "path": "path_validation",
         "html_sequence": "html_report_sequence",
+        "html_filename": "html_report_sequence",
+        "html_testcase_id": "automation_results",
         "automation_result": "automation_results",
         "reference_data": "phantom_information",
         "equipment": "equipment_traceability",
@@ -372,14 +391,13 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
             equipment_criterion.update(
                 status="pass",
                 summary=(
-                    f"Verified {matched_count} device(s); identifiers and execution "
-                    "dates match the registry."
+                    f"已核验 {matched_count} 台设备；标识符和执行日期均与台账一致。"
                 ),
             )
         equipment_criterion["evidence"] = (
-            f"Checked {len(equipment_results)} Step(s); "
-            f"Fail {equipment_statuses.count('fail')}, "
-            f"Manual {equipment_statuses.count('manual')}."
+            f"已检查 {len(equipment_results)} 个步骤；"
+            f"失败 {equipment_statuses.count('fail')} 个，"
+            f"需人工复核 {equipment_statuses.count('manual')} 个。"
         )
 
     step_statuses = {item["status"] for item in parsed["step_results"]}
@@ -391,16 +409,16 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         verdict = "qualified"
     if all_issues:
         displayed = [
-            f"Step {issue['step']}: {issue['summary']}" for issue in all_issues[:6]
+            f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:6]
         ]
         if len(all_issues) > 6:
-            displayed.append(f"and {len(all_issues) - 6} more issue(s)")
-        issue_summary = "; ".join(displayed)
+            displayed.append(f"另有 {len(all_issues) - 6} 个问题")
+        issue_summary = "；".join(displayed)
     elif all_warnings:
-        issue_summary = f"Review passed with {len(all_warnings)} warning(s)."
+        issue_summary = f"评审通过，但有 {len(all_warnings)} 条警告。"
     else:
         issue_summary = parsed.get("model_summary") or (
-            "No language or semantic problem found."
+            "未发现语言或语义问题。"
         )
     parsed.update(
         {
@@ -416,36 +434,34 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
 # Image evidence statuses that raise an issue, mapped to severity, issue type, and text.
 # Any status missing here is deliberately silent; `tests/test_image_evidence.py` pins the set.
 _IMAGE_EVIDENCE_ISSUES: dict[str, tuple[str, str, str]] = {
-    "missing": ("fail", "path", "The configured evidence path does not exist."),
-    "no_images": ("fail", "screenshot", "The evidence folder holds no reviewable image."),
+    "missing": ("fail", "path", "配置的证据路径不存在。"),
+    "no_images": ("fail", "screenshot", "证据文件夹中没有可评审的图像。"),
     "no_usable_images": (
         "fail",
         "screenshot",
-        "The evidence folder holds no reviewable image.",
+        "证据文件夹中没有可评审的图像。",
     ),
     "no_matching_images": (
         "fail",
         "screenshot",
-        "The evidence folder holds images, but no file name matches this Step.",
+        "证据文件夹中存在图像，但没有文件名与该步骤匹配。",
     ),
     "ambiguous_step_mapping": (
         "manual",
         "screenshot",
-        "Several Steps share one evidence folder and the image file names carry no "
-        "Step marker, so they cannot be matched reliably.",
+        "多个步骤共用一个证据文件夹，且图像文件名不含步骤标记，无法可靠匹配。",
     ),
-    "denied": ("manual", "path", "The evidence folder is temporarily unreadable."),
-    "unavailable": ("manual", "path", "The evidence folder is temporarily unreadable."),
+    "denied": ("manual", "path", "证据文件夹暂时无法读取。"),
+    "unavailable": ("manual", "path", "证据文件夹暂时无法读取。"),
     "outside_root": (
         "manual",
         "path",
-        "The evidence path contains a link or reparse point, so it cannot be "
-        "confirmed to stay inside the approved root.",
+        "证据路径包含链接或重解析点，无法确认路径始终位于批准的根目录内。",
     ),
     "transport_too_large": (
         "manual",
         "screenshot",
-        "Evidence images exist but exceed what the current AI endpoint can accept.",
+        "证据图像存在，但超过当前 AI 接口可接受的大小。",
     ),
 }
 
@@ -455,12 +471,16 @@ def _apply_capability_guards(
     content: dict[str, Any],
     evidence_config: EvidenceConfig | None = None,
     prepared_evidence: PreparedImageEvidence | None = None,
+    automation_release_assessments: dict[int, dict[str, Any]] | None = None,
+    equipment_enabled: bool = False,
 ) -> dict[str, Any]:
     allowed_root = evidence_config.allowed_network_root if evidence_config else ""
+    release_assessments = automation_release_assessments or {}
     html_path_count = 0
-    checked_html_count = 0
-    passed_html_result_count = 0
-    checked_result_value_count = 0
+    readable_html_count = 0
+    ai_reviewed_html_count = 0
+    passed_html_step_count = 0
+    html_assessment_statuses: list[str] = []
     sequence_count = 0
     continuous_sequence_count = 0
     for content_step, step_result in zip(
@@ -473,14 +493,25 @@ def _apply_capability_guards(
         profile = content_step["evidence_profile"]
         routing = profile.get("routing", {})
         actions = _evidence_actions(profile)
-        paths = (
+        routed_paths = (
             _routed_paths(profile)
             if "validate_path" in actions
             else []
         )
-        html_paths = [path for path in paths if path.get("kind") == "html"]
+        html_paths = [
+            path
+            for path in profile.get("actual_paths", [])
+            if is_html_report_path(path)
+        ]
+        paths = []
+        seen_paths: set[str] = set()
+        for path in [*routed_paths, *html_paths]:
+            key = str(path.get("raw") or "").casefold()
+            if key and key not in seen_paths:
+                paths.append(path)
+                seen_paths.add(key)
         html_path_count += len(html_paths)
-        html_sequences = analyze_html_path_sequences(paths)
+        html_sequences = analyze_html_path_sequences(html_paths)
         sequence_count += len(html_sequences)
         continuous_sequence_count += sum(
             sequence["status"] == "pass" for sequence in html_sequences
@@ -491,7 +522,7 @@ def _apply_capability_guards(
                 continue
             missing_numbers = sequence["missing_numbers"]
             missing_suffixes = [
-                "the file without a numbered suffix" if number == 1 else f"_{number}.html"
+                "无编号后缀的基础文件" if number == 1 else f"_{number}.html"
                 for number in missing_numbers
             ]
             _append_step_issue(
@@ -499,10 +530,86 @@ def _apply_capability_guards(
                 step_result["review_step"],
                 "fail",
                 "html_sequence",
-                "The automation HTML report numbering is not continuous; missing "
+                "自动化 HTML 报告编号不连续；缺少 "
                 + ", ".join(missing_suffixes)
-                + ".",
+                + "。",
             )
+        filename_anomalies = analyze_html_filename_anomalies(html_paths)
+        if filename_anomalies:
+            markers = ", ".join(
+                sorted({item["marker"] for item in filename_anomalies})
+            )
+            _append_step_issue(
+                parsed,
+                step_result["review_step"],
+                "fail",
+                "html_filename",
+                f"HTML 报告文件名使用了不合格的后缀或标记：{markers}。",
+            )
+        alm_testcase_id = str(content.get("test_id") or "").strip()
+        if alm_testcase_id:
+            html_testcase_ids = []
+            html_path_ids = []
+            for path in html_paths:
+                filename_testcase_ids = html_filename_testcase_ids(path["raw"])
+                status = (
+                    "pass"
+                    if alm_testcase_id in filename_testcase_ids
+                    else "fail"
+                )
+                html_testcase_ids.append(
+                    {
+                        "source_path": path["raw"],
+                        "alm_testcase_id": alm_testcase_id,
+                        "filename_testcase_ids": filename_testcase_ids,
+                        "status": status,
+                    }
+                )
+                if status == "fail":
+                    summary = (
+                        "HTML 报告文件名中未找到 5 位或 6 位 Testcase ID。"
+                        if not filename_testcase_ids
+                        else (
+                            "HTML 报告文件名中的 Testcase ID "
+                            f"{', '.join(filename_testcase_ids)} 与 ALM Test ID "
+                            f"{alm_testcase_id} 不一致。"
+                        )
+                    )
+                    _append_step_issue(
+                        parsed,
+                        step_result["review_step"],
+                        "fail",
+                        "html_testcase_id",
+                        summary,
+                    )
+                path_testcase_ids = html_path_testcase_ids(path["raw"])
+                path_status = (
+                    "not_checked"
+                    if not path_testcase_ids
+                    else "pass"
+                    if all(value == alm_testcase_id for value in path_testcase_ids)
+                    else "fail"
+                )
+                html_path_ids.append(
+                    {
+                        "source_path": path["raw"],
+                        "alm_testcase_id": alm_testcase_id,
+                        "path_testcase_ids": path_testcase_ids,
+                        "status": path_status,
+                    }
+                )
+                if path_status == "fail":
+                    _append_step_issue(
+                        parsed,
+                        step_result["review_step"],
+                        "fail",
+                        "html_testcase_id",
+                        "HTML 报告路径中的 Testcase ID 目录 "
+                        f"{', '.join(path_testcase_ids)} 与 ALM Test ID "
+                        f"{alm_testcase_id} 不一致。",
+                    )
+            step_result["html_testcase_ids"] = html_testcase_ids
+            step_result["html_path_testcase_ids"] = html_path_ids
         step_evidence = (
             prepared_evidence.results.get(step_result["review_step"], {})
             if prepared_evidence
@@ -522,8 +629,42 @@ def _apply_capability_guards(
                 step_result["review_step"],
                 "manual",
                 "path",
-                "The evidence intent cannot be determined reliably.",
+                "无法可靠确定证据用途。",
             )
+        attachment_evidence = {
+            source: evidence
+            for source, evidence in step_evidence.items()
+            if source.startswith("ALM attachment:")
+        }
+        for source, evidence in attachment_evidence.items():
+            step_result["image_evidence"].append(
+                {
+                    "source_path": source,
+                    "source_kind": "alm_attachment",
+                    "status": evidence.status,
+                    "images": [
+                        {
+                            "name": image.relative_name,
+                            "media_type": image.media_type,
+                            "size_bytes": image.size_bytes,
+                            "width": image.width,
+                            "height": image.height,
+                            "sha256": image.sha256,
+                        }
+                        for image in evidence.images
+                    ],
+                }
+            )
+            issue = _IMAGE_EVIDENCE_ISSUES.get(evidence.status)
+            if issue is not None:
+                issue_status, issue_type, issue_summary = issue
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    issue_status,
+                    issue_type,
+                    issue_summary,
+                )
         for path in paths:
             path_status = validate_network_evidence_path(path["raw"], allowed_root)
             if path_status in {"not_unc", "outside_root"}:
@@ -532,8 +673,7 @@ def _apply_capability_guards(
                     step_result["review_step"],
                     "fail",
                     "path",
-                    "The evidence is not an absolute network path under the "
-                    "configured root.",
+                    "该证据不是已配置根目录下的绝对网络路径。",
                 )
             elif path_status == "root_not_configured":
                 _append_step_issue(
@@ -541,7 +681,7 @@ def _apply_capability_guards(
                     step_result["review_step"],
                     "manual",
                     "path",
-                    "No allowed network evidence root is configured.",
+                    "未配置允许的网络证据根目录。",
                 )
             elif not prepared_evidence or not prepared_evidence.external_review_enabled:
                 _append_step_issue(
@@ -549,7 +689,7 @@ def _apply_capability_guards(
                     step_result["review_step"],
                     "manual",
                     "path",
-                    "Controlled network evidence reading is not enabled.",
+                    "未启用受控网络证据读取。",
                 )
             else:
                 evidence = step_evidence.get(path["raw"])
@@ -592,52 +732,35 @@ def _apply_capability_guards(
                         step_result["review_step"],
                         "manual",
                         "automation_result",
-                        "The automation HTML report was not parsed.",
+                        "未解析自动化 HTML 报告。",
                     )
                 continue
-            checked_html_count += 1
-            checked_result_value_count += evidence.result_count
-            if evidence.status == "pass":
-                passed_html_result_count += 1
+            if evidence.status == "ready":
+                readable_html_count += 1
             step_result["html_evidence"].append(
                 {
                     "source_path": path["raw"],
                     "status": evidence.status,
-                    "result_count": evidence.result_count,
-                    "non_passed_values": list(evidence.non_passed_values),
+                    "size_bytes": evidence.size_bytes,
+                    "sha256": evidence.sha256,
+                    "block_count": len(evidence.blocks),
                     "detail": evidence.detail,
                 }
             )
-            if evidence.status == "fail":
-                values = ", ".join(evidence.non_passed_values[:4])
+            if evidence.status == "missing":
                 _append_step_issue(
                     parsed,
                     step_result["review_step"],
                     "fail",
                     "automation_result",
-                    f"Automation report results are not all Passed: {values}.",
-                )
-            elif evidence.status == "result_row_missing":
-                _append_step_issue(
-                    parsed,
-                    step_result["review_step"],
-                    "fail",
-                    "automation_result",
-                    "The automation report has no Result (Passed/Failed) row.",
-                )
-            elif evidence.status == "missing":
-                _append_step_issue(
-                    parsed,
-                    step_result["review_step"],
-                    "fail",
-                    "automation_result",
-                    "The automation HTML report file does not exist.",
+                    "自动化 HTML 报告文件不存在。",
                 )
             elif evidence.status in {
                 "denied",
                 "unavailable",
                 "too_large",
                 "invalid",
+                "no_visible_text",
                 "outside_root",
             }:
                 _append_step_issue(
@@ -645,7 +768,78 @@ def _apply_capability_guards(
                     step_result["review_step"],
                     "manual",
                     "automation_result",
-                    "The automation HTML report cannot be parsed reliably.",
+                    "无法可靠解析自动化 HTML 报告。",
+                )
+
+        html_assessment = (
+            prepared_evidence.html_assessments.get(step_result["review_step"])
+            if prepared_evidence
+            else None
+        )
+        if html_assessment is not None:
+            step_result["html_ai_review"] = html_assessment
+            reviewed_count = len(html_assessment["reviewed_report_ids"])
+            ai_reviewed_html_count += reviewed_count
+            html_assessment_statuses.append(html_assessment["status"])
+            if html_assessment["status"] == "pass":
+                passed_html_step_count += 1
+            elif html_assessment["status"] in {"fail", "manual"}:
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    html_assessment["status"],
+                    "automation_result",
+                    html_assessment["reason"][:200],
+                )
+        elif any(
+            evidence is not None and evidence.status == "ready"
+            for evidence in step_html_evidence.values()
+        ):
+            _append_step_issue(
+                parsed,
+                step_result["review_step"],
+                "manual",
+                "automation_result",
+                "可读取的自动化 HTML 报告未经过 AI 评审。",
+            )
+
+        release_assessment = release_assessments.get(step_result["review_step"])
+        if release_assessment is not None:
+            release_result = dict(release_assessment)
+            if html_assessment is not None:
+                release_result["ai_consistency"] = html_assessment[
+                    "release_consistency"
+                ]
+                if (
+                    release_assessment["status"] == "needs_ai"
+                    and html_assessment["release_consistency"] == "mismatched"
+                ):
+                    release_result["failure_code"] = "release_script_mismatch"
+            step_result["automation_release"] = release_result
+            release_status = release_assessment["status"]
+            if release_status in {"mismatch", "not_found"}:
+                issue_status = "fail"
+            elif release_status in {"incomplete", "unavailable"}:
+                issue_status = "manual"
+            elif release_status == "needs_ai" and html_assessment is not None:
+                issue_status = {
+                    "matched": "pass",
+                    "mismatched": "fail",
+                    "uncertain": "manual",
+                    "not_checked": "manual",
+                }[html_assessment["release_consistency"]]
+            else:
+                issue_status = "pass"
+            if issue_status in {"fail", "manual"}:
+                summary = release_assessment["reason"]
+                if release_status == "needs_ai" and html_assessment is not None:
+                    summary = html_assessment["reason"]
+                _append_step_issue(
+                    parsed,
+                    step_result["review_step"],
+                    issue_status,
+                    "automation_result",
+                    summary[:200],
                 )
 
         screenshot_required = profile["screenshot_review_required"]
@@ -656,16 +850,25 @@ def _apply_capability_guards(
                 step_result["review_step"],
                 "fail",
                 "screenshot",
-                "Expected requires a screenshot, but Actual supplies no screenshot "
-                "and no evidence path.",
+                "Expected 要求截图，但 Actual 未提供截图或证据路径。",
             )
-        elif screenshot_required and profile["attachment_declared"] and not paths:
+        elif (
+            screenshot_required
+            and profile["attachment_declared"]
+            and not paths
+            and not attachment_evidence
+        ):
             _append_step_issue(
                 parsed,
                 step_result["review_step"],
                 "manual",
                 "screenshot",
-                "Review of ALM attachment images is not enabled.",
+                (
+                    "ALM 附件中没有可评审的图片，或附件内容无法读取。"
+                    if prepared_evidence
+                    and prepared_evidence.external_review_enabled
+                    else "未启用 ALM 附件图像评审。"
+                ),
             )
         elif screenshot_required and prepared_evidence:
             has_ready_images = any(
@@ -678,16 +881,19 @@ def _apply_capability_guards(
                     step_result["review_step"],
                     "manual",
                     "screenshot",
-                    "Sending images to the AI endpoint is not enabled.",
+                    "未启用向 AI 接口发送图像。",
                 )
-        if profile["reference_lookup_required"] and not CAPABILITIES.reference_lookup:
+        if (
+            profile["reference_lookup_required"]
+            and not CAPABILITIES.reference_lookup
+            and not equipment_enabled
+        ):
             _append_step_issue(
                 parsed,
                 step_result["review_step"],
                 "manual",
                 "reference_data",
-                "Reference data is not configured, so equipment or phantom "
-                "information needs manual confirmation.",
+                "未配置参考数据，因此设备或模体信息需要人工确认。",
             )
     result = _recalculate_result(parsed)
     if html_path_count:
@@ -695,34 +901,38 @@ def _apply_capability_guards(
         if sequence_criterion["status"] == "not_applicable":
             sequence_criterion.update(
                 status="pass",
-                summary="Automation HTML report file names are continuous.",
+                summary="自动化 HTML 报告文件名连续。",
             )
         sequence_criterion["evidence"] = (
-            f"{html_path_count} HTML file(s); "
-            f"continuous sequences {continuous_sequence_count}/{sequence_count}."
+            f"共 {html_path_count} 个 HTML 文件；连续序列 "
+            f"{continuous_sequence_count}/{sequence_count}。"
         )
 
         results_criterion = result["criteria"]["automation_results"]
         if (
-            checked_html_count == html_path_count
+            readable_html_count == html_path_count
+            and ai_reviewed_html_count == html_path_count
+            and html_assessment_statuses
+            and all(status == "pass" for status in html_assessment_statuses)
             and results_criterion["status"] == "not_applicable"
         ):
             results_criterion.update(
                 status="pass",
-                summary="All automation report results are Passed.",
+                summary=(
+                    "自动化报告覆盖对应的 ALM 步骤，并支持一致的通过结论。"
+                ),
             )
         elif (
-            checked_html_count < html_path_count
-            and results_criterion["status"] == "not_applicable"
+            results_criterion["status"] == "not_applicable"
         ):
             results_criterion.update(
                 status="manual",
-                summary="Some automation HTML reports were not read.",
+                summary="部分自动化 HTML 报告未完成 AI 评审。",
             )
         results_criterion["evidence"] = (
-            f"Parsed {checked_html_count}/{html_path_count} HTML file(s); "
-            f"all-Passed files {passed_html_result_count}; "
-            f"{checked_result_value_count} result value(s) checked."
+            f"已读取 {readable_html_count}/{html_path_count} 个 HTML 文件；"
+            f"AI 已评审 {ai_reviewed_html_count} 个报告引用；"
+            f"通过的步骤评审 {passed_html_step_count} 个。"
         )
     return result
 
@@ -741,8 +951,7 @@ def _apply_equipment_guards(
                 **check,
                 "status": "not_applicable",
                 "code": "not_applicable",
-                "summary": "The main review found this Step not applicable, so the "
-                "equipment registry check was skipped.",
+                "summary": "主评审判定该步骤不适用，因此跳过设备台账校验。",
             }
         step_result["equipment"] = check
         for warning in check.get("warnings", []):
@@ -765,14 +974,14 @@ def _apply_disabled_equipment_guards(parsed: dict[str, Any]) -> dict[str, Any]:
             "review_step": step_result["review_step"],
             "status": "not_applicable",
             "code": "disabled_by_configuration",
-            "summary": "Equipment registry validation is disabled for this Workspace.",
+            "summary": "当前工作区已禁用设备台账校验。",
             "matches": [],
             "warnings": [],
         }
     result = _recalculate_result(parsed)
     result["criteria"]["equipment_traceability"] = _criterion(
         "not_applicable",
-        "Equipment registry validation is disabled for this Workspace.",
+        "当前工作区已禁用设备台账校验。",
     )
     return result
 
@@ -788,12 +997,15 @@ def _build_review_plan(
             review_step=int(step["review_step"]),
             paths=tuple(
                 path["raw"]
-                for path in _routed_paths(step["evidence_profile"])
-                if path.get("kind") == "html"
+                for path in step["evidence_profile"].get("actual_paths", [])
+                if is_html_report_path(path)
             ),
         )
         for step in content.get("steps", [])
-        if "parse_html_report" in _evidence_actions(step["evidence_profile"])
+        if any(
+            is_html_report_path(path)
+            for path in step["evidence_profile"].get("actual_paths", [])
+        )
     )
     equipment_steps = tuple(
         dict.fromkeys(
@@ -821,11 +1033,420 @@ def _run_report_pipeline(
     resolver = HtmlEvidenceResolver()
     return {
         request.review_step: {
-            path: resolver.resolve(path, evidence_config.allowed_network_root)
+            path: resolver.resolve(
+                path,
+                evidence_config.allowed_network_root,
+                evidence_config.local_html_fallback_root,
+            )
             for path in request.paths
         }
         for request in plan.report_requests
     }
+
+
+def _html_skill_input(
+    ctx: ReviewContext,
+    request: ReportReviewRequest,
+) -> dict[str, Any] | None:
+    step = next(
+        item
+        for item in ctx.content.get("steps", [])
+        if int(item["review_step"]) == request.review_step
+    )
+    step_results = ctx.evidence.html_results.get(request.review_step, {})
+    ready = [
+        (index, path, step_results.get(path))
+        for index, path in enumerate(request.paths, start=1)
+        if step_results.get(path) is not None
+        and step_results[path].status == "ready"
+        and step_results[path].blocks
+    ]
+    if not ready:
+        return None
+    reports = []
+    for index, path, result in ready:
+        assert result is not None
+        reports.append(
+            {
+                "report_id": f"step-{request.review_step}-report-{index}",
+                "source_path": path,
+                "filename": PureWindowsPath(path).name,
+                "sha256": result.sha256,
+                "content_truncated": False,
+                "blocks": [
+                    {"block_id": block.block_id, "text": block.text}
+                    for block in result.blocks
+                ],
+            }
+        )
+    return {
+        "review_mode": "final",
+        "batch_index": 1,
+        "batch_count": 1,
+        "steps": [
+            {
+                "review_step": request.review_step,
+                "description": _clip_step_text(step.get("description"))[0],
+                "expected": _clip_step_text(step.get("expected"))[0],
+                "actual": _clip_step_text(step.get("actual"))[0],
+                "automation_release": ctx.automation_release_assessments.get(
+                    request.review_step,
+                    {
+                        "status": "disabled",
+                        "project_name": "",
+                        "testcase_id": str(ctx.content.get("test_id") or ""),
+                        "candidate_count": 0,
+                        "claimed_script_name": "",
+                        "claimed_script_testcase_id": "",
+                        "html_script_names": [],
+                        "html_path_testcase_ids": [],
+                        "html_path_testcase_match": "not_checked",
+                        "actual_name_match": "not_checked",
+                        "failure_code": "",
+                        "claimed_document_number": "",
+                        "claimed_document_revision": "",
+                        "selected_release": None,
+                        "script_name_match": "not_checked",
+                        "document_match": "not_checked",
+                        "reason": "未配置自动化发布记录校验。",
+                    },
+                ),
+                "batch_observations": [],
+                "reports": reports,
+            }
+        ]
+    }
+
+
+def _html_skill_batch_inputs(
+    skill_input: dict[str, Any],
+    *,
+    char_budget: int = HTML_SKILL_CHAR_BUDGET,
+) -> list[dict[str, Any]]:
+    """Split complete report blocks into ordered, non-overlapping AI inputs."""
+    step = skill_input["steps"][0]
+    common_step = {
+        key: value
+        for key, value in step.items()
+        if key not in {"batch_observations", "reports"}
+    }
+    report_batches: list[list[dict[str, Any]]] = []
+    current_reports: list[dict[str, Any]] = []
+    current_chars = 0
+
+    def flush() -> None:
+        nonlocal current_reports, current_chars
+        if current_reports:
+            report_batches.append(current_reports)
+            current_reports = []
+            current_chars = 0
+
+    for report in step["reports"]:
+        report_base = {
+            key: value for key, value in report.items() if key != "blocks"
+        }
+        for block in report["blocks"]:
+            block_chars = len(block["text"])
+            if current_reports and current_chars + block_chars > char_budget:
+                flush()
+            if (
+                not current_reports
+                or current_reports[-1]["report_id"] != report["report_id"]
+            ):
+                current_reports.append({**report_base, "blocks": []})
+            current_reports[-1]["blocks"].append(block)
+            current_chars += block_chars
+            if block_chars >= char_budget:
+                flush()
+    flush()
+
+    for reports in report_batches:
+        for report in reports:
+            report["content_truncated"] = False
+
+    batch_count = len(report_batches)
+    return [
+        {
+            "review_mode": "evidence_batch",
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+            "steps": [
+                {
+                    **common_step,
+                    "batch_observations": [],
+                    "reports": reports,
+                }
+            ],
+        }
+        for batch_index, reports in enumerate(report_batches, start=1)
+    ]
+
+
+def _html_final_input(
+    skill_input: dict[str, Any],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    step = skill_input["steps"][0]
+    return {
+        "review_mode": "final",
+        "batch_index": max(1, len(observations)),
+        "batch_count": max(1, len(observations)),
+        "steps": [
+            {
+                **{
+                    key: value
+                    for key, value in step.items()
+                    if key not in {"batch_observations", "reports"}
+                },
+                "batch_observations": observations,
+                "reports": [
+                    {
+                        **{
+                            key: value
+                            for key, value in report.items()
+                            if key != "blocks"
+                        },
+                        "content_truncated": False,
+                        "blocks": [],
+                    }
+                    for report in step["reports"]
+                ],
+            }
+        ],
+    }
+
+
+def _validate_html_citations(
+    reports: list[dict[str, Any]],
+    assessment: dict[str, Any],
+) -> None:
+    blocks = {
+        (report["report_id"], block["block_id"]): block["text"]
+        for report in reports
+        for block in report["blocks"]
+    }
+    for citation in assessment["evidence"]:
+        block_text = blocks.get((citation["report_id"], citation["block_id"]))
+        quote_lines = [
+            " ".join(line.split()).casefold()
+            for line in citation["quote"].splitlines()
+            if line.strip()
+        ]
+        block_lines = [
+            " ".join(line.split()).casefold()
+            for line in (block_text or "").splitlines()
+            if line.strip()
+        ]
+        next_index = 0
+        for quote_line in quote_lines:
+            matching_index = next(
+                (
+                    index
+                    for index in range(next_index, len(block_lines))
+                    if quote_line in block_lines[index]
+                ),
+                None,
+            )
+            if matching_index is None:
+                next_index = -1
+                break
+            next_index = matching_index + 1
+        if not quote_lines or next_index < 0:
+            raise SkillFailure(
+                "HTML evidence Skill cited text outside the supplied report block.",
+                retryable=False,
+            )
+
+
+def _compact_html_quote(quote: str, max_chars: int = 400) -> str:
+    if len(quote) <= max_chars:
+        return quote
+    lines = [line.strip() for line in quote.splitlines() if line.strip()]
+    if not lines:
+        return quote[:max_chars]
+    max_lines = max(1, min(20, (max_chars + 1) // 2))
+    if len(lines) > max_lines:
+        lines = [*lines[: max_lines - 1], lines[-1]]
+    text_budget = max_chars - len(lines) + 1
+    base_chars, remainder = divmod(text_budget, len(lines))
+    excerpts = []
+    for index, line in enumerate(lines):
+        line_budget = base_chars + (1 if index < remainder else 0)
+        excerpts.append(line[:line_budget].rstrip())
+    return "\n".join(excerpts)
+
+
+def _validate_html_assessment(
+    skill_input: dict[str, Any],
+    assessment: dict[str, Any],
+) -> None:
+    automation_release = skill_input["steps"][0]["automation_release"]
+    release_status = automation_release["status"]
+    required_release_consistency = {
+        "disabled": "not_checked",
+        "matched": "matched",
+        "mismatch": "mismatched",
+        "not_found": "mismatched",
+        "incomplete": "uncertain",
+        "unavailable": "uncertain",
+    }.get(release_status)
+    if automation_release.get("failure_code") in {
+        "html_path_testcase_id_mismatch",
+        "actual_name_missing",
+        "actual_name_html_mismatch",
+    }:
+        required_release_consistency = {
+            "exact": "matched",
+            "compatible": "matched",
+            "not_checked": "uncertain",
+        }.get(automation_release.get("script_name_match"))
+    if (
+        required_release_consistency is not None
+        and assessment["release_consistency"] != required_release_consistency
+    ):
+        raise SkillFailure(
+            "HTML evidence Skill contradicted the automation release lookup.",
+            retryable=False,
+        )
+    reports = skill_input["steps"][0]["reports"]
+    report_ids = [report["report_id"] for report in reports]
+    reviewed_ids = assessment["reviewed_report_ids"]
+    if len(reviewed_ids) != len(set(reviewed_ids)) or set(reviewed_ids) != set(
+        report_ids
+    ):
+        raise SkillFailure(
+            "HTML evidence Skill did not exactly cover supplied reports.",
+            retryable=False,
+        )
+    _validate_html_citations(reports, assessment)
+    if assessment["status"] in {"pass", "fail"}:
+        cited_report_ids = {
+            citation["report_id"] for citation in assessment["evidence"]
+        }
+        if cited_report_ids != set(report_ids):
+            raise SkillFailure(
+                "HTML evidence Skill returned a verdict without cited evidence "
+                "for every supplied report.",
+                retryable=False,
+            )
+    if assessment["status"] == "pass" and (
+        any(report["content_truncated"] for report in reports)
+        or any(
+            assessment[field_name] != "supported"
+            for field_name in (
+                "description_coverage",
+                "expected_coverage",
+                "actual_coverage",
+            )
+        )
+        or assessment["result_consistency"] != "consistent"
+        or (
+            skill_input["steps"][0]["automation_release"]["status"]
+            != "disabled"
+            and assessment["release_consistency"] != "matched"
+        )
+    ):
+        raise SkillFailure(
+            "HTML evidence Skill returned pass without complete consistent coverage.",
+            retryable=False,
+        )
+
+
+def _validate_html_batch_assessment(
+    skill_input: dict[str, Any],
+    assessment: dict[str, Any],
+) -> None:
+    reports = skill_input["steps"][0]["reports"]
+    report_ids = [report["report_id"] for report in reports]
+    reviewed_ids = assessment["reviewed_report_ids"]
+    if len(reviewed_ids) != len(set(reviewed_ids)) or set(reviewed_ids) != set(
+        report_ids
+    ):
+        raise SkillFailure(
+            "HTML evidence batch did not cover every supplied report fragment.",
+            retryable=False,
+        )
+    _validate_html_citations(reports, assessment)
+
+
+def _run_html_review_skill(
+    ctx: ReviewContext,
+    skill_input: dict[str, Any],
+    *,
+    assessment_validator: Callable[[dict[str, Any], dict[str, Any]], None],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    def validate_output(
+        validated_input: dict[str, Any],
+        validated_output: dict[str, Any],
+    ) -> None:
+        for citation in validated_output["assessments"][0]["evidence"]:
+            citation["quote"] = _compact_html_quote(citation["quote"])
+        assessment_validator(
+            validated_input,
+            validated_output["assessments"][0],
+        )
+
+    trace = skill_runner.run(
+        "html-evidence-review",
+        skill_input,
+        endpoint=_completion_url(ctx.ai_config.base_url),
+        model_name=ctx.ai_config.model_name,
+        headers=_ai_headers(ctx.ai_config),
+        timeout_seconds=ctx.ai_config.timeout_seconds,
+        granted_capabilities={
+            "review.step_text",
+            "evidence.automation_release.metadata",
+            "evidence.html.metadata",
+            "evidence.html.content",
+        },
+        request_post=httpx.post,
+        output_validator=validate_output,
+    )
+    if trace.get("status") != "completed":
+        raise _skill_failure(trace, "HTML evidence Skill failed.")
+    assessment = trace["output"]["assessments"][0]
+    return trace, assessment
+
+
+def _run_html_review_batches(
+    ctx: ReviewContext,
+    skill_input: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    batches = _html_skill_batch_inputs(skill_input)
+    if len(batches) == 1:
+        trace, assessment = _run_html_review_skill(
+            ctx,
+            skill_input,
+            assessment_validator=_validate_html_assessment,
+        )
+        return [trace], assessment
+
+    traces: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    for batch in batches:
+        trace, observation = _run_html_review_skill(
+            ctx,
+            batch,
+            assessment_validator=_validate_html_batch_assessment,
+        )
+        traces.append(trace)
+        observations.append(observation)
+
+    final_input = _html_final_input(skill_input, observations)
+
+    def validate_final(
+        _validated_input: dict[str, Any],
+        assessment: dict[str, Any],
+    ) -> None:
+        _validate_html_assessment(skill_input, assessment)
+
+    final_trace, assessment = _run_html_review_skill(
+        ctx,
+        final_input,
+        assessment_validator=validate_final,
+    )
+    traces.append(final_trace)
+    return traces, assessment
 
 
 def _prepare_image_evidence(
@@ -846,14 +1467,16 @@ def _prepare_image_evidence(
     remaining_run_bytes = 15 * 1024 * 1024
     path_review_steps: dict[str, set[int]] = {}
     for step in content.get("steps", []):
-        if "load_images" not in _evidence_actions(step["evidence_profile"]):
+        actions = _evidence_actions(step["evidence_profile"])
+        if "load_images" not in actions and "review_attachment" not in actions:
             continue
         for path in _routed_paths(step["evidence_profile"]):
             path_review_steps.setdefault(path["raw"].casefold(), set()).add(
                 step["review_step"]
             )
     for step in content.get("steps", []):
-        if "load_images" not in _evidence_actions(step["evidence_profile"]):
+        actions = _evidence_actions(step["evidence_profile"])
+        if "load_images" not in actions and "review_attachment" not in actions:
             continue
         remaining_step_images = 4
         remaining_step_bytes = 10 * 1024 * 1024
@@ -862,6 +1485,37 @@ def _prepare_image_evidence(
             int(step_order) if step_order.isdecimal() else step["review_step"]
         }
         step_results: dict[str, ImageEvidenceResult] = {}
+        for attachment in step.get("attachment_contents", []):
+            if (
+                remaining_step_images <= 0
+                or remaining_run_images <= 0
+                or remaining_step_bytes <= 0
+                or remaining_run_bytes <= 0
+            ):
+                break
+            attachment_id = str(attachment.get("attachment_id") or "").strip()
+            source = f"ALM attachment:{attachment_id or 'unknown'}"
+            image = embedded_image(
+                name=str(attachment.get("name") or source),
+                media_type=str(attachment.get("mime_type") or ""),
+                data_url=str(attachment.get("data_url") or ""),
+                expected_sha256=str(attachment.get("sha256") or ""),
+                max_image_bytes=min(
+                    5 * 1024 * 1024,
+                    remaining_step_bytes,
+                    remaining_run_bytes,
+                ),
+            )
+            step_results[source] = ImageEvidenceResult(
+                status="ready" if image else "no_usable_images",
+                images=(image,) if image else (),
+                skipped_invalid=0 if image else 1,
+            )
+            if image:
+                remaining_step_images -= 1
+                remaining_run_images -= 1
+                remaining_step_bytes -= image.size_bytes
+                remaining_run_bytes -= image.size_bytes
         for path in _routed_paths(step["evidence_profile"]):
             if path.get("kind") == "html":
                 continue
@@ -1143,12 +1797,17 @@ def _attach_reference_candidates(
                 ),
             )
         if step.get("attachment_declared"):
-            add_candidate(
-                "file",
-                "ALM_ATTACHMENT",
-                "attachment",
-                "alm_attachment",
-            )
+            attachments = step.get("attachment_contents", [])
+            for value in (
+                [str(item.get("name") or "ALM attachment") for item in attachments]
+                or ["ALM attachment (content unavailable)"]
+            ):
+                add_candidate(
+                    "image" if attachments else "file",
+                    value,
+                    "attachment",
+                    "alm_attachment",
+                )
 
         check = checks_by_step.get(review_step, {})
         question = questions_by_step.get(review_step)
@@ -1169,7 +1828,11 @@ def _attach_reference_candidates(
                 continue
             add_candidate(
                 "equipment",
-                str(equipment.get("equipment_id") or ""),
+                str(
+                    equipment.get("registry_reference")
+                    or equipment.get("equipment_id")
+                    or ""
+                ),
                 source_field,
                 "equipment_registry_match",
             )
@@ -1213,10 +1876,9 @@ def _validate_reference_decision(
     }
     role = decision["role"]
     if role not in allowed_roles[candidate["type"]]:
-        raise SkillFailure(
-            "ALM text review Skill returned a role incompatible with the "
-            "reference type.",
-            retryable=False,
+        raise ValueError(
+            f"Reference {candidate['candidate_id']} of type {candidate['type']} "
+            f"cannot use role {role}."
         )
     expected_check = role in {
         "test_equipment",
@@ -1225,14 +1887,142 @@ def _validate_reference_decision(
         "uncertain",
     }
     if bool(decision["requires_check"]) != expected_check:
-        raise SkillFailure(
-            "ALM text review Skill returned an inconsistent reference check request.",
-            retryable=False,
+        raise ValueError(
+            f"Reference {candidate['candidate_id']} with role {role} must set "
+            f"requires_check={str(expected_check).lower()}."
         )
 
 
+def _validate_text_references(
+    validated_input: dict[str, Any],
+    validated_output: dict[str, Any],
+) -> None:
+    assessments = {
+        int(item["review_step"]): item
+        for item in validated_output["assessments"]
+    }
+    errors: list[str] = []
+    for step in validated_input["steps"]:
+        review_step = int(step["review_step"])
+        candidates = step.get("reference_candidates", [])
+        candidate_ids = [item["candidate_id"] for item in candidates]
+        decisions = assessments[review_step]["reference_decisions"]
+        decision_ids = [item["candidate_id"] for item in decisions]
+        duplicate_candidates = sorted(
+            identifier
+            for identifier in set(candidate_ids)
+            if candidate_ids.count(identifier) > 1
+        )
+        duplicate_decisions = sorted(
+            identifier
+            for identifier in set(decision_ids)
+            if decision_ids.count(identifier) > 1
+        )
+        missing = sorted(set(candidate_ids) - set(decision_ids))
+        extra = sorted(set(decision_ids) - set(candidate_ids))
+        if duplicate_candidates:
+            errors.append(
+                f"Step {review_step} supplied duplicate reference candidate(s): "
+                + ", ".join(duplicate_candidates)
+            )
+        if duplicate_decisions:
+            errors.append(
+                f"Step {review_step} duplicated reference decision(s): "
+                + ", ".join(duplicate_decisions)
+            )
+        if missing:
+            errors.append(
+                f"Step {review_step} omitted reference decision(s): "
+                + ", ".join(missing)
+            )
+        if extra:
+            errors.append(
+                f"Step {review_step} invented reference decision(s): "
+                + ", ".join(extra)
+            )
+        candidates_by_id = {
+            item["candidate_id"]: item for item in candidates
+        }
+        for decision in decisions:
+            candidate = candidates_by_id.get(decision["candidate_id"])
+            if candidate is None:
+                continue
+            try:
+                _validate_reference_decision(candidate, decision)
+            except ValueError as exc:
+                errors.append(f"Step {review_step}: {exc}")
+    if errors:
+        raise ValueError(" ".join(errors))
+
+
+def _fallback_missing_text_references(
+    validated_input: dict[str, Any],
+    validated_output: dict[str, Any],
+    _error: str,
+) -> dict[str, Any]:
+    assessments = {
+        int(item["review_step"]): {**item}
+        for item in validated_output["assessments"]
+    }
+    fallback_used = False
+    for step in validated_input["steps"]:
+        review_step = int(step["review_step"])
+        candidates = step.get("reference_candidates", [])
+        candidate_ids = [item["candidate_id"] for item in candidates]
+        decisions = [
+            {**item}
+            for item in assessments[review_step]["reference_decisions"]
+        ]
+        decision_ids = [item["candidate_id"] for item in decisions]
+        if len(decision_ids) != len(set(decision_ids)):
+            raise ValueError(
+                f"Step {review_step} returned duplicate reference decisions."
+            )
+        extra = sorted(set(decision_ids) - set(candidate_ids))
+        if extra:
+            raise ValueError(
+                f"Step {review_step} invented reference decision(s): "
+                + ", ".join(extra)
+            )
+        candidates_by_id = {
+            item["candidate_id"]: item for item in candidates
+        }
+        for decision in decisions:
+            _validate_reference_decision(
+                candidates_by_id[decision["candidate_id"]],
+                decision,
+            )
+        for candidate_id in candidate_ids:
+            if candidate_id in decision_ids:
+                continue
+            fallback_used = True
+            decisions.append(
+                {
+                    "candidate_id": candidate_id,
+                    "role": "uncertain",
+                    "requires_check": True,
+                    "reason": "模型修复后仍遗漏了该引用，需要人工复核。",
+                }
+            )
+        assessments[review_step] = {
+            **assessments[review_step],
+            "reference_decisions": decisions,
+        }
+    if not fallback_used:
+        raise ValueError(
+            "The text review output is invalid and cannot be safely completed."
+        )
+    return {
+        **validated_output,
+        "assessments": [
+            assessments[int(item["review_step"])]
+            for item in validated_output["assessments"]
+        ],
+    }
+
+
 def _routes_result_evidence(step: dict[str, Any]) -> bool:
-    return any(
+    return bool(step.get("attachment_contents")) or any(
         decision["requires_check"]
         and decision["role"] in _RESULT_EVIDENCE_ROLES
         for decision in step.get("reference_decisions", [])
@@ -1255,7 +2045,14 @@ def _apply_reference_routing(content: dict[str, Any]) -> None:
             candidate["candidate_id"]: candidate
             for candidate in step.get("reference_candidates", [])
         }
+        attachment_contents = step.get("attachment_contents", [])
         actions = {"review_attachment"} if step.get("attachment_declared") else set()
+        routed_types: set[str] = set()
+        reasons: list[str] = []
+        if attachment_contents:
+            actions.update(("load_images", "send_to_visual_ai"))
+            routed_types.add("image_evidence")
+            reasons.append("ALM 步骤附件已强制转交图像证据评审。")
         paths_by_value = {
             str(path.get("raw") or "").casefold(): path
             for path in profile.get("actual_paths", [])
@@ -1271,15 +2068,14 @@ def _apply_reference_routing(content: dict[str, Any]) -> None:
                 "actions": [],
                 "decision_source": "alm-text-review",
                 "confidence": None,
-                "reason": "The Step is not applicable, so no external evidence "
-                "check was performed.",
+                "reason": "该步骤不适用，因此未执行外部证据检查。",
                 "manual_required": False,
             }
             continue
-        routed_types: set[str] = set()
-        reasons: list[str] = []
         for decision in step.get("reference_decisions", []):
             candidate = candidates[decision["candidate_id"]]
+            if candidate["source_field"] == "attachment":
+                continue
             if candidate["type"] == "equipment" or not decision["requires_check"]:
                 continue
             path = paths_by_value.get(candidate["value"].casefold())
@@ -1321,8 +2117,8 @@ def _apply_reference_routing(content: dict[str, Any]) -> None:
             "actions": sorted(actions),
             "decision_source": "alm-text-review",
             "confidence": None,
-            "reason": "; ".join(dict.fromkeys(reasons)) or (
-                "No external specialist check was requested."
+            "reason": "；".join(dict.fromkeys(reasons)) or (
+                "未请求外部专项检查。"
             ),
             "manual_required": "manual_review" in actions,
         }
@@ -1371,6 +2167,8 @@ def _run_text_semantic_skills(
                 "equipment.registry.candidates",
             },
             request_post=httpx.post,
+            output_validator=_validate_text_references,
+            output_fallback=_fallback_missing_text_references,
         )
         traces.append(trace)
         if trace.get("status") != "completed":
@@ -1384,29 +2182,7 @@ def _run_text_semantic_skills(
 
     for step in steps:
         review_step = int(step["review_step"])
-        candidate_ids = [
-            item["candidate_id"] for item in step.get("reference_candidates", [])
-        ]
         decisions = assessments[review_step]["reference_decisions"]
-        decision_ids = [item["candidate_id"] for item in decisions]
-        if (
-            len(candidate_ids) != len(set(candidate_ids))
-            or len(decision_ids) != len(set(decision_ids))
-            or set(decision_ids) != set(candidate_ids)
-        ):
-            raise SkillFailure(
-                "ALM text review Skill did not exactly cover supplied references.",
-                retryable=False,
-            )
-        candidates_by_id = {
-            item["candidate_id"]: item
-            for item in step.get("reference_candidates", [])
-        }
-        for decision in decisions:
-            _validate_reference_decision(
-                candidates_by_id[decision["candidate_id"]],
-                decision,
-            )
         step["reference_decisions"] = decisions
         step["text_applicability"] = assessments[review_step]["applicability"]
         step["extracted_equipment"] = assessments[review_step].get(
@@ -1481,8 +2257,7 @@ def _run_text_semantic_skills(
                 "status": "manual",
                 "type": "expected_actual",
                 "summary": (
-                    "The Step text exceeded the AI input limit and was truncated; "
-                    "review the full content manually."
+                    "步骤文本超过 AI 输入限制并已截断，请人工复核完整内容。"
                 ),
             }
         )
@@ -1506,6 +2281,8 @@ def _aggregate_review_pipeline(ctx: ReviewContext) -> dict[str, Any]:
         ctx.content,
         ctx.evidence_config,
         ctx.evidence,
+        ctx.automation_release_assessments,
+        equipment_enabled=ctx.equipment_enabled,
     )
     return (
         _apply_equipment_guards(guarded, ctx.equipment_checks)
@@ -1565,8 +2342,7 @@ def _routing_stage(ctx: ReviewContext) -> dict[str, Any]:
             "ai_calls": 0,
             "affects_routing": True,
             "affects_verdict": True,
-            "reason": "The first text pass returns candidate reference roles and "
-            "specialist check requests.",
+            "reason": "第一轮文本评审返回候选引用角色和专项检查请求。",
         },
         "steps": [
             {
@@ -1645,6 +2421,13 @@ def _image_review_stage(ctx: ReviewContext) -> dict[str, Any]:
 
 def _report_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     ctx.evidence.html_results = _run_report_pipeline(ctx.plan, ctx.evidence_config)
+    for request in ctx.plan.report_requests:
+        skill_input = _html_skill_input(ctx, request)
+        if skill_input is None:
+            continue
+        traces, assessment = _run_html_review_batches(ctx, skill_input)
+        ctx.evidence.html_skill_traces.extend(traces)
+        ctx.evidence.html_assessments[request.review_step] = assessment
     if not ctx.evidence.external_review_enabled:
         status = "disabled"
     elif ctx.plan.report_requests:
@@ -1658,11 +2441,27 @@ def _report_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     ]
     return {
         "status": status,
-        "ai_calls": 0,
+        "ai_calls": sum(
+            int(trace.get("ai_calls", 0))
+            for trace in ctx.evidence.html_skill_traces
+        ),
+        "skills": ctx.evidence.html_skill_traces,
         "reports": sum(len(request.paths) for request in ctx.plan.report_requests),
         "result_statuses": {
             status_name: report_statuses.count(status_name)
             for status_name in sorted(set(report_statuses))
+        },
+        "assessment_statuses": {
+            status_name: sum(
+                assessment["status"] == status_name
+                for assessment in ctx.evidence.html_assessments.values()
+            )
+            for status_name in sorted(
+                {
+                    assessment["status"]
+                    for assessment in ctx.evidence.html_assessments.values()
+                }
+            )
         },
     }
 
@@ -1682,7 +2481,7 @@ def _equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
             "skill_id": "equipment-role",
             "status": "disabled",
             "ai_calls": 0,
-            "reason": "Equipment registry validation is disabled for this Workspace.",
+            "reason": "当前工作区已禁用设备台账校验。",
         }
         status = "disabled"
     return {
@@ -1821,19 +2620,63 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
     equipment_registry: list[EquipmentRegistry] = []
     if workspace.equipment_review_enabled:
         equipment_statement = select(EquipmentRegistry).order_by(
-            EquipmentRegistry.equipment_id
+            EquipmentRegistry.equipment_id,
+            EquipmentRegistry.id,
         )
         if workspace.equipment_area_filter:
             equipment_statement = equipment_statement.where(
                 EquipmentRegistry.subordinate_area == workspace.equipment_area_filter
             )
         equipment_registry = list(db.scalars(equipment_statement).all())
+    content = review_payload(snapshot)
+    evidence_config = workspace_evidence_config(db, workspace.id)
+    release_assessments: dict[int, dict[str, Any]] = {}
+    release_project = (
+        evidence_config.automation_release_project_name
+        if evidence_config
+        else ""
+    )
+    release_testcase_id = str(content.get("test_id") or run.test_id or "")
+    html_steps = [
+        step
+        for step in content.get("steps", [])
+        if any(
+            is_html_report_path(path)
+            for path in step["evidence_profile"]["actual_paths"]
+        )
+    ]
+    if html_steps and release_project:
+        lookup_error = ""
+        try:
+            releases = load_automation_releases(
+                db,
+                release_project,
+                release_testcase_id,
+            )
+        except Exception as exc:
+            releases = ()
+            lookup_error = str(exc)[:300]
+        for step in html_steps:
+            html_paths = tuple(
+                path["raw"]
+                for path in step["evidence_profile"]["actual_paths"]
+                if is_html_report_path(path)
+            )
+            release_assessments[step["review_step"]] = assess_automation_release(
+                actual=step["actual"],
+                html_paths=html_paths,
+                project_name=release_project,
+                testcase_id=release_testcase_id,
+                releases=releases,
+                lookup_error=lookup_error,
+            )
     ctx = ReviewContext(
         ai_config=ai_config,
-        content=review_payload(snapshot),
-        evidence_config=workspace_evidence_config(db, workspace.id),
+        content=content,
+        evidence_config=evidence_config,
         equipment_enabled=workspace.equipment_review_enabled,
         equipment_registry=equipment_registry,
+        automation_release_assessments=release_assessments,
     )
     started = time.perf_counter()
     try:

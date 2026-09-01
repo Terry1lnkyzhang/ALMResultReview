@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}ALM Review{% endblock %}</title>
+  <title>{% block title %}ALM 评审{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='/rich-text.css') }}?v=1">
   <link rel="stylesheet" href="{{ url_for('static', path='/equipment.css') }}?v=2">
@@ -12,14 +12,14 @@
   <header class="topbar">
     <a class="brand" href="/">
       <span class="brand-mark">AR</span>
-      <span>ALM Review Workspace</span>
+      <span>ALM 评审工作区</span>
     </a>
-    <div class="environment"><span class="live-dot"></span> Local review service</div>
+    <div class="environment"><span class="live-dot"></span> 本地评审服务</div>
   </header>
   <main class="page-shell">
     {% if message %}<div class="notice notice-{{ message_kind }}">{{ message }}</div>{% endif %}
     {% block content %}{% endblock %}
   </main>
-  <footer class="footer">ALM content remains inside the local review environment.</footer>
+  <footer class="footer">ALM 内容仅保留在本地评审环境中。</footer>
 </body>
 </html>

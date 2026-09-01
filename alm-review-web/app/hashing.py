@@ -105,8 +105,23 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _content_addressed_attachments(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                value.get("sha256", "")
+                if key == "data_url"
+                else _content_addressed_attachments(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_content_addressed_attachments(item) for item in value]
+    return value
+
+
 def source_hash(record: dict[str, Any]) -> str:
-    return _digest(record)
+    return _digest(_content_addressed_attachments(record))
 
 
 def review_content(record: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +203,7 @@ def review_payload(
             ]
         attachment_declared = bool(raw.get("attachment") or raw.get("attachmentContents"))
         step["attachment_declared"] = attachment_declared
+        step["attachment_contents"] = list(raw.get("attachmentContents") or [])
         step["evidence_profile"] = step_evidence_profile(
             step["description"],
             step["expected"],
@@ -205,4 +221,19 @@ def review_payload(
 
 
 def review_hash(record: dict[str, Any]) -> str:
-    return _digest(review_content(record))
+    content = review_content(record)
+    raw_steps = (record.get("run") or {}).get("steps") or []
+    for normalized, raw in zip(content["steps"], raw_steps, strict=True):
+        attachments = [
+            {
+                "attachment_id": str(item.get("attachment_id") or ""),
+                "name": str(item.get("name") or ""),
+                "mime_type": str(item.get("mime_type") or ""),
+                "size_bytes": int(item.get("size_bytes") or 0),
+                "sha256": str(item.get("sha256") or ""),
+            }
+            for item in (raw.get("attachmentContents") or [])
+        ]
+        if attachments:
+            normalized["attachments"] = attachments
+    return _digest(content)

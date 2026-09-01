@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review_mode", "batch_index", "batch_count", "steps"],
+  "properties": {
+    "review_mode": {"enum": ["evidence_batch", "final"]},
+    "batch_index": {"type": "integer", "minimum": 1},
+    "batch_count": {"type": "integer", "minimum": 1},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["review_step", "description", "expected", "actual", "automation_release", "batch_observations", "reports"],
+        "properties": {
+          "review_step": {"type": "integer", "minimum": 1},
+          "description": {"type": "string"},
+          "expected": {"type": "string"},
+          "actual": {"type": "string"},
+          "automation_release": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "project_name", "testcase_id", "candidate_count", "claimed_script_name", "claimed_script_testcase_id", "html_script_names", "html_path_testcase_ids", "html_path_testcase_match", "actual_name_match", "failure_code", "claimed_document_number", "claimed_document_revision", "selected_release", "script_name_match", "document_match", "reason"],
+            "properties": {
+              "status": {"enum": ["disabled", "matched", "needs_ai", "mismatch", "not_found", "incomplete", "unavailable"]},
+              "project_name": {"type": "string"},
+              "testcase_id": {"type": "string"},
+              "candidate_count": {"type": "integer", "minimum": 0},
+              "claimed_script_name": {"type": "string"},
+              "claimed_script_testcase_id": {"type": "string"},
+              "html_script_names": {"type": "array", "items": {"type": "string"}},
+              "html_path_testcase_ids": {"type": "array", "items": {"type": "string"}},
+              "html_path_testcase_match": {"enum": ["not_checked", "exact", "mismatch"]},
+              "actual_name_match": {"enum": ["not_checked", "exact", "mismatch", "missing"]},
+              "failure_code": {"enum": ["", "actual_testcase_id_missing", "actual_testcase_id_mismatch", "html_script_missing", "html_path_testcase_id_mismatch", "actual_name_missing", "actual_name_html_mismatch", "release_not_found", "release_testcase_id_mismatch", "document_mismatch", "document_incomplete"]},
+              "claimed_document_number": {"type": "string"},
+              "claimed_document_revision": {"type": "string"},
+              "selected_release": {
+                "anyOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["release_id", "testcase_id", "project_name", "script_name", "file_path", "baseline_name", "release_time", "release_version", "version_number", "release_revision", "release_version_format", "document_number", "document_revision", "report_link"],
+                    "properties": {
+                      "release_id": {"type": "integer"},
+                      "testcase_id": {"type": "string"},
+                      "project_name": {"type": "string"},
+                      "script_name": {"type": "string"},
+                      "file_path": {"type": "string"},
+                      "baseline_name": {"type": "string"},
+                      "release_time": {"type": "string"},
+                      "release_version": {"type": "string"},
+                      "version_number": {"type": "string"},
+                      "release_revision": {"type": ["integer", "null"]},
+                      "release_version_format": {"type": "string"},
+                      "document_number": {"type": "string"},
+                      "document_revision": {"type": "string"},
+                      "report_link": {"type": "string"}
+                    }
+                  }
+                ]
+              },
+              "script_name_match": {"enum": ["not_checked", "exact", "compatible", "mismatch", "uncertain", "not_found"]},
+              "document_match": {"enum": ["not_checked", "exact", "mismatch", "uncertain", "not_found"]},
+              "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+            }
+          },
+          "batch_observations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["review_step", "status", "description_coverage", "expected_coverage", "actual_coverage", "result_consistency", "release_consistency", "reviewed_report_ids", "evidence", "reason"],
+              "properties": {
+                "review_step": {"type": "integer", "minimum": 1},
+                "status": {"enum": ["pass", "fail", "manual"]},
+                "description_coverage": {"enum": ["supported", "contradicted", "not_found", "uncertain"]},
+                "expected_coverage": {"enum": ["supported", "contradicted", "not_found", "uncertain"]},
+                "actual_coverage": {"enum": ["supported", "contradicted", "not_found", "uncertain"]},
+                "result_consistency": {"enum": ["consistent", "inconsistent", "uncertain"]},
+                "release_consistency": {"enum": ["matched", "mismatched", "uncertain", "not_checked"]},
+                "reviewed_report_ids": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {"type": "string", "minLength": 1}
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["report_id", "block_id", "quote", "supports"],
+                    "properties": {
+                      "report_id": {"type": "string", "minLength": 1},
+                      "block_id": {"type": "string", "minLength": 1},
+                      "quote": {"type": "string", "minLength": 1, "maxLength": 400},
+                      "supports": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {"enum": ["description", "expected", "actual", "result"]}
+                      }
+                    }
+                  }
+                },
+                "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+              }
+            }
+          },
+          "reports": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["report_id", "source_path", "filename", "sha256", "content_truncated", "blocks"],
+              "properties": {
+                "report_id": {"type": "string", "minLength": 1},
+                "source_path": {"type": "string", "minLength": 1},
+                "filename": {"type": "string", "minLength": 1},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "content_truncated": {"type": "boolean"},
+                "blocks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["block_id", "text"],
+                    "properties": {
+                      "block_id": {"type": "string", "minLength": 1},
+                      "text": {"type": "string", "minLength": 1}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

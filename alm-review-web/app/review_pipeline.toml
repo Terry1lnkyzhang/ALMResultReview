@@ -22,7 +22,7 @@ writes = ["step_issues.screenshot"]
 
 [[stage]]
 id = "report_review"
-skill = ""
+skill = "html-evidence-review"
 gate = "external_evidence_review_enabled"
 writes = ["html_evidence"]
 

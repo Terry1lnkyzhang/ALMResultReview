@@ -27,4 +27,5 @@ Review only the application-approved images supplied with each ALM Step and deci
 The application has already authorized and bounded image loading. You cannot access filesystem paths or network locations. Source paths are provenance labels only.
 
 Return only JSON matching the supplied output schema. Do not return Markdown. Write every
-`reason` in English, whatever language the reviewed ALM text or evidence uses.
+`reason` in Simplified Chinese, whatever language the reviewed ALM text or evidence uses. Keep
+identifiers, filenames, quoted source text, and enum values unchanged.

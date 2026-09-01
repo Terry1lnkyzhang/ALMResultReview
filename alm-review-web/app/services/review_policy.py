@@ -14,15 +14,17 @@ from app.models import (
     ReviewResult,
     Workspace,
 )
+from app.services.automation_release import automation_release_policy_snapshot
 from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.08.21.3"
+REVIEW_ENGINE_VERSION = "2026.09.01.5"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",
     _APP_DIRECTORY / "hashing.py",
+    _APP_DIRECTORY / "services" / "automation_release.py",
     _APP_DIRECTORY / "services" / "equipment_pipeline.py",
     _APP_DIRECTORY / "services" / "evidence.py",
     _APP_DIRECTORY / "services" / "equipment_review.py",
@@ -56,7 +58,8 @@ def current_review_policy_key(
     ai_config = db.get(AiConfig, 1)
     evidence_config = workspace_evidence_config(db, workspace.id)
     equipment_statement = select(EquipmentRegistry).order_by(
-        EquipmentRegistry.equipment_id
+        EquipmentRegistry.equipment_id,
+        EquipmentRegistry.id,
     )
     if workspace.equipment_area_filter:
         equipment_statement = equipment_statement.where(
@@ -73,6 +76,7 @@ def current_review_policy_key(
             "description": item.description,
             "manufacturer": item.manufacturer,
             "model_number": item.model_number,
+            "revision": item.revision,
             "serial_number": item.serial_number,
             "calibration_date": (
                 item.calibration_date.isoformat() if item.calibration_date else None
@@ -92,9 +96,16 @@ def current_review_policy_key(
         evidence_config
         and evidence_config.external_evidence_review_enabled
     ):
-        authoritative_skill_ids.append("image-evidence-review")
+        authoritative_skill_ids.extend(
+            ["image-evidence-review", "html-evidence-review"]
+        )
     if workspace.equipment_review_enabled:
         authoritative_skill_ids.append("equipment-role")
+    release_project_name = (
+        evidence_config.automation_release_project_name
+        if evidence_config
+        else ""
+    )
     policy = {
         "workspace_id": workspace.id,
         "engine_version": REVIEW_ENGINE_VERSION,
@@ -107,6 +118,16 @@ def current_review_policy_key(
         ],
         "allowed_network_root": (
             evidence_config.allowed_network_root if evidence_config else None
+        ),
+        "local_html_fallback_root": (
+            evidence_config.local_html_fallback_root if evidence_config else None
+        ),
+        "automation_release_project_name": (
+            release_project_name or None
+        ),
+        "automation_release_snapshot": automation_release_policy_snapshot(
+            db,
+            release_project_name,
         ),
         "external_evidence_review_enabled": bool(
             evidence_config and evidence_config.external_evidence_review_enabled

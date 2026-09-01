@@ -9,7 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import EquipmentImportHistory, EquipmentRegistry
-from app.services.equipment_registry import import_equipment_workbook
+from app.services.equipment_registry import (
+    import_equipment_workbook,
+    optional_equipment_identity_error,
+)
 
 
 def workbook(rows: list[list[str | int]]) -> bytes:
@@ -134,3 +137,37 @@ def test_import_does_not_clear_columns_missing_from_a_workbook() -> None:
     assert equipment is not None
     assert equipment.description == "Digital Meter"
     assert equipment.manufacturer == "Fluke"
+
+
+def test_blank_equipment_id_requires_a_usable_unique_serial_number() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        db.add(
+            EquipmentRegistry(
+                equipment_id=None,
+                description="System Phantom",
+                serial_number="HJH-20X1806-0003",
+            )
+        )
+        db.commit()
+
+        assert optional_equipment_identity_error(db, "", "N/A") == (
+            "Serial number is required when Equipment ID is blank."
+        )
+        assert optional_equipment_identity_error(
+            db, "", "hjh-20x1806-0003"
+        ) == (
+            "Serial number already exists for equipment without an Equipment ID."
+        )
+        assert optional_equipment_identity_error(
+            db,
+            "",
+            "HJH-20X1806-0003",
+            exclude_pk=1,
+        ) is None
+        assert optional_equipment_identity_error(
+            db, "", "RPM36208-0004"
+        ) is None
+        assert optional_equipment_identity_error(db, "EQ-1", "") is None

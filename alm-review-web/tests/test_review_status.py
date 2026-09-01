@@ -197,9 +197,9 @@ def test_review_update_reasons_describe_detectable_setting_changes() -> None:
         reasons = review_update_reasons(result, "current-policy", 5, "current-model")
 
         assert reasons == (
-            "Prompt version changed from 4 to 5",
-            "AI model changed from earlier-model to current-model",
-            "Review rules, evidence settings, or registry changed",
+            "提示词版本已从 4 更新为 5",
+            "AI 模型已从 earlier-model 更新为 current-model",
+            "评审规则、证据设置或设备台账已更新",
         )
 
 

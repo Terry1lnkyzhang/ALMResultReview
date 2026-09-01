@@ -175,6 +175,146 @@ class ImageReviewOutput(BaseModel):
     assessments: list[ImageAssessment]
 
 
+class HtmlBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+
+
+class HtmlReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    report_id: str = Field(min_length=1)
+    source_path: str = Field(min_length=1)
+    filename: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_truncated: bool
+    blocks: list[HtmlBlock]
+
+
+class AutomationReleaseRecordInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    release_id: int
+    testcase_id: str
+    project_name: str
+    script_name: str
+    file_path: str
+    baseline_name: str
+    release_time: str
+    release_version: str
+    version_number: str
+    release_revision: int | None
+    release_version_format: str
+    document_number: str
+    document_revision: str
+    report_link: str
+
+
+class AutomationReleaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal[
+        "disabled",
+        "matched",
+        "needs_ai",
+        "mismatch",
+        "not_found",
+        "incomplete",
+        "unavailable",
+    ]
+    project_name: str
+    testcase_id: str
+    candidate_count: int = Field(ge=0)
+    claimed_script_name: str
+    claimed_script_testcase_id: str
+    html_script_names: list[str]
+    html_path_testcase_ids: list[str]
+    html_path_testcase_match: Literal["not_checked", "exact", "mismatch"]
+    actual_name_match: Literal[
+        "not_checked", "exact", "mismatch", "missing"
+    ]
+    failure_code: Literal[
+        "",
+        "actual_testcase_id_missing",
+        "actual_testcase_id_mismatch",
+        "html_script_missing",
+        "html_path_testcase_id_mismatch",
+        "actual_name_missing",
+        "actual_name_html_mismatch",
+        "release_not_found",
+        "release_testcase_id_mismatch",
+        "document_mismatch",
+        "document_incomplete",
+    ]
+    claimed_document_number: str
+    claimed_document_revision: str
+    selected_release: AutomationReleaseRecordInput | None
+    script_name_match: Literal[
+        "not_checked", "exact", "compatible", "mismatch", "uncertain", "not_found"
+    ]
+    document_match: Literal[
+        "not_checked", "exact", "mismatch", "uncertain", "not_found"
+    ]
+    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
+
+
+class HtmlEvidenceCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    report_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1)
+    quote: str = Field(min_length=1, max_length=2000)
+    supports: list[Literal["description", "expected", "actual", "result"]] = Field(
+        min_length=1
+    )
+
+
+class HtmlAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_step: int = Field(ge=1)
+    status: Literal["pass", "fail", "manual"]
+    description_coverage: Literal[
+        "supported", "contradicted", "not_found", "uncertain"
+    ]
+    expected_coverage: Literal[
+        "supported", "contradicted", "not_found", "uncertain"
+    ]
+    actual_coverage: Literal[
+        "supported", "contradicted", "not_found", "uncertain"
+    ]
+    result_consistency: Literal["consistent", "inconsistent", "uncertain"]
+    release_consistency: Literal[
+        "matched", "mismatched", "uncertain", "not_checked"
+    ]
+    reviewed_report_ids: list[str] = Field(min_length=1)
+    evidence: list[HtmlEvidenceCitation]
+    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
+
+
+class HtmlReviewStep(ReviewTextStep):
+    automation_release: AutomationReleaseInput
+    reports: list[HtmlReport] = Field(min_length=1)
+    batch_observations: list[HtmlAssessment] = Field(default_factory=list)
+
+
+class HtmlReviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_mode: Literal["evidence_batch", "final"]
+    batch_index: int = Field(ge=1)
+    batch_count: int = Field(ge=1)
+    steps: list[HtmlReviewStep] = Field(min_length=1)
+
+
+class HtmlReviewOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assessments: list[HtmlAssessment]
+
+
 class EquipmentCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -218,6 +358,7 @@ class EquipmentRoleOutput(BaseModel):
 _SKILL_MODELS: dict[str, tuple[type[BaseModel], type[BaseModel]]] = {
     "alm-text-review": (AlmTextReviewInput, AlmTextReviewOutput),
     "image-evidence-review": (ImageReviewInput, ImageReviewOutput),
+    "html-evidence-review": (HtmlReviewInput, HtmlReviewOutput),
     "equipment-role": (EquipmentRoleInput, EquipmentRoleOutput),
 }
 
@@ -466,6 +607,12 @@ class SkillRunner:
         granted_capabilities: set[str] | frozenset[str],
         media_parts: list[dict[str, Any]] | None = None,
         request_post: Callable[..., Any] | None = None,
+        output_validator: Callable[[dict[str, Any], dict[str, Any]], None]
+        | None = None,
+        output_fallback: Callable[
+            [dict[str, Any], dict[str, Any], str], dict[str, Any]
+        ]
+        | None = None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         trace: dict[str, Any] = {
@@ -556,6 +703,7 @@ class SkillRunner:
                     timeout=timeout_seconds,
                 )
                 raw_content = _response_content(response)
+                validated_output: dict[str, Any] | None = None
                 try:
                     validated_output = _validated_output(
                         definition,
@@ -563,11 +711,23 @@ class SkillRunner:
                         validated_input,
                         raw_content,
                     )
+                    if output_validator is not None:
+                        output_validator(validated_input, validated_output)
                 except ValueError as exc:
                     detail = str(exc)
                     repairs.append(detail[:300])
                     if attempt == MAX_OUTPUT_REPAIR_ATTEMPTS:
-                        raise SkillFailure(detail, retryable=False) from exc
+                        if output_fallback is None or validated_output is None:
+                            raise SkillFailure(detail, retryable=False) from exc
+                        validated_output = output_fallback(
+                            validated_input,
+                            validated_output,
+                            detail,
+                        )
+                        if output_validator is not None:
+                            output_validator(validated_input, validated_output)
+                        trace["fallback"] = detail[:300]
+                        break
                     messages = [
                         *messages,
                         {"role": "assistant", "content": raw_content},
@@ -577,6 +737,11 @@ class SkillRunner:
                         },
                     ]
                     continue
+                if validated_output is None:
+                    raise SkillFailure(
+                        "Skill output validation produced no result.",
+                        retryable=False,
+                    )
                 break
             trace.update(
                 status="completed",

@@ -1,8 +1,22 @@
 [skill]
 id = "html-evidence-review"
 name = "HTML Evidence Review"
-version = "0.1.0"
+version = "1.6.0"
 stage = "report_review"
-status = "planned"
-enabled = false
-note = "Rules and contract are not implemented yet. HTML results currently use the deterministic parser."
+enabled = true
+
+[contract]
+version = "1"
+input_collection = "steps"
+output_collection = "assessments"
+identity_field = "review_step"
+
+[capabilities]
+required = ["review.step_text", "evidence.html.metadata", "evidence.html.content", "evidence.automation_release.metadata"]
+optional = []
+forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry", "database.read", "verdict.write"]
+
+[model]
+temperature = 0
+max_tokens = 32768
+max_tokens_per_item = 1024

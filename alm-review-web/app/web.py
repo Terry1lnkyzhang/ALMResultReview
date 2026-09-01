@@ -39,7 +39,10 @@ from app.models import (
     Workspace,
 )
 from app.services.docx_import import MAX_DOCX_BYTES, parse_alm_docx
-from app.services.equipment_registry import import_equipment_workbook
+from app.services.equipment_registry import (
+    import_equipment_workbook,
+    optional_equipment_identity_error,
+)
 from app.services.importer import import_data, import_file, queue_latest_alm_changes
 from app.services.review_operations import (
     REREVIEW_SCOPES,
@@ -169,12 +172,12 @@ templates = Jinja2Templates(directory=PROJECT_DIR / "app" / "templates")
 templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
-    "qualified": "Qualified",
-    "force_qualified": "Force qualified",
-    "unqualified": "Unqualified",
-    "needs_manual_review": "Manual review",
-    "pending_review": "Pending",
-    "review_failed": "Review failed",
+    "qualified": "合格",
+    "force_qualified": "人工判定合格",
+    "unqualified": "不合格",
+    "needs_manual_review": "需人工复核",
+    "pending_review": "待评审",
+    "review_failed": "评审失败",
 }
 
 
@@ -191,6 +194,15 @@ def _person_label(code1_id: str, users: dict[str, AlmUser]) -> str:
         return "Unassigned"
     user = users.get(code1_id)
     return f"{user.full_name} ({code1_id})" if user and user.full_name else code1_id
+
+
+def _to_app_timezone(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    local_tz = ZoneInfo(get_settings().app_timezone)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(local_tz)
 
 
 def _run_view(
@@ -388,11 +400,16 @@ def _optional_date(value: str) -> date | None:
     return date.fromisoformat(value) if value.strip() else None
 
 
+def _equipment_display_identifier(equipment: EquipmentRegistry) -> str:
+    return equipment.equipment_id or equipment.serial_number or equipment.description
+
+
 def _set_equipment_values(equipment: EquipmentRegistry, values: dict[str, str]) -> None:
-    equipment.equipment_id = values["equipment_id"].strip().upper()
+    equipment.equipment_id = values["equipment_id"].strip().upper() or None
     equipment.description = values["description"].strip()
     equipment.manufacturer = values["manufacturer"].strip()
     equipment.model_number = values["model_number"].strip()
+    equipment.revision = values["revision"].strip()
     equipment.accuracy_class = values["accuracy_class"].strip()
     equipment.measurement_range = values["measurement_range"].strip()
     equipment.serial_number = values["serial_number"].strip()
@@ -412,6 +429,7 @@ def _equipment_values(
     description: str,
     manufacturer: str,
     model_number: str,
+    revision: str,
     accuracy_class: str,
     measurement_range: str,
     serial_number: str,
@@ -430,6 +448,7 @@ def _equipment_values(
         "description": description,
         "manufacturer": manufacturer,
         "model_number": model_number,
+        "revision": revision,
         "accuracy_class": accuracy_class,
         "measurement_range": measurement_range,
         "serial_number": serial_number,
@@ -446,10 +465,11 @@ def _equipment_values(
 
 
 def _equipment_form(
-    equipment_id: str = Form(...),
+    equipment_id: str = Form(""),
     description: str = Form(...),
     manufacturer: str = Form(""),
     model_number: str = Form(""),
+    revision: str = Form(""),
     accuracy_class: str = Form(""),
     measurement_range: str = Form(""),
     serial_number: str = Form(""),
@@ -468,6 +488,7 @@ def _equipment_form(
         description,
         manufacturer,
         model_number,
+        revision,
         accuracy_class,
         measurement_range,
         serial_number,
@@ -1036,12 +1057,22 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         .where(ReviewResult.run_id == run_id)
         .order_by(desc(ReviewResult.completed_at))
     ).all()
+    review_completed_at = _to_app_timezone(
+        review.result.completed_at if review.result else None
+    )
+    manual_decision_at = _to_app_timezone(
+        review.manual_decision.created_at if review.manual_decision else None
+    )
+    revision_created_at = {
+        revision.id: _to_app_timezone(revision.created_at)
+        for revision in revisions
+    }
     allowed_decisions = {
         "needs_manual_review": [
-            ("confirmed_qualified", "Confirm qualified"),
-            ("confirmed_unqualified", "Confirm unqualified"),
+            ("confirmed_qualified", "确认合格"),
+            ("confirmed_unqualified", "确认不合格"),
         ],
-        "unqualified": [("override_qualified", "Force qualified")],
+        "unqualified": [("override_qualified", "人工判定合格")],
     }.get(review.result.verdict if review.result else "", [])
     review_criteria = {}
     review_step_results = []
@@ -1101,8 +1132,12 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "review_criteria": review_criteria,
             "review_pipeline": review_pipeline,
             "review_skill_traces": review_skill_traces,
+            "review_step_results": review_step_results,
             "step_review_map": step_review_map,
             "review_warnings": review_warnings,
+            "review_completed_at": review_completed_at,
+            "manual_decision_at": manual_decision_at,
+            "revision_created_at": revision_created_at,
             "status_label": STATUS_LABELS[review.final_status],
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
@@ -1127,7 +1162,7 @@ def decide_run(
         save_manual_decision(db, run, decision, operator, reason)
     except ValueError as exc:
         return _redirect(f"/runs/{run_id}", str(exc), "error")
-    return _redirect(f"/runs/{run_id}", "Manual decision recorded.")
+    return _redirect(f"/runs/{run_id}", "人工裁决已记录。")
 
 
 @router.post("/runs/{run_id}/review-now")
@@ -1143,24 +1178,24 @@ def review_run_now(
     if ai_config is None:
         return _redirect(
             f"/runs/{run_id}",
-            "AI review is not configured.",
+            "尚未配置 AI 评审。",
             "error",
         )
     if run.current_revision_id is None:
-        return _redirect(f"/runs/{run_id}", "The Run has no current revision.", "error")
+        return _redirect(f"/runs/{run_id}", "该运行没有当前版本。", "error")
     manual = manual_decision_locks_run(db, run)
     if manual is not None:
         return _redirect(
             f"/runs/{run_id}",
-            f"{manual.operator} already resolved this revision manually. "
-            "Refresh it from ALM first if the content changed.",
+            f"{manual.operator} 已人工处理此版本。"
+            "如果内容已变化，请先从 ALM 刷新。",
             "error",
         )
     queue_run_review(db, run)
     return _redirect(
         f"/runs/{run_id}",
-        "AI review queued for the laptop worker."
-        + (" Previous review history will be retained." if force_new else ""),
+        "AI 评审已加入 Worker 队列。"
+        + ("此前的评审历史将保留。" if force_new else ""),
     )
 
 
@@ -1512,6 +1547,7 @@ def equipment_registry(
             EquipmentRegistry.calibration_due_date.is_(None),
             EquipmentRegistry.calibration_due_date,
             EquipmentRegistry.equipment_id,
+            EquipmentRegistry.id,
         )
     ).all()
     all_items = db.scalars(select(EquipmentRegistry)).all()
@@ -1598,23 +1634,37 @@ def create_equipment(
     db: Session = Depends(get_db),
 ):
     normalized_id = values["equipment_id"].strip().upper()
-    existing = db.scalar(
-        select(EquipmentRegistry.id).where(
-            func.upper(EquipmentRegistry.equipment_id) == normalized_id
+    existing = (
+        db.scalar(
+            select(EquipmentRegistry.id).where(
+                func.upper(EquipmentRegistry.equipment_id) == normalized_id
+            )
         )
+        if normalized_id
+        else None
     )
-    if not normalized_id or not values["description"].strip():
-        return _redirect("/ops/equipment/new", "Equipment ID and name are required.", "error")
+    if not values["description"].strip():
+        return _redirect("/ops/equipment/new", "Equipment name is required.", "error")
+    identity_error = optional_equipment_identity_error(
+        db,
+        values["equipment_id"],
+        values["serial_number"],
+    )
+    if identity_error:
+        return _redirect("/ops/equipment/new", identity_error, "error")
     if existing is not None:
         return _redirect("/ops/equipment/new", "Equipment ID already exists.", "error")
-    equipment = EquipmentRegistry(equipment_id=normalized_id, description="")
+    equipment = EquipmentRegistry(equipment_id=normalized_id or None, description="")
     try:
         _set_equipment_values(equipment, values)
     except ValueError as exc:
         return _redirect("/ops/equipment/new", f"Invalid date: {exc}", "error")
     db.add(equipment)
     db.commit()
-    return _redirect("/ops/equipment", f"Equipment {equipment.equipment_id} added.")
+    return _redirect(
+        "/ops/equipment",
+        f"Equipment {_equipment_display_identifier(equipment)} added.",
+    )
 
 
 @router.get("/ops/equipment/{equipment_pk}/edit")
@@ -1644,16 +1694,32 @@ def update_equipment(
     if equipment is None:
         raise HTTPException(status_code=404, detail="Equipment not found")
     normalized_id = values["equipment_id"].strip().upper()
-    duplicate = db.scalar(
-        select(EquipmentRegistry.id).where(
-            func.upper(EquipmentRegistry.equipment_id) == normalized_id,
-            EquipmentRegistry.id != equipment_pk,
+    duplicate = (
+        db.scalar(
+            select(EquipmentRegistry.id).where(
+                func.upper(EquipmentRegistry.equipment_id) == normalized_id,
+                EquipmentRegistry.id != equipment_pk,
+            )
         )
+        if normalized_id
+        else None
     )
-    if not normalized_id or not values["description"].strip():
+    if not values["description"].strip():
         return _redirect(
             f"/ops/equipment/{equipment_pk}/edit",
-            "Equipment ID and name are required.",
+            "Equipment name is required.",
+            "error",
+        )
+    identity_error = optional_equipment_identity_error(
+        db,
+        values["equipment_id"],
+        values["serial_number"],
+        exclude_pk=equipment_pk,
+    )
+    if identity_error:
+        return _redirect(
+            f"/ops/equipment/{equipment_pk}/edit",
+            identity_error,
             "error",
         )
     if duplicate is not None:
@@ -1669,7 +1735,10 @@ def update_equipment(
             f"/ops/equipment/{equipment_pk}/edit", f"Invalid date: {exc}", "error"
         )
     db.commit()
-    return _redirect("/ops/equipment", f"Equipment {equipment.equipment_id} updated.")
+    return _redirect(
+        "/ops/equipment",
+        f"Equipment {_equipment_display_identifier(equipment)} updated.",
+    )
 
 
 @router.post("/ops/equipment/{equipment_pk}/delete")
@@ -1677,10 +1746,10 @@ def delete_equipment(equipment_pk: int, db: Session = Depends(get_db)):
     equipment = db.get(EquipmentRegistry, equipment_pk)
     if equipment is None:
         raise HTTPException(status_code=404, detail="Equipment not found")
-    equipment_id = equipment.equipment_id
+    equipment_identifier = _equipment_display_identifier(equipment)
     db.delete(equipment)
     db.commit()
-    return _redirect("/ops/equipment", f"Equipment {equipment_id} deleted.")
+    return _redirect("/ops/equipment", f"Equipment {equipment_identifier} deleted.")
 
 
 @router.get("/ops/configuration")
@@ -1803,6 +1872,7 @@ def save_configuration(
     ai_enabled: bool = Form(False),
     allowed_network_root: str = Form(""),
     local_html_fallback_root: str = Form(""),
+    automation_release_project_name: str = Form(""),
     external_evidence_review_enabled: bool = Form(False),
     equipment_review_enabled: bool = Form(False),
     equipment_area_filter: str = Form(""),
@@ -1910,6 +1980,9 @@ def save_configuration(
     evidence_config.workspace_id = workspace.id
     evidence_config.allowed_network_root = allowed_network_root.strip().rstrip("\\/")
     evidence_config.local_html_fallback_root = local_html_fallback_root.strip().rstrip("\\/")
+    evidence_config.automation_release_project_name = (
+        automation_release_project_name.strip()
+    )
     evidence_config.external_evidence_review_enabled = (
         external_evidence_review_enabled
     )

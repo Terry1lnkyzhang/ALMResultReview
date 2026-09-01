@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import app.web as web
 from app.web import templates
 
 
@@ -43,16 +46,23 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
         template.name,
     )
 
-    assert "('image_review', 'Image review')" in source
-    assert "Evidence routing trace" in source
-    assert "Matched conditions" in source
+    assert "('image_review', '图像评审')" in source
+    assert "证据路由记录" in source
+    assert "匹配条件" in source
     assert "route.get('actions', [])" in source
     assert "stage.get('steps')|length" in source
     assert "Evidence intent Skill" not in source
     assert "skill_shadow" not in source
-    assert "Skill execution trace" in source
+    assert "Skill 执行记录" in source
     assert "review_skill_traces" in source
     assert "trace.get('capabilities', {}).get('granted', [])" in source
+    assert "step_review.get('image_evidence', [])" in source
+    assert "图像证据审计" in source
+    assert "ALM 附件" in source
+    assert "SHA-256" in source
+
+    web_source = Path(web.__file__).read_text(encoding="utf-8")
+    assert '"review_step_results": review_step_results' in web_source
 
 
 def test_run_detail_exposes_guarded_local_delete_action() -> None:
@@ -65,8 +75,25 @@ def test_run_detail_exposes_guarded_local_delete_action() -> None:
     assert 'action="/runs/{{ run.run_id }}/delete"' in source
     assert 'name="confirmation"' in source
     assert "data-confirm-run-id" in source
-    assert "Delete local Run" in source
-    assert "If it still exists in ALM" in source
+    assert "删除本地运行" in source
+    assert "如果 ALM 中仍存在该运行" in source
     assert "data-delete-run-dialog" in source
     assert "dialog.showModal()" in source
     assert "window.prompt" not in source
+
+
+def test_run_detail_uses_chinese_review_labels_without_changing_internal_codes() -> None:
+    template = templates.get_template("run_detail.html")
+    source, _, _ = templates.env.loader.get_source(
+        templates.env,
+        template.name,
+    )
+
+    assert "'qualified': '合格'" in source
+    assert "'needs_manual_review': '需人工复核'" in source
+    assert "'html_report': 'HTML 报告'" in source
+    assert "评审准则" in source
+    assert "执行证据" in source
+    assert "Description（描述）" in source
+    assert "step_review.get('status', 'pass')" in source
+    assert "status-{{ review.final_status }}" in source
