@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import os
 import re
@@ -41,6 +42,40 @@ class ImageEvidenceResult:
     skipped_oversized: int = 0
     skipped_invalid: int = 0
     detail: str = ""
+
+
+def embedded_image(
+    *,
+    name: str,
+    media_type: str,
+    data_url: str,
+    expected_sha256: str = "",
+    max_image_bytes: int = 5 * 1024 * 1024,
+) -> ResolvedImage | None:
+    prefix = f"data:{media_type};base64,"
+    if not data_url.startswith(prefix):
+        return None
+    try:
+        content = base64.b64decode(data_url[len(prefix) :], validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not content or len(content) > max_image_bytes:
+        return None
+    sha256 = hashlib.sha256(content).hexdigest()
+    if expected_sha256 and sha256 != expected_sha256.casefold():
+        return None
+    if not _has_valid_signature(content, media_type):
+        return None
+    width, height = _image_dimensions(content, media_type)
+    return ResolvedImage(
+        relative_name=name,
+        media_type=media_type,
+        size_bytes=len(content),
+        sha256=sha256,
+        data_url=data_url,
+        width=width,
+        height=height,
+    )
 
 
 class NetworkImageResolver:

@@ -138,6 +138,9 @@ class EvidenceConfig(Base):
     workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     allowed_network_root: Mapped[str] = mapped_column(String(1500), default="")
     local_html_fallback_root: Mapped[str] = mapped_column(String(1500), default="")
+    automation_release_project_name: Mapped[str] = mapped_column(
+        String(255), default="", nullable=False
+    )
     external_evidence_review_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
@@ -162,10 +165,13 @@ class EquipmentRegistry(Base):
     __tablename__ = "equipment_registry"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    equipment_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    equipment_id: Mapped[str | None] = mapped_column(
+        String(128), unique=True, nullable=True, index=True
+    )
     description: Mapped[str] = mapped_column(String(512), default="", nullable=False, index=True)
     manufacturer: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     model_number: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    revision: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     accuracy_class: Mapped[str] = mapped_column(Text, default="", nullable=False)
     measurement_range: Mapped[str] = mapped_column(Text, default="", nullable=False)
     serial_number: Mapped[str] = mapped_column(String(255), default="", nullable=False, index=True)

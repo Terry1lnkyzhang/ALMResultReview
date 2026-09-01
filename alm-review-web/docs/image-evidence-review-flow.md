@@ -5,7 +5,7 @@
 
 ## 结论
 
-路径识别、安全验证、目录扫描和图片到 Step 的映射都由应用程序在调用
+路径识别、ALM 附件下载、安全验证、目录扫描和图片到 Step 的映射都由应用程序在调用
 `image-evidence-review` 之前完成。
 
 `image-evidence-review` 只接收应用程序已经批准并关联到具体 `review_step` 的图片，判断这些
@@ -14,11 +14,13 @@
 ```mermaid
 flowchart LR
     A[ALM Step Actual] --> B[提取路径候选]
+    K[ALM Step 图片附件] --> L[认证下载并验证]
     B --> C[alm-text-review 路由]
     C -->|validate_path + load_images| D[验证 UNC 路径]
     D --> E[安全解析文件或目录]
     E --> F[扫描受支持图片]
     F --> G[按 ALM Step 编号筛选]
+    L --> H
     G -->|仅 ready 图片| H[生成 media_id 和 Skill 输入]
     H --> I[image-evidence-review]
     I --> J[应用程序校验输出并聚合 Verdict]
@@ -97,7 +99,13 @@ Skill 的能力声明在
 - 每次目录扫描最多检查 500 个条目。
 - 跳过符号链接和 reparse point。
 - 校验文件扩展名对应的二进制签名。
-- 图片内容只保存在内存中；结果记录相对文件名、类型、大小、尺寸和 SHA-256。
+- 网络路径图片内容只保存在内存中；结果记录相对文件名、类型、大小、尺寸和 SHA-256。
+
+ALM run-step 图片附件通过 `run-steps/{step_id}/attachments` 获取元数据，并通过
+`attachments/{attachment_id}` 下载。只有 Workspace 开启外部证据评审时才下载；支持格式与
+网络图片一致。附件直接归属于对应 Step，不执行 UNC 根目录校验，也不需要根据文件名推断 Step。
+附件内容随不可变 revision 快照保存用于后续 Worker 评审，但 source/review hash 只使用附件
+元数据和 SHA-256，不对 base64 编码本身计算语义差异。
 
 ### 5. 将文件夹图片映射到 Step
 

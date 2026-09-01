@@ -16,6 +16,7 @@ from app.services.equipment_review import (
     OpenQuestion,
     apply_equipment_disambiguation,
     apply_extracted_equipment,
+    equipment_reference,
     merge_pending_names,
     registry_equipment_names,
 )
@@ -109,9 +110,12 @@ def apply_first_pass_equipment_decisions(
     questions: list[OpenQuestion],
     equipment_registry: list[EquipmentRegistry],
 ) -> list[OpenQuestion]:
-    registry_ids = {item.equipment_id for item in equipment_registry}
+    registry_ids = {equipment_reference(item) for item in equipment_registry}
     steps = {
         int(step["review_step"]): step for step in content.get("steps", [])
+    }
+    checks_by_step = {
+        int(check["review_step"]): check for check in checks
     }
     remaining: list[OpenQuestion] = []
     resolved: dict[int, dict[str, Any]] = {}
@@ -157,13 +161,16 @@ def apply_first_pass_equipment_decisions(
                     )
                 )
             )
+            if not selected_ids and question.previously_matched_equipment_ids:
+                remaining.append(question)
+                continue
             if question.device_names and not actual_ids:
                 # Only the registry vocabulary can still name this device.
                 remaining.append(question)
                 continue
             resolved[review_step] = {
                 "role": "controlled_equipment",
-                "required": True,
+                "required": bool(checks_by_step[review_step]["required"]),
                 "selected_equipment_ids": selected_ids,
                 "reason": " ".join(
                     decision["reason"] for _, decision in controlled

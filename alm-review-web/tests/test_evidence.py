@@ -1,8 +1,12 @@
 from app.services.evidence import (
     DeferredExternalEvidenceResolver,
+    analyze_html_filename_anomalies,
     analyze_html_path_sequences,
     extract_dates,
     extract_paths,
+    html_filename_testcase_ids,
+    html_path_testcase_ids,
+    is_html_report_path,
     step_evidence_profile,
     validate_network_evidence_path,
 )
@@ -166,7 +170,7 @@ def test_direct_image_path_routes_to_visual_review_without_screenshot_wording() 
         "actions": ["validate_path", "load_images", "send_to_visual_ai"],
         "decision_source": "deterministic",
         "confidence": 1.0,
-        "reason": "A direct image path was detected.",
+        "reason": "检测到直接图像路径。",
         "manual_required": False,
     }
 
@@ -250,3 +254,62 @@ def test_automation_html_suffix_gap_is_reported() -> None:
 
     assert analyze_html_path_sequences(paths)[0]["missing_numbers"] == [3]
     assert analyze_html_path_sequences(paths)[0]["status"] == "fail"
+
+
+def test_html_failure_filename_markers_are_reported() -> None:
+    parent = r"\\server\approved\automation"
+    paths = [
+        {"raw": parent + r"\report_checkContent.html", "kind": "html"},
+        {"raw": parent + r"\report-checkStep.html", "kind": "html"},
+        {"raw": parent + r"\report_fail.html", "kind": "html"},
+    ]
+
+    anomalies = analyze_html_filename_anomalies(paths)
+
+    assert [item["marker"] for item in anomalies] == [
+        "checkcontent",
+        "checkstep",
+        "fail",
+    ]
+    assert {item["code"] for item in anomalies} == {"forbidden_filename_marker"}
+
+
+def test_content_after_html_extension_is_an_html_report_anomaly() -> None:
+    path = {
+        "raw": r"\\server\approved\automation\report.html.checkcontent",
+        "kind": "file",
+    }
+
+    assert is_html_report_path(path) is True
+    assert analyze_html_filename_anomalies([path]) == [
+        {
+            "path": path["raw"],
+            "code": "forbidden_filename_marker",
+            "marker": "checkcontent",
+        }
+    ]
+
+
+def test_html_filename_testcase_ids_use_only_the_filename() -> None:
+    cases = {
+        "CT-NMP.SRS.UserIF.144_103253.html": ["103253"],
+        "CT-NMP.SRS.UserIF.144_103253_2.html": ["103253"],
+        "CT-NMP.SRS.UserIF.144_103253_10.html": ["103253"],
+        "report_37640_11.htm": ["37640"],
+        "report_103253-left-right.html": ["103253"],
+        "report_12345_x_103253.html": ["12345", "103253"],
+        "report_1234567.html": [],
+    }
+
+    for filename, expected in cases.items():
+        path = rf"\\server\Cycle103254\5.0\{filename}"
+        assert html_filename_testcase_ids(path) == expected
+
+
+def test_html_path_testcase_ids_use_only_pure_numeric_directories() -> None:
+    path = (
+        r"\\130.147.129.203\Cycle103254\5.0\48142\0. Common Config"
+        r"\CT-NMP.SRS.Fun.147_48142.html"
+    )
+
+    assert html_path_testcase_ids(path) == ["48142"]

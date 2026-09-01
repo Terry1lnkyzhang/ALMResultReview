@@ -17,13 +17,13 @@
       "applicability": "applicable",
       "findings": [],
       "reference_decisions": [
-        {"candidate_id": "eq-01", "role": "test_equipment", "requires_check": true, "reason": "The device is used to produce the recorded measurement."},
-        {"candidate_id": "img-01", "role": "result_evidence", "requires_check": true, "reason": "Actual cites the image as supporting result evidence."}
+        {"candidate_id": "eq-01", "role": "test_equipment", "requires_check": true, "reason": "该设备用于产生已记录的测量结果。"},
+        {"candidate_id": "img-01", "role": "result_evidence", "requires_check": true, "reason": "Actual 引用了该图像作为结果证据。"}
       ],
       "extracted_equipment": [
         {"device_name": "Fluke 87V", "equipment_id": "", "serial_number": "", "reported_calibration_due_date": "", "source_text": "Measure voltage using Fluke 87V."}
       ],
-      "summary": "Actual records a value within the Expected range and identifies supporting evidence."
+      "summary": "Actual 记录的数值在 Expected 范围内，并提供了支持性证据。"
     }
   },
   {
@@ -43,11 +43,11 @@
       "review_step": 2,
       "applicability": "applicable",
       "findings": [
-        {"code": "actual_insufficient", "severity": "fail", "reason": "Actual omits the voltage required by numbered Expected item 2."}
+        {"code": "actual_insufficient", "severity": "fail", "reason": "Actual 缺少 Expected 编号项 2 所要求的电压结果。"}
       ],
       "reference_decisions": [],
       "extracted_equipment": [],
-      "summary": "Actual only records one of the two required results."
+      "summary": "Actual 仅记录了两个必需结果中的一个。"
     }
   },
   {
@@ -66,7 +66,7 @@
       "findings": [],
       "reference_decisions": [],
       "extracted_equipment": [],
-      "summary": "Description limits the Step to Taichi and Actual records that this execution was Earth."
+      "summary": "Description 将该步骤限定为 Taichi，而 Actual 记录本次执行为 Earth，因此该步骤不适用。"
     }
   },
   {
@@ -86,10 +86,10 @@
       "applicability": "applicable",
       "findings": [],
       "reference_decisions": [
-        {"candidate_id": "file-01", "role": "result_evidence", "requires_check": true, "reason": "Actual answers the recording requirement by citing this captured evidence file."}
+        {"candidate_id": "file-01", "role": "result_evidence", "requires_check": true, "reason": "Actual 通过引用该证据文件满足了记录要求。"}
       ],
       "extracted_equipment": [],
-      "summary": "Actual confirms the required parameters and cites an evidence file for the recorded values."
+      "summary": "Actual 确认了所需参数，并引用证据文件记录相关数值。"
     }
   },
   {
@@ -111,7 +111,7 @@
       "findings": [],
       "reference_decisions": [],
       "extracted_equipment": [],
-      "summary": "Expected prescribes the Pending->Active->Failed transition as the normal outcome and Actual reports exactly that, so the Step passes."
+      "summary": "Expected 将 Pending->Active->Failed 规定为正常结果，Actual 与其完全一致，因此该步骤通过。"
     }
   },
   {
@@ -132,7 +132,30 @@
       "extracted_equipment": [
         {"device_name": "Stop watch", "equipment_id": "", "serial_number": "C1221B993G", "reported_calibration_due_date": "2027-07-05", "source_text": "Stop watch S/N: C1221B993G, Calibration Due date: 2027/07/05."}
       ],
-      "summary": "Actual records the stopwatch, its serial number and the calibration due date required by Expected."
+      "summary": "Actual 记录了 Expected 要求的秒表、序列号和校准到期日。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 7,
+      "description": "Run the protocol and review the reconstructed images.",
+      "expected": "The scan completes successfully and image quality is acceptable.",
+      "actual": "The scan completed. Screenshot referred to \\\\server\\results\\Cycle01\\Bay10_105613.",
+      "actual_format": {"layout_text": "The scan completed.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": [
+        {"candidate_id": "folder-01", "type": "folder_or_unknown", "value": "\\\\server\\results\\Cycle01\\Bay10_105613", "source_field": "actual", "detection_source": "path_without_extension"}
+      ]
+    },
+    "output": {
+      "review_step": 7,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [
+        {"candidate_id": "folder-01", "role": "result_evidence_location", "requires_check": true, "reason": "Actual 将该文件夹引用为截图结果证据的存放位置。"}
+      ],
+      "extracted_equipment": [],
+      "summary": "Actual 记录了扫描完成，并引用了包含支持性图像证据的文件夹。"
     }
   }
 ]

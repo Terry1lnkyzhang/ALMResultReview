@@ -52,6 +52,24 @@ _INVALID_SERIALS = {"", "na", "n/a", "none", "unknown", "待填"}
 _NO_CALIBRATION_INTERVALS = {"no calibration required", "no need calibration"}
 
 
+def equipment_reference(item: EquipmentRegistry) -> str:
+    """Stable selection token; it is not a synthesized business Equipment ID."""
+    if item.equipment_id:
+        return item.equipment_id
+    serial_number = item.serial_number.strip()
+    if serial_number.casefold() not in _INVALID_SERIALS:
+        return f"SN:{serial_number}"
+    return f"registry:{item.id}"
+
+
+def _equipment_label(item: EquipmentRegistry) -> str:
+    if item.equipment_id:
+        return item.equipment_id
+    if item.serial_number.strip().casefold() not in _INVALID_SERIALS:
+        return f"S/N {item.serial_number.strip()}"
+    return f"registry record {item.id}"
+
+
 @dataclass(frozen=True)
 class Candidate:
     equipment_id: str
@@ -62,7 +80,7 @@ class Candidate:
     @classmethod
     def of(cls, item: EquipmentRegistry) -> Candidate:
         return cls(
-            equipment_id=item.equipment_id,
+            equipment_id=equipment_reference(item),
             description=item.description,
             model_number=item.model_number,
             serial_number=item.serial_number,
@@ -106,7 +124,7 @@ def _calibration_not_required(equipment: EquipmentRegistry) -> bool:
     return equipment.calibration_interval.strip().casefold() in _NO_CALIBRATION_INTERVALS
 
 
-def _contains_identifier(text: str, identifier: str) -> bool:
+def _contains_identifier(text: str, identifier: str | None) -> bool:
     if not identifier:
         return False
     return re.search(
@@ -167,22 +185,23 @@ def _serial_aliases(serial_number: str) -> set[str]:
 
 def _matches_equipment_identity(value: str, equipment: EquipmentRegistry) -> bool:
     identity = _normalized(value).casefold()
-    return identity == equipment.equipment_id.casefold() or any(
-        identity == alias.casefold() for alias in _serial_aliases(equipment.serial_number)
+    return (
+        bool(equipment.equipment_id)
+        and identity == equipment.equipment_id.casefold()
+    ) or any(
+        identity == alias.casefold()
+        for alias in _serial_aliases(equipment.serial_number)
     )
 
 
 def _unrecognized_equipment_summary(
     identifiers: Iterable[str], part_numbers: Iterable[str]
 ) -> str:
-    details = "identifier(s): " + ", ".join(dict.fromkeys(identifiers))
+    details = "标识符：" + ", ".join(dict.fromkeys(identifiers))
     unique_part_numbers = list(dict.fromkeys(part_numbers))
     if unique_part_numbers:
-        details += "; reported part number(s): " + ", ".join(unique_part_numbers)
-    return (
-        "Verified the matched equipment, but additional equipment data could not "
-        f"be confirmed against the registry ({details})."
-    )
+        details += "；记录的料号：" + ", ".join(unique_part_numbers)
+    return f"已核验匹配设备，但其他设备数据无法通过台账确认（{details}）。"
 
 
 def _labelled_values(pattern: re.Pattern[str], actual: str) -> list[str]:
@@ -233,10 +252,12 @@ def _reported_asset_ranges(actual: str) -> dict[str, tuple[date, date]]:
 
 def _equipment_snapshot(equipment: EquipmentRegistry) -> dict[str, Any]:
     return {
+        "registry_reference": equipment_reference(equipment),
         "equipment_id": equipment.equipment_id,
         "description": equipment.description,
         "manufacturer": equipment.manufacturer,
         "model_number": equipment.model_number,
+        "revision": equipment.revision,
         "serial_number": equipment.serial_number,
         "calibration_date": (
             equipment.calibration_date.isoformat() if equipment.calibration_date else None
@@ -325,7 +346,11 @@ def analyze_equipment_steps(
     equipment: Iterable[EquipmentRegistry],
 ) -> tuple[list[dict[str, Any]], list[OpenQuestion]]:
     registry = list(equipment)
-    by_id = {item.equipment_id.casefold(): item for item in registry}
+    by_id = {
+        item.equipment_id.casefold(): item
+        for item in registry
+        if item.equipment_id
+    }
     serial_map: dict[str, list[EquipmentRegistry]] = {}
     for item in registry:
         for alias in _serial_aliases(item.serial_number):
@@ -421,7 +446,7 @@ def analyze_equipment_steps(
             "review_step": review_step,
             "status": "not_applicable",
             "code": "not_applicable",
-            "summary": "No controlled equipment requires registry checks.",
+            "summary": "没有需要台账校验的受控设备。",
             "required": strong_requirement,
             "execution_date": execution_date.isoformat() if execution_date else None,
             "reported_identifiers": reported_identifiers,
@@ -431,13 +456,13 @@ def analyze_equipment_steps(
             "reported_part_numbers": reported_part_numbers,
             "unknown_identifiers": unknown_asset_ids,
             "actual_candidate_equipment_ids": [
-                item.equipment_id for item in actual_candidates
+                equipment_reference(item) for item in actual_candidates
             ],
             "requirement_candidate_equipment_ids": [
-                item.equipment_id for item in requirement_candidates
+                equipment_reference(item) for item in requirement_candidates
             ],
             "previously_matched_equipment_ids": [
-                item.equipment_id for item in prior_matches.values()
+                equipment_reference(item) for item in prior_matches.values()
             ],
             "reported_calibration_range": (
                 [reported_range[0].isoformat(), reported_range[1].isoformat()]
@@ -469,14 +494,19 @@ def analyze_equipment_steps(
                 reported_due_date,
             )
             if identifier_conflict:
-                explicit_ids = [matched[item_id].equipment_id for item_id in explicit_id_matches]
-                serial_ids = [matched[item_id].equipment_id for item_id in serial_only_matches]
+                explicit_ids = [
+                    _equipment_label(matched[item_id])
+                    for item_id in explicit_id_matches
+                ]
+                serial_ids = [
+                    _equipment_label(matched[item_id])
+                    for item_id in serial_only_matches
+                ]
                 check["status"] = "fail"
                 check["code"] = "equipment_identifier_conflict"
                 check["summary"] = (
-                    f"Equipment ID {', '.join(explicit_ids)} and the recorded serial "
-                    f"number point to different registry devices "
-                    f"{', '.join(serial_ids)}."
+                    f"Equipment ID {', '.join(explicit_ids)} 与记录的序列号指向"
+                    f"不同的台账设备 {', '.join(serial_ids)}。"
                 )
             elif unknown_asset_ids or unrecognized_reported_identifiers:
                 check["status"] = "manual"
@@ -495,8 +525,7 @@ def analyze_equipment_steps(
             check.update(
                 status="manual",
                 code="equipment_role_ambiguous",
-                summary="It is unclear whether the Step records controlled equipment "
-                "or a DUT/other identifier.",
+                summary="无法确定该步骤记录的是受控设备还是 DUT/其他对象标识符。",
             )
             ambiguous.append(
                 OpenQuestion(
@@ -509,7 +538,7 @@ def analyze_equipment_steps(
                         reported_identifiers + unknown_asset_ids
                     ),
                     previously_matched_equipment_ids=tuple(
-                        item.equipment_id for item in prior_matches.values()
+                        equipment_reference(item) for item in prior_matches.values()
                     ),
                     candidates=tuple(Candidate.of(item) for item in candidates),
                 )
@@ -546,9 +575,14 @@ def _evaluate_matches(
     }
     available_ranges = reported_asset_ranges or {}
     for item in matched:
+        item_label = _equipment_label(item)
         snapshot = _equipment_snapshot(item)
         snapshot["matched_by"] = sorted(matched_by[item.id])
-        item_range = available_ranges.get(item.equipment_id)
+        item_range = (
+            available_ranges.get(item.equipment_id)
+            if item.equipment_id
+            else None
+        )
         if item_range is None and len(matched) == 1:
             item_range = reported_range
         snapshot["reported_calibration_range"] = (
@@ -572,25 +606,19 @@ def _evaluate_matches(
             and reported_part_numbers.isdisjoint(known_identity_values)
         ):
             identity_manuals.append(
-                f"The recorded part number(s) "
-                f"{', '.join(sorted(reported_part_numbers))} do not match the "
-                f"registry identity for {item.equipment_id}"
+                f"记录的料号 {', '.join(sorted(reported_part_numbers))} 与"
+                f"台账设备 {item_label} 的身份信息不匹配"
             )
         if execution_date is None:
-            manuals.append(
-                f"{item.equipment_id} has no parsable Step execution date"
-            )
+            manuals.append(f"{item_label} 缺少可解析的步骤执行日期")
         elif _calibration_not_required(item):
             pass
         elif item.calibration_date is None or item.calibration_due_date is None:
-            manuals.append(
-                f"{item.equipment_id} has no calibration period in the registry"
-            )
+            manuals.append(f"台账中没有 {item_label} 的校准有效期")
         elif not item.calibration_date <= execution_date <= item.calibration_due_date:
             failures.append(
-                f"{item.equipment_id} execution date {execution_date.isoformat()} is "
-                f"outside the calibration period "
-                f"{item.calibration_date.isoformat()} to "
+                f"{item_label} 的执行日期 {execution_date.isoformat()} 超出校准有效期 "
+                f"{item.calibration_date.isoformat()} 至 "
                 f"{item.calibration_due_date.isoformat()}"
             )
         status_is_not_in_use = (
@@ -603,14 +631,19 @@ def _evaluate_matches(
                 {
                     "type": "equipment_status",
                     "summary": (
-                        f"{item.equipment_id} is currently {item.equipment_status}; "
-                        "this status does not describe the execution day."
+                        f"{item_label} 当前状态为 {item.equipment_status}；"
+                        "该当前状态不代表执行当天的状态。"
                     ),
                 }
             )
 
     for item in matched:
-        item_range = available_ranges.get(item.equipment_id)
+        item_label = _equipment_label(item)
+        item_range = (
+            available_ranges.get(item.equipment_id)
+            if item.equipment_id
+            else None
+        )
         if item_range is None and len(matched) == 1:
             item_range = reported_range
         if item_range is None:
@@ -622,25 +655,23 @@ def _evaluate_matches(
                 and reported_due_date != item.calibration_due_date
             ):
                 failures.append(
-                    f"{item.equipment_id} calibration due date recorded in Actual "
-                    f"{reported_due_date.isoformat()} does not match the registry "
-                    f"{item.calibration_due_date.isoformat()}"
+                    f"Actual 中记录的 {item_label} 校准到期日 "
+                    f"{reported_due_date.isoformat()} 与台账中的 "
+                    f"{item.calibration_due_date.isoformat()} 不一致"
                 )
             continue
         if item.calibration_date and item.calibration_due_date:
             expected_range = (item.calibration_date, item.calibration_due_date)
             if item_range != expected_range:
                 failures.append(
-                    f"{item.equipment_id} calibration period recorded in Actual "
-                    f"{item_range[0].isoformat()} to {item_range[1].isoformat()} "
-                    f"does not match the registry "
-                    f"{item.calibration_date.isoformat()} to "
-                    f"{item.calibration_due_date.isoformat()}"
+                    f"Actual 中记录的 {item_label} 校准有效期 "
+                    f"{item_range[0].isoformat()} 至 {item_range[1].isoformat()} "
+                    f"与台账中的 {item.calibration_date.isoformat()} 至 "
+                    f"{item.calibration_due_date.isoformat()} 不一致"
                 )
         if execution_date and not item_range[0] <= execution_date <= item_range[1]:
             failures.append(
-                f"{item.equipment_id} Step execution date is outside the calibration "
-                "period recorded in Actual"
+                f"{item_label} 的步骤执行日期超出 Actual 中记录的校准有效期"
             )
 
     if reported_due_date is not None and len(matched) > 1:
@@ -653,9 +684,8 @@ def _evaluate_matches(
         }
         if known_due_dates and reported_due_date not in known_due_dates:
             failures.append(
-                f"The calibration due date recorded in Actual "
-                f"{reported_due_date.isoformat()} matches none of the devices "
-                "recorded in this Step: "
+                f"Actual 中记录的校准到期日 {reported_due_date.isoformat()} 与"
+                "该步骤中所有设备的到期日均不匹配："
                 + ", ".join(
                     sorted(value.isoformat() for value in known_due_dates)
                 )
@@ -679,8 +709,7 @@ def _evaluate_matches(
             status="pass",
             code="equipment_valid",
             summary=(
-                f"Verified {len(matched)} device(s); identifiers and execution dates "
-                "match the registry."
+                f"已核验 {len(matched)} 台设备；标识符和执行日期均与台账一致。"
             ),
         )
     return check
@@ -693,7 +722,11 @@ def _extraction_indexes(
     dict[str, list[EquipmentRegistry]],
     dict[str, list[EquipmentRegistry]],
 ]:
-    by_id = {item.equipment_id.casefold(): item for item in registry}
+    by_id = {
+        item.equipment_id.casefold(): item
+        for item in registry
+        if item.equipment_id
+    }
     serial_index: dict[str, list[EquipmentRegistry]] = {}
     name_index: dict[str, list[EquipmentRegistry]] = {}
     for item in registry:
@@ -716,14 +749,13 @@ def _rows_for_name(
         return rows, False
     if len({_verdict_signature(item) for item in rows}) > 1:
         return [], True
-    representative = min(rows, key=lambda item: item.equipment_id)
+    representative = min(rows, key=equipment_reference)
     check["warnings"].append(
         {
             "type": "equipment_name_shared",
             "summary": (
-                f"The device name {name} matches several registry rows with "
-                f"identical calibration data; {representative.equipment_id} "
-                "represents them."
+                f"设备名称 {name} 匹配多条校准数据相同的台账记录；"
+                f"以 {_equipment_label(representative)} 作为代表记录。"
             ),
         }
     )
@@ -745,6 +777,9 @@ def apply_extracted_equipment(
     if not registry:
         return set(), {}
     by_id, serial_index, name_index = _extraction_indexes(registry)
+    by_reference = {
+        equipment_reference(item).casefold(): item for item in registry
+    }
     steps = {int(step["review_step"]): step for step in content.get("steps", [])}
     resolved: set[int] = set()
     pending: dict[int, list[str]] = {}
@@ -765,7 +800,8 @@ def apply_extracted_equipment(
         matched: dict[int, EquipmentRegistry] = {}
         matched_by: dict[int, set[str]] = {}
         for snapshot in check.get("matches", []):
-            item = by_id.get(_normalized(snapshot.get("equipment_id")).casefold())
+            reference = snapshot.get("registry_reference") or snapshot.get("equipment_id")
+            item = by_reference.get(_normalized(reference).casefold())
             if item is None:
                 continue
             matched[item.id] = item
@@ -775,9 +811,13 @@ def apply_extracted_equipment(
         unresolved: list[str] = []
         ambiguous_names: list[str] = []
         unmapped_names: list[str] = []
+        previous_references = set(
+            check.get("previously_matched_equipment_ids", [])
+        )
         due_dates: list[date] = []
         has_grounded_extraction = False
         haystack_key = _name_key(haystack)
+        actual_key = _name_key(raw_actual)
         for entry in entries:
             identifier = _normalized(entry.get("equipment_id"))
             serial = _normalized(entry.get("serial_number"))
@@ -835,6 +875,17 @@ def apply_extracted_equipment(
                     # language, which only the second pass can map.
                     unmapped_names.append(name)
                     continue
+                name_in_actual = bool(name) and _name_key(name) in actual_key
+                if (
+                    previous_references
+                    and not name_in_actual
+                    and not any(
+                        equipment_reference(item) in previous_references
+                        for item in rows
+                    )
+                ):
+                    unmapped_names.append(name)
+                    continue
                 method = "extracted_device_name"
             for item in rows:
                 matched[item.id] = item
@@ -855,8 +906,8 @@ def apply_extracted_equipment(
             check.update(
                 status="manual",
                 code="equipment_extraction_unverified",
-                summary="First-pass extraction reported equipment data that is not "
-                "present in the Step text: " + "; ".join(dict.fromkeys(unverified)),
+                summary="第一轮抽取返回了步骤文本中不存在的设备数据："
+                + "；".join(dict.fromkeys(unverified)),
             )
             resolved.add(review_step)
             continue
@@ -898,9 +949,8 @@ def apply_extracted_equipment(
             check.update(
                 status="fail",
                 code="equipment_ambiguous_name",
-                summary="The device name identifies several registry devices with "
-                "different calibration data, and Actual records no serial number or "
-                "equipment ID: " + ", ".join(dict.fromkeys(ambiguous_names)),
+                summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
+                "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
             )
             resolved.add(review_step)
             continue
@@ -915,8 +965,7 @@ def apply_extracted_equipment(
             check.update(
                 status="manual",
                 code="equipment_identifier_unrecognized",
-                summary="First-pass extraction read these identifiers from the Step, "
-                "and the registry lists none of them: "
+                summary="第一轮抽取从该步骤读取了以下标识符，但台账中均不存在："
                 + ", ".join(dict.fromkeys(unresolved)),
             )
             resolved.add(review_step)
@@ -965,7 +1014,7 @@ def apply_equipment_disambiguation(
     decisions: dict[int, dict[str, Any]],
     equipment: Iterable[EquipmentRegistry],
 ) -> list[dict[str, Any]]:
-    by_id = {item.equipment_id: item for item in equipment}
+    by_id = {equipment_reference(item): item for item in equipment}
     _, _, name_index = _extraction_indexes(list(by_id.values()))
     step_by_number = {int(step["review_step"]): step for step in content.get("steps", [])}
     for check in checks:
@@ -979,17 +1028,15 @@ def apply_equipment_disambiguation(
                     status="manual",
                     code="equipment_role_ambiguous",
                     summary=(
-                        "AI classified the current reference as DUT or other, but "
-                        "the Step follows previously verified equipment and may "
-                        "continue to operate it. Manual confirmation is required."
+                        "AI 将当前引用判定为 DUT 或其他对象，但该步骤承接了此前已核验的"
+                        "设备，可能仍在使用该设备，需要人工确认。"
                     ),
                 )
             else:
                 check.update(
                     status="not_applicable",
                     code="not_applicable",
-                    summary="AI disambiguation decided the identifier belongs to a "
-                    "DUT or a non-controlled object.",
+                    summary="AI 判定该标识符属于 DUT 或非受控对象。",
                 )
             continue
         selected_names = decision.get("selected_equipment_names", [])
@@ -1002,13 +1049,13 @@ def apply_equipment_disambiguation(
             check.update(
                 status="manual",
                 code="equipment_role_ambiguous",
-                summary="AI could not confirm the equipment role." + (
-                    f" {decision['reason']}" if decision["reason"] else ""
+                summary="AI 无法确认设备角色。" + (
+                    f"{decision['reason']}" if decision["reason"] else ""
                 ),
             )
             continue
         selected_name_equipment_ids = {
-            item.equipment_id
+            equipment_reference(item)
             for name in selected_names
             for item in name_index.get(_name_key(_normalized(name)), [])
         }
@@ -1060,31 +1107,27 @@ def apply_equipment_disambiguation(
             check.update(
                 status="fail",
                 code="equipment_ambiguous_name",
-                summary="The device name identifies several registry devices with "
-                "different calibration data, and Actual records no serial number or "
-                "equipment ID: " + ", ".join(dict.fromkeys(ambiguous_names)),
+                summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
+                "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
             )
         elif check["reported_identifiers"] or check["unknown_identifiers"]:
             identifiers = check["reported_identifiers"] + check["unknown_identifiers"]
             check.update(
                 status="fail",
                 code="equipment_not_found",
-                summary="AI confirmed controlled equipment, but the identifiers "
-                "cannot be matched in the registry: "
+                summary="AI 已确认这是受控设备，但以下标识符无法在台账中匹配："
                 + ", ".join(dict.fromkeys(identifiers)),
             )
         elif decision["required"]:
             check.update(
                 status="fail",
                 code="equipment_missing",
-                summary="AI confirmed the Step requires controlled equipment, but "
-                "Actual records no equipment identifier.",
+                summary="AI 已确认该步骤需要受控设备，但 Actual 未记录设备标识符。",
             )
         else:
             check.update(
                 status="manual",
                 code="equipment_unidentified",
-                summary="Controlled equipment semantics were detected, but there is "
-                "no identifier sufficient for a registry check.",
+                summary="检测到受控设备语义，但没有足够的标识符用于台账校验。",
             )
     return checks

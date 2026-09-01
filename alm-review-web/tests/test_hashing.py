@@ -53,6 +53,32 @@ def test_location_is_included_in_review_payload_and_hash_when_present() -> None:
     assert review_hash(original) != review_hash(modified)
 
 
+def test_attachment_hash_uses_metadata_and_digest_not_embedded_data() -> None:
+    original = sample_record()
+    original["run"]["steps"][0]["attachment"] = "Y"
+    original["run"]["steps"][0]["attachmentContents"] = [
+        {
+            "attachment_id": "36083",
+            "name": "37411-Step1.JPG",
+            "mime_type": "image/jpeg",
+            "size_bytes": 12,
+            "sha256": "a" * 64,
+            "data_url": "data:image/jpeg;base64,first",
+        }
+    ]
+    same_image = deepcopy(original)
+    same_image["run"]["steps"][0]["attachmentContents"][0]["data_url"] = (
+        "data:image/jpeg;base64,second"
+    )
+    changed_image = deepcopy(original)
+    changed_image["run"]["steps"][0]["attachmentContents"][0]["sha256"] = "b" * 64
+
+    assert source_hash(original) == source_hash(same_image)
+    assert review_hash(original) == review_hash(same_image)
+    assert source_hash(original) != source_hash(changed_image)
+    assert review_hash(original) != review_hash(changed_image)
+
+
 def test_phase_one_evidence_is_payload_metadata_not_hash_content() -> None:
     record = sample_record()
     record["run"]["steps"][0]["actual"] = r"Saved C:\Evidence\step.png on 2026-07-30"

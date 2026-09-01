@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.models import (
     AlmRun,
+    EvidenceConfig,
     ReviewJob,
     ReviewResult,
     RunRevision,
@@ -304,6 +305,12 @@ def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch
                 raw_json="{}",
             )
         )
+        db.add(
+            EvidenceConfig(
+                workspace_id=workspace.id,
+                external_evidence_review_enabled=True,
+            )
+        )
         db.commit()
 
         refresh = queue_sync_job(db, "web", workspace.id, run_id=1)
@@ -314,11 +321,18 @@ def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch
 
         collected: dict[str, object] = {}
 
-        def stub_collect_run(_config, test_instance_id, folder_id, folder_path):
+        def stub_collect_run(
+            _config,
+            test_instance_id,
+            folder_id,
+            folder_path,
+            include_image_attachments=False,
+        ):
             collected.update(
                 test_instance_id=test_instance_id,
                 folder_id=folder_id,
                 folder_path=folder_path,
+                include_image_attachments=include_image_attachments,
             )
             return {
                 "users": [],
@@ -350,6 +364,7 @@ def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch
             "test_instance_id": 91,
             "folder_id": "42",
             "folder_path": "Project A",
+            "include_image_attachments": True,
         }
         run = db.get(AlmRun, 1)
         assert run.current_revision_id is not None
@@ -623,6 +638,7 @@ def test_sync_progress_refreshes_worker_heartbeat(monkeypatch) -> None:
             progress_callback,
             completed_folder_ids=(),
             is_unchanged_run=None,
+                include_image_attachments=False,
         ):
             progress_callback(
                 FolderCollectionProgress(

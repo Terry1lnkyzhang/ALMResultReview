@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import re
 from pathlib import Path
 
@@ -5,7 +7,11 @@ import app.services.image_evidence as image_evidence
 from app.models import EvidenceConfig
 from app.services.evidence import step_evidence_profile
 from app.services.image_evidence import NetworkImageResolver
-from app.services.reviews import _IMAGE_EVIDENCE_ISSUES, _prepare_image_evidence
+from app.services.reviews import (
+    _IMAGE_EVIDENCE_ISSUES,
+    _image_review_batches,
+    _prepare_image_evidence,
+)
 
 # Every status the resolver or the review pipeline can attach to image evidence.
 IMAGE_EVIDENCE_STATUSES = frozenset(
@@ -218,6 +224,51 @@ def test_direct_image_path_is_loaded_without_screenshot_wording(
     ]
     assert prepared.results[1][str(image_path)].status == "ready"
     assert prepared.results[1][str(image_path)].images[0].relative_name == "Step1.png"
+
+
+def test_alm_attachment_image_is_prepared_for_visual_review() -> None:
+    encoded = base64.b64encode(JPEG_BYTES).decode("ascii")
+    content = {
+        "steps": [
+            {
+                "review_step": 1,
+                "order": "1",
+                "attachment_declared": True,
+                "attachment_contents": [
+                    {
+                        "attachment_id": "36083",
+                        "name": "37411-Step1.JPG",
+                        "mime_type": "image/jpeg",
+                        "size_bytes": len(JPEG_BYTES),
+                        "sha256": hashlib.sha256(JPEG_BYTES).hexdigest(),
+                        "data_url": f"data:image/jpeg;base64,{encoded}",
+                    }
+                ],
+                "evidence_profile": {
+                    "attachment_declared": True,
+                    "screenshot_review_required": True,
+                    "actual_paths": [],
+                    "routing": {
+                        "actions": [
+                            "load_images",
+                            "review_attachment",
+                            "send_to_visual_ai",
+                        ]
+                    },
+                },
+            }
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(external_evidence_review_enabled=True),
+    )
+
+    attachment_result = prepared.results[1]["ALM attachment:36083"]
+    assert attachment_result.status == "ready"
+    assert attachment_result.images[0].relative_name == "37411-Step1.JPG"
+    assert _image_review_batches(prepared)[0][0][1] == "ALM attachment:36083"
 
 
 def test_alm_step_order_takes_priority_over_internal_review_step(

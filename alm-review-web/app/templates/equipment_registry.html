@@ -48,12 +48,12 @@
       <tbody>
       {% for item in equipment %}
         <tr>
-          <td><strong>{{ item.equipment_id }}</strong><span>{{ item.description }}</span>{% if item.manufacturer %}<small>{{ item.manufacturer }}</small>{% endif %}</td>
-          <td><span>{{ item.model_number or 'No model' }}</span><small>SN: {{ item.serial_number or 'Not recorded' }}</small></td>
+          <td><strong>{{ item.equipment_id or 'No equipment ID' }}</strong><span>{{ item.description }}</span>{% if item.manufacturer %}<small>{{ item.manufacturer }}</small>{% endif %}</td>
+          <td><span>{{ item.model_number or 'No model' }}{% if item.revision %} · Rev {{ item.revision }}{% endif %}</span><small>SN: {{ item.serial_number or 'Not recorded' }}</small></td>
           <td><span>{{ item.calibration_date.isoformat() if item.calibration_date else 'No calibration date' }}</span>{% if item.calibration_due_date %}<small class="{% if item.calibration_due_date < today %}date-expired{% elif item.calibration_due_date <= due_soon %}date-due-soon{% endif %}">Due {{ item.calibration_due_date.isoformat() }}</small>{% else %}<small>Due date missing</small>{% endif %}</td>
           <td><span>{{ item.subordinate_area or 'No area' }}</span><small>{{ item.equipment_user or 'No user' }}</small></td>
           <td><span class="equipment-status">{{ item.equipment_status or 'Not set' }}</span></td>
-          <td class="row-actions"><a href="/ops/equipment/{{ item.id }}/edit">Edit</a><form method="post" action="/ops/equipment/{{ item.id }}/delete" onsubmit="return confirm('Delete {{ item.equipment_id }}?')"><button type="submit">Delete</button></form></td>
+          <td class="row-actions"><a href="/ops/equipment/{{ item.id }}/edit">Edit</a><form method="post" action="/ops/equipment/{{ item.id }}/delete" onsubmit="return confirm('Delete {{ item.equipment_id or item.serial_number or item.description }}?')"><button type="submit">Delete</button></form></td>
         </tr>
       {% else %}
         <tr><td class="empty-table" colspan="6">No equipment matches the current filters.</td></tr>

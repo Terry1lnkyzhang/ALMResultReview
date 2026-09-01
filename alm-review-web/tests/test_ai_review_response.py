@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models import AiConfig, EvidenceConfig
-from app.services.html_evidence import HtmlEvidenceResult
+from app.services.html_evidence import HtmlEvidenceBlock, HtmlEvidenceResult
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
 from app.services.reviews import (
     PreparedImageEvidence,
@@ -93,8 +93,10 @@ def evidence_content(
     screenshot_required: bool = False,
     attachment_declared: bool = False,
     dates: list[dict] | None = None,
+    test_id: str = "",
 ) -> dict:
     return {
+        "test_id": test_id,
         "steps": [
             {
                 "order": "1",
@@ -228,7 +230,9 @@ def test_reference_decisions_route_specialists_but_attachment_is_forced() -> Non
     assert profile["screenshot_review_required"] is True
 
 
-def test_first_pass_rejects_missing_reference_decision(monkeypatch) -> None:
+def test_first_pass_falls_back_to_uncertain_for_repeatedly_missing_reference(
+    monkeypatch,
+) -> None:
     content = {
         "review_plan": {"text_steps": [1]},
         "steps": [
@@ -251,9 +255,11 @@ def test_first_pass_rejects_missing_reference_decision(monkeypatch) -> None:
             }
         ],
     }
-    monkeypatch.setattr(
-        "app.services.reviews.httpx.post",
-        lambda *args, **kwargs: IntentStubResponse(
+    requests: list[dict] = []
+
+    def post(*args, **kwargs) -> IntentStubResponse:
+        requests.append(kwargs["json"])
+        return IntentStubResponse(
             json.dumps(
                 {
                     "assessments": [
@@ -267,10 +273,171 @@ def test_first_pass_rejects_missing_reference_decision(monkeypatch) -> None:
                     ]
                 }
             )
-        ),
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", post)
+
+    _, traces = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
     )
 
-    with pytest.raises(ValueError, match="exactly cover supplied references"):
+    assert len(requests) == 2
+    assert traces[0]["ai_calls"] == 2
+    assert "Step 1 omitted reference decision(s): step-1-ref-1" in traces[0][
+        "fallback"
+    ]
+    assert content["steps"][0]["reference_decisions"] == [
+        {
+            "candidate_id": "step-1-ref-1",
+            "role": "uncertain",
+            "requires_check": True,
+            "reason": "模型修复后仍遗漏了该引用，需要人工复核。",
+        }
+    ]
+    content["steps"][0]["evidence_profile"] = {
+        "actual_paths": [
+            {
+                "raw": r"\\server\case\result.png",
+                "kind": "image",
+                "route_requested": False,
+            }
+        ],
+        "routing": {"triggers": []},
+    }
+    _apply_reference_routing(content)
+    assert content["steps"][0]["evidence_profile"]["routing"][
+        "manual_required"
+    ]
+
+
+def test_first_pass_repairs_missing_reference_decision(monkeypatch) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Review the result image.",
+                "expected": "The result is visible.",
+                "actual": r"See \\server\case\result.png.",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "type": "image",
+                        "value": r"\\server\case\result.png",
+                        "source_field": "actual",
+                        "detection_source": "path_extension",
+                    }
+                ],
+            }
+        ],
+    }
+    replies = iter(
+        [
+            [],
+            [
+                {
+                    "candidate_id": "step-1-ref-1",
+                    "role": "result_evidence",
+                    "requires_check": True,
+                    "reason": "Actual cites this image as result evidence.",
+                }
+            ],
+        ]
+    )
+    requests: list[dict] = []
+
+    def post(*args, **kwargs) -> IntentStubResponse:
+        requests.append(kwargs["json"])
+        return IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [],
+                            "reference_decisions": next(replies),
+                            "summary": "Actual supports Expected.",
+                        }
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", post)
+
+    _, traces = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    assert len(requests) == 2
+    assert traces[0]["ai_calls"] == 2
+    assert "fallback" not in traces[0]
+    assert "Step 1 omitted reference decision(s): step-1-ref-1" in requests[1][
+        "messages"
+    ][-1]["content"]
+    assert content["steps"][0]["reference_decisions"][0]["role"] == (
+        "result_evidence"
+    )
+
+
+def test_first_pass_does_not_fall_back_for_incompatible_reference_role(
+    monkeypatch,
+) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Review the result image.",
+                "expected": "The result is visible.",
+                "actual": r"See \\server\case\result.png.",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "type": "image",
+                        "value": r"\\server\case\result.png",
+                        "source_field": "actual",
+                        "detection_source": "path_extension",
+                    }
+                ],
+            }
+        ],
+    }
+
+    def post(*args, **kwargs) -> IntentStubResponse:
+        return IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [],
+                            "reference_decisions": [
+                                {
+                                    "candidate_id": "step-1-ref-1",
+                                    "role": "test_equipment",
+                                    "requires_check": True,
+                                    "reason": "Incorrect role.",
+                                }
+                            ],
+                            "summary": "Actual supports Expected.",
+                        }
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", post)
+
+    with pytest.raises(ValueError, match="cannot use role test_equipment"):
         _run_text_semantic_skills(
             AiConfig(base_url="https://ai.example/v1", model_name="test"),
             content,
@@ -922,7 +1089,7 @@ def test_missing_network_evidence_is_unqualified() -> None:
 
     assert guarded["step_results"][0]["status"] == "fail"
     assert guarded["verdict"] == "unqualified"
-    assert "does not exist" in guarded["step_results"][0]["summary"]
+    assert "证据路径不存在" in guarded["step_results"][0]["summary"]
 
 
 def test_reparse_point_evidence_requires_manual_review() -> None:
@@ -942,7 +1109,7 @@ def test_reparse_point_evidence_requires_manual_review() -> None:
 
     assert guarded["step_results"][0]["status"] == "manual"
     assert guarded["verdict"] == "needs_manual_review"
-    assert "reparse point" in guarded["step_results"][0]["summary"]
+    assert "重解析点" in guarded["step_results"][0]["summary"]
 
 
 def test_not_applicable_step_skips_network_image_guards() -> None:
@@ -1008,6 +1175,55 @@ def test_required_screenshot_without_reference_is_unqualified() -> None:
     assert guarded["verdict"] == "unqualified"
 
 
+def test_ready_alm_attachment_does_not_require_manual_review() -> None:
+    source = "ALM attachment:36083"
+    image = ResolvedImage(
+        relative_name="37411-Step1.JPG",
+        media_type="image/jpeg",
+        size_bytes=229391,
+        sha256="a" * 64,
+        data_url="data:image/jpeg;base64,AA==",
+        width=1920,
+        height=1080,
+    )
+    parsed = text_review_result()
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={
+            1: {
+                source: ImageEvidenceResult(status="ready", images=(image,))
+            }
+        },
+    )
+
+    guarded = _apply_capability_guards(
+        parsed,
+        evidence_content(screenshot_required=True, attachment_declared=True),
+        EvidenceConfig(external_evidence_review_enabled=True),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "qualified"
+    assert guarded["step_results"][0]["issues"] == []
+    assert guarded["step_results"][0]["image_evidence"] == [
+        {
+            "source_path": source,
+            "source_kind": "alm_attachment",
+            "status": "ready",
+            "images": [
+                {
+                    "name": "37411-Step1.JPG",
+                    "media_type": "image/jpeg",
+                    "size_bytes": 229391,
+                    "width": 1920,
+                    "height": 1080,
+                    "sha256": "a" * 64,
+                }
+            ],
+        }
+    ]
+
+
 def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None:
     parent = r"\\server\approved\automation"
     first_report = parent + r"\report_34834.html"
@@ -1025,8 +1241,26 @@ def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None
         results={},
         html_results={
             1: {
-                first_report: HtmlEvidenceResult(status="pass", result_count=2),
-                second_report: HtmlEvidenceResult(status="pass", result_count=3),
+                first_report: HtmlEvidenceResult(
+                    status="ready",
+                    size_bytes=100,
+                    sha256="a" * 64,
+                    blocks=(HtmlEvidenceBlock("block-1", "Passed"),),
+                ),
+                second_report: HtmlEvidenceResult(
+                    status="ready",
+                    size_bytes=120,
+                    sha256="b" * 64,
+                    blocks=(HtmlEvidenceBlock("block-1", "Passed"),),
+                ),
+            }
+        },
+        html_assessments={
+            1: {
+                "status": "pass",
+                "reviewed_report_ids": ["report-1", "report-2"],
+                "evidence": [],
+                "reason": "Both reports support the Step.",
             }
         },
     )
@@ -1041,7 +1275,7 @@ def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None
     assert guarded["verdict"] == "qualified"
     assert guarded["criteria"]["html_report_sequence"]["status"] == "pass"
     assert guarded["criteria"]["automation_results"]["status"] == "pass"
-    assert guarded["step_results"][0]["html_evidence"][1]["result_count"] == 3
+    assert guarded["step_results"][0]["html_evidence"][1]["block_count"] == 1
 
 
 def test_missing_html_report_suffix_is_unqualified() -> None:
@@ -1061,6 +1295,163 @@ def test_missing_html_report_suffix_is_unqualified() -> None:
     assert "_2.html" in guarded["step_results"][0]["summary"]
 
 
+def test_html_failure_filename_marker_is_unqualified() -> None:
+    report = r"\\server\approved\automation\report_checkContent.html"
+    parsed = text_review_result()
+    content = evidence_content(paths=[{"raw": report, "kind": "html"}])
+
+    guarded = _apply_capability_guards(parsed, content)
+
+    assert guarded["verdict"] == "unqualified"
+    assert guarded["criteria"]["html_report_sequence"]["status"] == "fail"
+    assert "checkcontent" in guarded["step_results"][0]["summary"]
+
+
+def test_html_filename_testcase_id_matches_alm_test_id() -> None:
+    report = (
+        r"\\server\Cycle103254\SystemVerificationAutomaionResult\103253"
+        r"\CT-NMP.SRS.UserIF.144_103253_10.html"
+    )
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(
+            paths=[{"raw": report, "kind": "html"}],
+            test_id="103253",
+        ),
+    )
+
+    assert not any(
+        issue["type"] == "html_testcase_id"
+        for issue in guarded["step_results"][0]["issues"]
+    )
+    assert guarded["step_results"][0]["html_testcase_ids"] == [
+        {
+            "source_path": report,
+            "alm_testcase_id": "103253",
+            "filename_testcase_ids": ["103253"],
+            "status": "pass",
+        }
+    ]
+
+
+def test_any_filename_testcase_id_candidate_can_match_alm() -> None:
+    report = r"\\server\approved\automation\report_12345_103253-left.html"
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(
+            paths=[{"raw": report, "kind": "html"}],
+            test_id="103253",
+        ),
+    )
+
+    assert not any(
+        issue["type"] == "html_testcase_id"
+        for issue in guarded["step_results"][0]["issues"]
+    )
+    assert guarded["step_results"][0]["html_testcase_ids"][0] == {
+        "source_path": report,
+        "alm_testcase_id": "103253",
+        "filename_testcase_ids": ["12345", "103253"],
+        "status": "pass",
+    }
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_summary"),
+    [
+        (
+            "CT-NMP.SRS.UserIF.144_103254.html",
+            "HTML 报告文件名中的 Testcase ID 103254 与 ALM Test ID 103253 不一致。",
+        ),
+        (
+            "CT-NMP.SRS.UserIF.144.html",
+            "HTML 报告文件名中未找到 5 位或 6 位 Testcase ID。",
+        ),
+    ],
+)
+def test_html_filename_testcase_id_must_match_alm_test_id(
+    filename: str,
+    expected_summary: str,
+) -> None:
+    report = rf"\\server\approved\automation\{filename}"
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(
+            paths=[{"raw": report, "kind": "html"}],
+            test_id="103253",
+        ),
+    )
+
+    assert guarded["verdict"] == "unqualified"
+    assert guarded["criteria"]["automation_results"]["status"] == "fail"
+    issue = next(
+        item
+        for item in guarded["step_results"][0]["issues"]
+        if item["type"] == "html_testcase_id"
+    )
+    assert issue["summary"] == expected_summary
+
+
+def test_any_mismatching_html_filename_testcase_id_fails_the_step() -> None:
+    matching = r"\\server\approved\automation\report_103253.html"
+    mismatching = r"\\server\approved\automation\report_103254_2.html"
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(
+            paths=[
+                {"raw": matching, "kind": "html"},
+                {"raw": mismatching, "kind": "html"},
+            ],
+            test_id="103253",
+        ),
+    )
+
+    assert guarded["verdict"] == "unqualified"
+    assert [
+        item["status"]
+        for item in guarded["step_results"][0]["html_testcase_ids"]
+    ] == ["pass", "fail"]
+
+
+def test_html_path_testcase_id_directory_must_match_alm_test_id() -> None:
+    report = (
+        r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Earth"
+        r"\System Verification Cycle01\SystemVerificationAutomaionResult"
+        r"\103254\0. Common Config\report_103253.html"
+    )
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(
+            paths=[{"raw": report, "kind": "html"}],
+            test_id="103253",
+        ),
+    )
+
+    assert guarded["verdict"] == "unqualified"
+    assert guarded["step_results"][0]["html_testcase_ids"][0]["status"] == (
+        "pass"
+    )
+    assert guarded["step_results"][0]["html_path_testcase_ids"][0] == {
+        "source_path": report,
+        "alm_testcase_id": "103253",
+        "path_testcase_ids": ["103254"],
+        "status": "fail",
+    }
+    assert any(
+        issue["summary"]
+        == (
+            "HTML 报告路径中的 Testcase ID 目录 103254 "
+            "与 ALM Test ID 103253 不一致。"
+        )
+        for issue in guarded["step_results"][0]["issues"]
+    )
+
+
 def test_any_non_passed_html_result_is_unqualified() -> None:
     report = r"\\server\approved\automation\report_34834.html"
     parsed = text_review_result()
@@ -1071,10 +1462,19 @@ def test_any_non_passed_html_result_is_unqualified() -> None:
         html_results={
             1: {
                 report: HtmlEvidenceResult(
-                    status="fail",
-                    result_count=2,
-                    non_passed_values=("Failed",),
+                    status="ready",
+                    size_bytes=100,
+                    sha256="a" * 64,
+                    blocks=(HtmlEvidenceBlock("block-1", "Failed"),),
                 )
+            }
+        },
+        html_assessments={
+            1: {
+                "status": "fail",
+                "reviewed_report_ids": ["report-1"],
+                "evidence": [],
+                "reason": "A required report result is Failed.",
             }
         },
     )
@@ -1091,6 +1491,40 @@ def test_any_non_passed_html_result_is_unqualified() -> None:
     assert "Failed" in guarded["step_results"][0]["summary"]
 
 
+def test_automation_release_mismatch_is_unqualified() -> None:
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(),
+        automation_release_assessments={
+            1: {
+                "status": "mismatch",
+                "reason": "Actual names Testcase ID 103075, but ALM Test ID is 103074.",
+            }
+        },
+    )
+
+    assert guarded["verdict"] == "unqualified"
+    release = guarded["step_results"][0]["automation_release"]
+    assert release["status"] == "mismatch"
+    assert guarded["criteria"]["automation_results"]["status"] == "fail"
+
+
+def test_automation_release_database_outage_requires_manual_review() -> None:
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(),
+        automation_release_assessments={
+            1: {
+                "status": "unavailable",
+                "reason": "The automation release database could not be queried.",
+            }
+        },
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["criteria"]["automation_results"]["status"] == "manual"
+
+
 def test_date_mismatch_does_not_affect_verdict_until_date_rules_are_enabled() -> None:
     parsed = text_review_result()
     content = evidence_content(
@@ -1102,6 +1536,36 @@ def test_date_mismatch_does_not_affect_verdict_until_date_rules_are_enabled() ->
     assert guarded["criteria"]["automation_timing"]["status"] == "not_applicable"
     assert guarded["criteria"]["path_validation"]["status"] == "not_applicable"
     assert guarded["verdict"] == "qualified"
+
+
+def test_phantom_reference_requires_manual_review_without_equipment_review() -> None:
+    content = evidence_content()
+    content["steps"][0]["evidence_profile"]["reference_lookup_required"] = True
+
+    guarded = _apply_capability_guards(
+        text_review_result(), content, equipment_enabled=False
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["step_results"][0]["issues"] == [
+        {
+            "status": "manual",
+            "type": "reference_data",
+            "summary": "未配置参考数据，因此设备或模体信息需要人工确认。",
+        }
+    ]
+
+
+def test_equipment_review_replaces_legacy_phantom_reference_guard() -> None:
+    content = evidence_content()
+    content["steps"][0]["evidence_profile"]["reference_lookup_required"] = True
+
+    guarded = _apply_capability_guards(
+        text_review_result(), content, equipment_enabled=True
+    )
+
+    assert guarded["verdict"] == "qualified"
+    assert guarded["step_results"][0]["issues"] == []
 
 
 def test_equipment_failure_makes_run_unqualified() -> None:

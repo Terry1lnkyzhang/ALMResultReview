@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import logging
 import mimetypes
 import xml.etree.ElementTree as ElementTree
@@ -14,11 +15,13 @@ import httpx
 
 from app.config import get_settings
 from app.models import SyncConfig
-from app.services.evidence import CAPABILITIES
 
-IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGES_PER_STEP = 4
+MAX_IMAGE_BYTES_PER_STEP = 10 * 1024 * 1024
+MAX_IMAGES_PER_RUN = 12
+MAX_IMAGE_BYTES_PER_RUN = 15 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -137,43 +140,56 @@ class AlmClient:
             raise ValueError(f"ALM {resource} entity {entity_id} was not found.")
         return entities[0]
 
-    def image_attachments(self, resource: str) -> list[dict[str, str]]:
-        response = self.client.get(
-            self._project_url(resource),
-            headers={"Accept": "application/xml"},
-        )
-        response.raise_for_status()
-        root = ElementTree.fromstring(response.content)
-        attachments: list[dict[str, str]] = []
-        for element in root.iter():
-            if element.tag.rsplit("}", 1)[-1].casefold() != "attachment":
-                continue
-            name = element.attrib.get("Name") or element.attrib.get("name") or "attachment"
-            attachment_id = element.attrib.get("Id") or element.attrib.get("id")
+    def image_attachments(
+        self,
+        run_step_id: int | str,
+        *,
+        max_images: int = MAX_IMAGES_PER_STEP,
+        max_total_bytes: int = MAX_IMAGE_BYTES_PER_STEP,
+    ) -> list[dict[str, Any]]:
+        entities = self.entities(f"run-steps/{run_step_id}/attachments")
+        attachments: list[dict[str, Any]] = []
+        total_bytes = 0
+        for entity in entities:
+            name = str(entity.get("name") or "attachment")
+            attachment_id = str(entity.get("id") or "").strip()
             mime_type = (
-                element.attrib.get("Mime-Type")
-                or element.attrib.get("mime-type")
-                or mimetypes.guess_type(name)[0]
-                or "application/octet-stream"
+                mimetypes.guess_type(name)[0] or "application/octet-stream"
             ).casefold()
-            if not attachment_id or mime_type not in IMAGE_MIME_TYPES:
+            try:
+                declared_size = int(entity.get("file-size") or 0)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if (
+                not attachment_id
+                or mime_type not in IMAGE_MIME_TYPES
+                or declared_size > MAX_IMAGE_BYTES
+                or (declared_size and total_bytes + declared_size > max_total_bytes)
+            ):
                 continue
             download = self.client.get(
-                self._project_url(f"{resource}/{attachment_id}"),
+                self._project_url(f"attachments/{attachment_id}"),
                 headers={"Accept": "application/octet-stream"},
             )
             download.raise_for_status()
-            if len(download.content) > MAX_IMAGE_BYTES:
+            if (
+                len(download.content) > MAX_IMAGE_BYTES
+                or total_bytes + len(download.content) > max_total_bytes
+            ):
                 continue
             encoded = base64.b64encode(download.content).decode("ascii")
             attachments.append(
                 {
+                    "attachment_id": attachment_id,
                     "name": name,
                     "mime_type": mime_type,
+                    "size_bytes": len(download.content),
+                    "sha256": hashlib.sha256(download.content).hexdigest(),
                     "data_url": f"data:{mime_type};base64,{encoded}",
                 }
             )
-            if len(attachments) >= MAX_IMAGES_PER_STEP:
+            total_bytes += len(download.content)
+            if len(attachments) >= max_images:
                 break
         return attachments
 
@@ -265,17 +281,25 @@ def _run_record(
     run: dict[str, Any],
     location_field: str | None,
     test_cache: dict[str, dict[str, Any]],
+    include_image_attachments: bool = False,
 ) -> dict[str, Any]:
     """Assemble the importable record for one run; the shape feeds the source hash."""
     location = _run_location(run, location_field)
     if location:
         run["location"] = location
     run["steps"] = alm.entities(f"runs/{run['id']}/run-steps")
+    remaining_images = MAX_IMAGES_PER_RUN
+    remaining_bytes = MAX_IMAGE_BYTES_PER_RUN
     for step in run["steps"]:
-        if step.get("attachment") and CAPABILITIES.image_review:
-            step["attachmentContents"] = alm.image_attachments(
-                f"runs/{run['id']}/run-steps/{step['id']}/attachments"
+        if step.get("attachment") and include_image_attachments and remaining_images:
+            attachments = alm.image_attachments(
+                step["id"],
+                max_images=min(MAX_IMAGES_PER_STEP, remaining_images),
+                max_total_bytes=min(MAX_IMAGE_BYTES_PER_STEP, remaining_bytes),
             )
+            step["attachmentContents"] = attachments
+            remaining_images -= len(attachments)
+            remaining_bytes -= sum(item["size_bytes"] for item in attachments)
     test_id = str(run.get("test-id") or instance.get("test-id") or "")
     if test_id and test_id not in test_cache:
         test_cache[test_id] = alm.entity("tests", test_id)
@@ -319,6 +343,7 @@ def collect_run(
     test_instance_id: int,
     folder_id: str,
     folder_path: str,
+    include_image_attachments: bool = False,
 ) -> dict[str, Any]:
     """Fetch one Run so a single record can be refreshed without walking folders."""
     with AlmClient(config) as alm:
@@ -338,6 +363,7 @@ def collect_run(
             run,
             location_field,
             {},
+            include_image_attachments,
         )
         try:
             directory = alm.users()
@@ -352,6 +378,7 @@ def iter_folder_batches(
     progress_callback: ProgressCallback | None = None,
     completed_folder_ids: Collection[str] = (),
     is_unchanged_run: UnchangedRunCheck | None = None,
+    include_image_attachments: bool = False,
 ) -> Iterator[FolderBatch]:
     """Walk the Test Lab scope and yield one importable batch per folder."""
     already_done = {str(folder_id) for folder_id in completed_folder_ids}
@@ -450,6 +477,7 @@ def iter_folder_batches(
                             run,
                             location_field,
                             test_cache,
+                            include_image_attachments,
                         )
                     )
                     runs_collected += 1

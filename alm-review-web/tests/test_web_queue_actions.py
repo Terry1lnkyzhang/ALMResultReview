@@ -757,6 +757,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
                 ai_enabled=True,
                 allowed_network_root="",
                 local_html_fallback_root="",
+                automation_release_project_name="Earth_Kylin",
                 external_evidence_review_enabled=False,
                 equipment_review_enabled=False,
                 equipment_area_filter="",
@@ -777,6 +778,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
             select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
         )
         assert evidence_config is not None
+        assert evidence_config.automation_release_project_name == "Earth_Kylin"
         assert save(0).status_code == 303
         assert ai_config.review_concurrency == 1
         assert ai_config.api_key == "saved-key"

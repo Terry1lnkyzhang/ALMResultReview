@@ -9,10 +9,11 @@
   <section>
     <div class="section-intro"><span>01</span><div><h2>Identity</h2><p>Equipment ID is the unique import and update key.</p></div></div>
     <div class="field-grid">
-      <label><span>Equipment ID</span><input name="equipment_id" value="{{ equipment.equipment_id if equipment else '' }}" required></label>
+      <label><span>Equipment ID (optional)</span><input name="equipment_id" value="{{ equipment.equipment_id or '' if equipment else '' }}"></label>
       <label><span>Equipment name</span><input name="description" value="{{ equipment.description if equipment else '' }}" required></label>
       <label><span>Manufacturer</span><input name="manufacturer" value="{{ equipment.manufacturer if equipment else '' }}"></label>
       <label><span>Model number</span><input name="model_number" value="{{ equipment.model_number if equipment else '' }}"></label>
+      <label><span>Revision</span><input name="revision" value="{{ equipment.revision if equipment else '' }}"></label>
       <label class="wide"><span>Serial number</span><input name="serial_number" value="{{ equipment.serial_number if equipment else '' }}"></label>
     </div>
   </section>

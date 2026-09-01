@@ -80,15 +80,17 @@ def test_evidence_capability_flags_are_added_to_existing_schema() -> None:
     columns = {column["name"] for column in inspect(engine).get_columns("evidence_configs")}
     assert {
         "external_evidence_review_enabled",
+        "automation_release_project_name",
     } <= columns
     with engine.connect() as connection:
         row = connection.execute(
             text(
-                "SELECT external_evidence_review_enabled "
+                "SELECT external_evidence_review_enabled, "
+                "automation_release_project_name "
                 "FROM evidence_configs WHERE id = 1"
             )
         ).one()
-    assert tuple(row) == (0,)
+    assert tuple(row) == (0, "")
 
 
 def test_legacy_evidence_flags_enable_combined_external_review() -> None:
@@ -139,6 +141,42 @@ def test_equipment_serial_number_index_is_added_to_existing_schema() -> None:
 
     indexes = {index["name"] for index in inspect(engine).get_indexes("equipment_registry")}
     assert "ix_equipment_registry_serial_number" in indexes
+
+
+def test_equipment_id_becomes_optional_and_revision_is_added() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE equipment_registry ("
+                "id INTEGER PRIMARY KEY, "
+                "equipment_id VARCHAR(128) NOT NULL UNIQUE, "
+                "serial_number VARCHAR(255) NOT NULL DEFAULT ''"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO equipment_registry (id, equipment_id, serial_number) "
+                "VALUES (1, 'EQ-1', 'SN-1')"
+            )
+        )
+
+    ensure_compatible_schema(engine)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("equipment_registry")
+    }
+    assert columns["equipment_id"]["nullable"]
+    assert "revision" in columns
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO equipment_registry (id, equipment_id, serial_number, revision) "
+                "VALUES (2, NULL, 'SN-2', 'A'), (3, NULL, 'SN-3', 'B')"
+            )
+        )
 
 
 def test_worker_claim_columns_are_added_to_existing_review_jobs() -> None:

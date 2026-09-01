@@ -23,6 +23,7 @@ _MAX_WORKBOOK_BYTES = 10 * 1024 * 1024
 _MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 _MAX_ROWS = 10_000
 _BUILTIN_DATE_FORMATS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47}
+_MISSING_SERIAL_NUMBERS = {"", "na", "n/a", "none", "unknown", "待填"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,29 @@ class EquipmentImportResult:
     inserted: int
     updated: int
     unchanged: int
+
+
+def optional_equipment_identity_error(
+    db: Session,
+    equipment_id: str,
+    serial_number: str,
+    *,
+    exclude_pk: int | None = None,
+) -> str | None:
+    if equipment_id.strip():
+        return None
+    normalized_serial = serial_number.strip()
+    if normalized_serial.casefold() in _MISSING_SERIAL_NUMBERS:
+        return "Serial number is required when Equipment ID is blank."
+    statement = select(EquipmentRegistry.id).where(
+        EquipmentRegistry.equipment_id.is_(None),
+        func.lower(EquipmentRegistry.serial_number) == normalized_serial.casefold(),
+    )
+    if exclude_pk is not None:
+        statement = statement.where(EquipmentRegistry.id != exclude_pk)
+    if db.scalar(statement) is not None:
+        return "Serial number already exists for equipment without an Equipment ID."
+    return None
 
 
 def _xml(root_bytes: bytes) -> ElementTree.Element:

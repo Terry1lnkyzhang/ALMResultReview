@@ -27,6 +27,10 @@ _DATE_PATTERN = re.compile(
 )
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _HTML_SUFFIXES = {".html", ".htm"}
+_HTML_FAILURE_MARKER_RE = re.compile(
+    r"(?:^|[_. -])(?P<marker>checkcontent|checkstep|fail)(?=$|[_. -])",
+    re.IGNORECASE,
+)
 _PHANTOM_TERMS = ("phantom", "模体")
 _PHANTOM_PART_NUMBER_PATTERN = re.compile(
     r"\bphantom\b.{0,80}\bpart\s*(?:number|no\.?)\s*(?:is|:)?\s*"
@@ -63,7 +67,7 @@ class DeferredExternalEvidenceResolver:
         return {
             "path": path,
             "status": "deferred",
-            "reason": "External file, folder, HTML and image review runs in a later stage.",
+            "reason": "外部文件、文件夹、HTML 和图像将在后续阶段评审。",
         }
 
 
@@ -99,6 +103,68 @@ def _path_kind(value: str) -> str:
     if value.endswith(("\\", "/")) or not suffix:
         return "folder_or_unknown"
     return "file"
+
+
+def is_html_report_path(path: dict[str, str]) -> bool:
+    if path.get("kind") == "html":
+        return True
+    filename = PureWindowsPath(path.get("raw", "")).name.casefold()
+    return ".html" in filename or ".htm" in filename
+
+
+def html_filename_testcase_ids(value: str) -> list[str]:
+    stem = PureWindowsPath(value).stem
+    return list(
+        dict.fromkeys(
+            match.group("testcase_id")
+            for match in re.finditer(
+                r"(?<!\d)(?P<testcase_id>\d{5,6})(?!\d)",
+                stem,
+            )
+        )
+    )
+
+
+def html_path_testcase_ids(value: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            part
+            for part in PureWindowsPath(value).parts[:-1]
+            if re.fullmatch(r"\d{5,6}", part)
+        )
+    )
+
+
+def analyze_html_filename_anomalies(
+    paths: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    anomalies: list[dict[str, str]] = []
+    for path in paths:
+        if not is_html_report_path(path):
+            continue
+        raw = path["raw"]
+        filename = PureWindowsPath(raw).name
+        folded = filename.casefold()
+        extension_match = re.search(r"\.html?", folded)
+        stem = re.sub(r"\.html?$", "", filename, flags=re.IGNORECASE)
+        marker_match = _HTML_FAILURE_MARKER_RE.search(stem)
+        if marker_match is not None:
+            anomalies.append(
+                {
+                    "path": raw,
+                    "code": "forbidden_filename_marker",
+                    "marker": marker_match.group("marker").casefold(),
+                }
+            )
+        elif extension_match is not None and extension_match.end() != len(filename):
+            anomalies.append(
+                {
+                    "path": raw,
+                    "code": "unexpected_html_suffix",
+                    "marker": filename[extension_match.end() :],
+                }
+            )
+    return anomalies
 
 
 def extract_paths(value: str) -> list[dict[str, str]]:
@@ -248,17 +314,17 @@ def step_evidence_profile(
         actions.extend(("validate_path", "parse_html_report"))
     if len(set(intents)) > 1:
         intent = "mixed_evidence"
-        reason = "The Step carries both image evidence and HTML report signals."
+        reason = "该步骤同时包含图像证据和 HTML 报告信号。"
     elif intents:
         intent = intents[0]
         reason = (
-            "A direct image path was detected."
+            "检测到直接图像路径。"
             if intent == "image_evidence"
-            else "A direct HTML report path was detected."
+            else "检测到直接 HTML 报告路径。"
         )
     else:
         intent = "none"
-        reason = "No external evidence signal requiring a read was detected."
+        reason = "未检测到需要读取的外部证据信号。"
 
     reference_lookup_required = any(term in combined for term in _PHANTOM_TERMS)
     if _PHANTOM_PART_NUMBER_PATTERN.search(combined):

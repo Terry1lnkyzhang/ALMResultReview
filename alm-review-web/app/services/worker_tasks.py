@@ -24,7 +24,11 @@ from app.models import (
 from app.services.alm import FolderCollectionProgress, collect_run, iter_folder_batches
 from app.services.importer import ImportResult, import_batch, unchanged_run_check
 from app.services.review_operations import queue_run_review
-from app.services.workspaces import resolve_workspace, workspace_sync_config
+from app.services.workspaces import (
+    resolve_workspace,
+    workspace_evidence_config,
+    workspace_sync_config,
+)
 
 MAX_JOB_ATTEMPTS = 3
 FAILED_JOB_RETRY_BACKOFF_SECONDS = 60
@@ -276,11 +280,15 @@ def _process_run_sync_job(
     db.commit()
     history_id = history.id
     try:
+        evidence_config = workspace_evidence_config(db, workspace_id)
         data = collect_run(
             config,
             run_row.test_instance_id,
             str(run_row.folder_id or ""),
             run_row.folder_path,
+            include_image_attachments=bool(
+                evidence_config and evidence_config.external_evidence_review_enabled
+            ),
         )
         import_batch(db, data, workspace_id, result)
         db.commit()
@@ -300,6 +308,7 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
         raise ValueError("No ALM synchronization scope is configured.")
     if job.run_id is not None:
         return _process_run_sync_job(db, job, workspace.id, config)
+    evidence_config = workspace_evidence_config(db, workspace.id)
     source = f"alm:folder:{config.folder_id}"
     last_progress_update = 0.0
 
@@ -354,6 +363,9 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
                 None
                 if job.full_refresh
                 else unchanged_run_check(db, workspace.id)
+            ),
+            include_image_attachments=bool(
+                evidence_config and evidence_config.external_evidence_review_enabled
             ),
         )
         for batch in batches:

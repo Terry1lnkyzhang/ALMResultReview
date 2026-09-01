@@ -1,30 +1,40 @@
 {% extends "base.html" %}
-{% block title %}Run {{ run.alm_run_id or run.run_id }}{% endblock %}
+{% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
+{% set decision_labels = {'confirmed_qualified': '确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工判定合格'} %}
+{% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
+{% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
+{% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
+{% set action_labels = {'validate_path': '校验路径', 'load_images': '读取图像', 'send_to_visual_ai': '发送给视觉 AI', 'parse_html_report': '解析 HTML 报告', 'manual_review': '人工复核', 'review_attachment': '评审附件'} %}
+{% set match_labels = {'equipment_id': '设备 ID', 'serial_number': '序列号', 'model_number': '型号', 'extracted_equipment_id': 'AI 抽取的设备 ID', 'extracted_serial_number': 'AI 抽取的序列号', 'extracted_device_name': 'AI 抽取的设备名称', 'ai_disambiguation': 'AI 消歧', 'ai_registry_name': 'AI 台账名称匹配'} %}
+{% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
+{% set queue_status_labels = {'queued': '排队中', 'running': '执行中', 'completed': '已完成', 'failed': '失败'} %}
+{% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
+{% block title %}运行 {{ run.alm_run_id or run.run_id }}{% endblock %}
 {% block content %}
-<a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; Dashboard</a>
+<a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; 返回仪表板</a>
 <section class="detail-heading">
-  <div><p class="eyebrow">RUN #{{ run.alm_run_id or run.run_id }} / REVISION {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
+  <div><p class="eyebrow">运行 #{{ run.alm_run_id or run.run_id }} / 版本 {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
   <div class="detail-status">
     <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
-    {% if active_sync_job %}<span class="queue-tag">ALM refresh {{ active_sync_job.status }}</span>{% endif %}
-    {% if active_review_job %}<span class="queue-tag">AI review {{ active_review_job.status }}</span>{% endif %}
+    {% if active_sync_job %}<span class="queue-tag">ALM 刷新：{{ queue_status_labels.get(active_sync_job.status, active_sync_job.status) }}</span>{% endif %}
+    {% if active_review_job %}<span class="queue-tag">AI 评审：{{ queue_status_labels.get(active_review_job.status, active_review_job.status) }}</span>{% endif %}
   </div>
 </section>
 
 <section class="detail-actions">
-  <div><p class="eyebrow">REFRESH THIS RUN</p><p class="subtle">Re-imports this single Run from ALM and then queues its AI review. The decision above stays visible until the new result lands.</p></div>
-  <form method="post" action="/runs/{{ run.run_id }}/refresh"><button class="button secondary" type="submit"{% if active_sync_job %} disabled{% endif %}>Refresh from ALM &amp; review</button></form>
+  <div><p class="eyebrow">刷新此运行</p><p class="subtle">从 ALM 重新导入此运行并加入 AI 评审队列。新结果生成前，上方结论仍然有效。</p></div>
+  <form method="post" action="/runs/{{ run.run_id }}/refresh"><button class="button secondary" type="submit"{% if active_sync_job %} disabled{% endif %}>从 ALM 刷新并评审</button></form>
 </section>
 
 <section class="delete-run-panel">
-  <div><p class="eyebrow">DELETE LOCAL RUN</p><p>Permanently removes this Run, its revisions, reviews, decisions, and queue history from this application. If it still exists in ALM, a later sync can import it again.</p></div>
-  <button class="button danger" type="button" data-open-delete-run{% if active_sync_job or active_review_job %} disabled title="Finish or remove the active job before deleting this Run"{% endif %}>Delete local Run</button>
+  <div><p class="eyebrow">删除本地运行</p><p>永久删除此应用中的运行、版本、评审、人工裁决和队列历史。如果 ALM 中仍存在该运行，后续同步可再次导入。</p></div>
+  <button class="button danger" type="button" data-open-delete-run{% if active_sync_job or active_review_job %} disabled title="请先完成或移除当前任务"{% endif %}>删除本地运行</button>
 </section>
 <dialog class="delete-run-dialog" data-delete-run-dialog>
   <form method="post" action="/runs/{{ run.run_id }}/delete" data-delete-run-form data-confirm-run-id="{{ run.alm_run_id or run.run_id }}">
-    <div><p class="eyebrow">PERMANENT DELETION</p><h2>Delete local Run {{ run.alm_run_id or run.run_id }}?</h2><p>This removes all local revisions and review history. It does not delete anything from ALM.</p></div>
-    <label><span>Type Run ID {{ run.alm_run_id or run.run_id }} to confirm</span><input name="confirmation" required autocomplete="off" inputmode="numeric"></label>
-    <div class="delete-run-dialog-actions"><button class="button secondary" type="button" data-close-delete-run>Cancel</button><button class="button danger" type="submit">Delete permanently</button></div>
+    <div><p class="eyebrow">永久删除</p><h2>删除本地运行 {{ run.alm_run_id or run.run_id }}？</h2><p>此操作会删除所有本地版本和评审历史，但不会删除 ALM 中的任何数据。</p></div>
+    <label><span>输入运行 ID {{ run.alm_run_id or run.run_id }} 以确认</span><input name="confirmation" required autocomplete="off" inputmode="numeric"></label>
+    <div class="delete-run-dialog-actions"><button class="button secondary" type="button" data-close-delete-run>取消</button><button class="button danger" type="submit">永久删除</button></div>
   </form>
 </dialog>
 <script>
@@ -46,7 +56,7 @@
     form.addEventListener("submit", (event) => {
       if (input.value.trim() !== expected) {
         event.preventDefault();
-        input.setCustomValidity(`Enter Run ID ${expected} exactly.`);
+        input.setCustomValidity(`请输入准确的运行 ID ${expected}。`);
         input.reportValidity();
       }
     });
@@ -54,15 +64,15 @@
 </script>
 
 <dl class="fact-strip">
-  <div><dt>Test case</dt><dd>{{ run.test_id or '-' }}</dd></div><div><dt>Location</dt><dd>{{ run.execution_location or '-' }}</dd></div><div><dt>Test owner</dt><dd>{{ test_owner_label }}</dd></div><div><dt>Assigned tester</dt><dd>{{ assigned_tester_label }}</dd></div><div><dt>Actual tester</dt><dd>{{ actual_tester_label }}</dd></div><div><dt>ALM result</dt><dd>{{ run.run_status }}</dd></div><div><dt>Executed</dt><dd>{{ run.execution_at.strftime('%Y-%m-%d %H:%M') if run.execution_at else '-' }}</dd></div>
+  <div><dt>测试用例</dt><dd>{{ run.test_id or '-' }}</dd></div><div><dt>执行位置</dt><dd>{{ run.execution_location or '-' }}</dd></div><div><dt>测试负责人</dt><dd>{{ test_owner_label }}</dd></div><div><dt>指定测试人员</dt><dd>{{ assigned_tester_label }}</dd></div><div><dt>实际测试人员</dt><dd>{{ actual_tester_label }}</dd></div><div><dt>ALM 结果</dt><dd>{{ run.run_status }}</dd></div><div><dt>执行时间</dt><dd>{{ run.execution_at.strftime('%Y-%m-%d %H:%M') if run.execution_at else '-' }}</dd></div>
 </dl>
 
 {% if review_update_reasons %}
 <section class="review-advisory review-advisory-detail" aria-label="Review update recommendation">
   <div>
-    <p class="eyebrow">REVIEW UPDATE RECOMMENDED</p>
-    <h2>This result uses earlier review settings</h2>
-    <p>The existing decision remains active. No AI review was queued automatically.</p>
+    <p class="eyebrow">建议更新评审</p>
+    <h2>此结果使用了早期评审设置</h2>
+    <p>当前结论仍然有效，系统不会自动加入 AI 评审队列。</p>
   </div>
   <div class="review-advisory-reasons">
     {% for reason in review_update_reasons %}<span>{{ reason }}</span>{% endfor %}
@@ -72,32 +82,32 @@
 
 {% if review.result %}
 <section class="review-band">
-  <div><p class="eyebrow">AI REVIEW / {{ review.result.model_name }}</p><h2>{{ review.result.verdict|replace('_', ' ')|title }}</h2><p>{{ review.result.issue_summary or 'No issue summary was returned.' }}</p><small>Completed {{ review.result.completed_at.strftime('%Y-%m-%d %H:%M:%S') }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit">Queue re-review</button></form></div>
-  {% if review.manual_decision %}<div class="manual-record"><span>Manual decision</span><strong>{{ review.manual_decision.decision|replace('_', ' ')|title }}</strong><small>{{ review.manual_decision.operator }} / {{ review.manual_decision.created_at.strftime('%Y-%m-%d %H:%M') }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
+  <div><p class="eyebrow">AI 评审 / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit">加入重新评审队列</button></form></div>
+  {% if review.manual_decision %}<div class="manual-record"><span>人工裁决</span><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
 </section>
 {% if review_pipeline %}
 <section class="pipeline-section">
-  <div class="table-heading"><h2>Review pipeline</h2><span>{{ review_pipeline.get('total_ai_calls', 0) }} AI call{% if review_pipeline.get('total_ai_calls', 0) != 1 %}s{% endif %}</span></div>
+  <div class="table-heading"><h2>评审流程</h2><span>{{ review_pipeline.get('total_ai_calls', 0) }} 次 AI 调用</span></div>
   <div class="pipeline-stages">
-    {% for key, label in [('routing', 'Route'), ('text_review', 'Text review'), ('image_review', 'Image review'), ('report_review', 'Report review'), ('equipment_review', 'Equipment review'), ('aggregation', 'Aggregate')] %}
+    {% for key, label in [('routing', '证据路由'), ('text_review', '文本评审'), ('image_review', '图像评审'), ('report_review', '报告评审'), ('equipment_review', '设备评审'), ('aggregation', '结果汇总')] %}
       {% set stage = review_pipeline.get('stages', {}).get(key, {}) %}
       <article class="pipeline-stage pipeline-stage-{{ stage.get('status', 'not_applicable') }}">
-        <span>{{ loop.index|string }}</span><div><strong>{{ label }}</strong><small>{{ stage.get('status', 'not_applicable')|replace('_', ' ')|title }}{% if stage.get('ai_calls') %} &middot; {{ stage.get('ai_calls') }} AI{% endif %}{% if stage.get('steps') %} &middot; {% if key == 'routing' %}{{ stage.get('steps')|length }}{% else %}{{ stage.get('steps') }}{% endif %} Steps{% endif %}{% if stage.get('reports') %} &middot; {{ stage.get('reports') }} Reports{% endif %}</small></div>
+        <span>{{ loop.index|string }}</span><div><strong>{{ label }}</strong><small>{{ review_status_labels.get(stage.get('status', 'not_applicable'), stage.get('status', 'not_applicable')) }}{% if stage.get('ai_calls') %} &middot; {{ stage.get('ai_calls') }} 次 AI 调用{% endif %}{% if stage.get('steps') %} &middot; {% if key == 'routing' %}{{ stage.get('steps')|length }}{% else %}{{ stage.get('steps') }}{% endif %} 个步骤{% endif %}{% if stage.get('reports') %} &middot; {{ stage.get('reports') }} 份报告{% endif %}</small></div>
       </article>
     {% endfor %}
   </div>
   {% set routing_steps = review_pipeline.get('stages', {}).get('routing', {}).get('steps', []) %}
   {% if routing_steps %}
   <div class="routing-trace">
-    <div class="routing-trace-heading"><strong>Evidence routing trace</strong><span>Recorded when this review ran</span></div>
+    <div class="routing-trace-heading"><strong>证据路由记录</strong><span>在本次评审执行时记录</span></div>
     {% for route in routing_steps %}
     <details class="routing-step" {% if route.get('intent') not in ['none'] %}open{% endif %}>
-      <summary><span>Step {{ route.get('review_step') }}</span><strong>{{ route.get('intent', 'none')|replace('_', ' ')|title }}</strong><i>{{ route.get('decision_source', 'deterministic')|replace('_', ' ')|title }}{% if route.get('confidence') is not none %} &middot; {{ (route.get('confidence') * 100)|round|int }}%{% endif %}</i></summary>
+      <summary><span>步骤 {{ route.get('review_step') }}</span><strong>{{ route_labels.get(route.get('intent', 'none'), route.get('intent', 'none')) }}</strong><i>{{ source_labels.get(route.get('decision_source', 'deterministic'), route.get('decision_source', 'deterministic')) }}{% if route.get('confidence') is not none %} &middot; {{ (route.get('confidence') * 100)|round|int }}%{% endif %}</i></summary>
       <div class="routing-step-body">
-        <p>{{ route.get('reason') or 'No routing reason was recorded.' }}</p>
-        {% if route.get('paths') %}<dl><dt>Detected paths</dt><dd>{% for path in route.get('paths') %}<code>{{ path.get('raw') }}</code><small>{{ path.get('kind', 'unknown')|replace('_', ' ') }}</small>{% endfor %}</dd></dl>{% endif %}
-        <dl><dt>Matched conditions</dt><dd class="routing-tags">{% for trigger in route.get('triggers', []) %}<span>{{ trigger }}</span>{% else %}<span>none</span>{% endfor %}</dd></dl>
-        <dl><dt>Actions</dt><dd class="routing-tags routing-actions">{% for action in route.get('actions', []) %}<span>{{ action|replace('_', ' ') }}</span>{% else %}<span>no external evidence action</span>{% endfor %}</dd></dl>
+        <p>{{ route.get('reason') or '未记录路由原因。' }}</p>
+        {% if route.get('paths') %}<dl><dt>检测到的路径</dt><dd>{% for path in route.get('paths') %}<code>{{ path.get('raw') }}</code><small>{{ path_kind_labels.get(path.get('kind', 'unknown'), path.get('kind', 'unknown')) }}</small>{% endfor %}</dd></dl>{% endif %}
+        <dl><dt>匹配条件</dt><dd class="routing-tags">{% for trigger in route.get('triggers', []) %}<span>{{ trigger }}</span>{% else %}<span>无</span>{% endfor %}</dd></dl>
+        <dl><dt>执行动作</dt><dd class="routing-tags routing-actions">{% for action in route.get('actions', []) %}<span>{{ action_labels.get(action, action) }}</span>{% else %}<span>无外部证据操作</span>{% endfor %}</dd></dl>
       </div>
     </details>
     {% endfor %}
@@ -105,12 +115,12 @@
   {% endif %}
   {% if review_skill_traces %}
   <div class="skill-trace-list">
-    <div class="routing-trace-heading"><strong>Skill execution trace</strong><span>Version, mode, capability grants, and runtime</span></div>
+    <div class="routing-trace-heading"><strong>Skill 执行记录</strong><span>版本、模式、能力授权和运行时间</span></div>
     {% for trace in review_skill_traces %}
     <article class="skill-trace-item skill-trace-{{ trace.get('status', 'failed') }}">
-      <header><div><strong>{{ trace.get('skill_name') or trace.get('skill_id') }}</strong><code>{{ trace.get('skill_id') }}{% if trace.get('skill_version') %}@{{ trace.get('skill_version') }}{% endif %}</code></div><i>{{ trace.get('status', 'failed')|replace('_', ' ')|title }}</i></header>
-      <div class="skill-shadow-meta"><span>{{ trace.get('pipeline_stage', 'unknown')|replace('_', ' ')|title }}</span><span>{{ trace.get('mode', 'authoritative')|replace('_', ' ')|title }}</span>{% if trace.get('duration_ms') is not none %}<span>{{ trace.get('duration_ms') }} ms</span>{% endif %}{% if trace.get('skill_hash') %}<span>Policy {{ trace.get('skill_hash')[:12] }}</span>{% endif %}{% for capability in trace.get('capabilities', {}).get('granted', []) %}<span>{{ capability }}</span>{% endfor %}</div>
-      {% if trace.get('error') %}<p>{{ trace.get('error') }}</p>{% endif %}
+      <header><div><strong>{{ skill_labels.get(trace.get('skill_id'), trace.get('skill_name') or trace.get('skill_id')) }}</strong><code>{{ trace.get('skill_id') }}{% if trace.get('skill_version') %}@{{ trace.get('skill_version') }}{% endif %}</code></div><i>{{ review_status_labels.get(trace.get('status', 'failed'), trace.get('status', 'failed')) }}</i></header>
+      <div class="skill-shadow-meta"><span>{{ stage_labels.get(trace.get('pipeline_stage', 'unknown'), trace.get('pipeline_stage', 'unknown')) }}</span><span>{{ source_labels.get(trace.get('mode', 'authoritative'), trace.get('mode', 'authoritative')) }}</span>{% if trace.get('duration_ms') is not none %}<span>{{ trace.get('duration_ms') }} ms</span>{% endif %}{% if trace.get('skill_hash') %}<span>策略 {{ trace.get('skill_hash')[:12] }}</span>{% endif %}{% for capability in trace.get('capabilities', {}).get('granted', []) %}<span>{{ capability }}</span>{% endfor %}</div>
+      {% if trace.get('error') %}<p>错误：{{ trace.get('error') }}</p>{% endif %}
     </article>
     {% endfor %}
   </div>
@@ -119,18 +129,18 @@
 {% endif %}
 {% if review_warnings %}
 <section class="warning-section">
-  <div class="table-heading"><h2>Warnings</h2><span>{{ review_warnings|length }}</span></div>
-  <div class="warning-list">{% for warning in review_warnings %}<p><strong>Step {{ warning.step }}</strong><span>{{ warning.summary }}</span></p>{% endfor %}</div>
+  <div class="table-heading"><h2>警告</h2><span>{{ review_warnings|length }}</span></div>
+  <div class="warning-list">{% for warning in review_warnings %}<p><strong>步骤 {{ warning.step }}</strong><span>{{ warning.summary }}</span></p>{% endfor %}</div>
 </section>
 {% endif %}
 {% if review_criteria %}
 <section class="criteria-section">
-  <div class="table-heading"><h2>Review criteria</h2><span>9 checks</span></div>
+  <div class="table-heading"><h2>评审准则</h2><span>9 项检查</span></div>
   <div class="criteria-grid">
-  {% for key, label in [('language_quality', 'Language quality'), ('expected_vs_actual', 'Expected vs actual'), ('screenshot_evidence', 'Screenshot evidence'), ('path_validation', 'Path validation'), ('html_report_sequence', 'HTML report sequence'), ('automation_results', 'Automation results'), ('automation_timing', 'Date validation'), ('phantom_information', 'Reference data validation'), ('equipment_traceability', 'Equipment traceability')] %}
+  {% for key, label in [('language_quality', '语言质量'), ('expected_vs_actual', 'Expected 与 Actual'), ('screenshot_evidence', '截图证据'), ('path_validation', '路径校验'), ('html_report_sequence', 'HTML 报告序列'), ('automation_results', '自动化结果'), ('automation_timing', '日期校验'), ('phantom_information', '参考数据校验'), ('equipment_traceability', '设备可追溯性')] %}
     {% set criterion = review_criteria.get(key, {}) %}
     <article class="criterion criterion-{{ criterion.get('status', 'manual') }}">
-      <header><h3>{{ label }}</h3><span>{{ criterion.get('status', 'manual')|replace('_', ' ')|title }}</span></header>
+      <header><h3>{{ label }}</h3><span>{{ review_status_labels.get(criterion.get('status', 'manual'), criterion.get('status', 'manual')) }}</span></header>
       <p>{{ criterion.get('summary') or '-' }}</p>
       {% if criterion.get('evidence') %}<small>{{ criterion.get('evidence') }}</small>{% endif %}
     </article>
@@ -138,10 +148,10 @@
   </div>
 </section>
 {% endif %}
-{% else %}<section class="review-band review-empty"><div><h2>No current AI review</h2><p>This revision is queued or its latest attempt failed.</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit">Queue this Run</button></form></section>{% endif %}
+{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>此版本正在排队，或最近一次评审失败。</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit">加入评审队列</button></form></section>{% endif %}
 
 {% if allowed_decisions %}
-<section class="decision-panel"><div><p class="eyebrow">MANUAL DECISION</p><h2>Resolve this result</h2><p>The reason is retained with the current source hash, and a resolved Run is never re-reviewed automatically.</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>Decision</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>Reason</span><textarea name="reason" rows="3" required placeholder="Why this result is being resolved manually"></textarea></label><button class="button primary" type="submit">Record decision</button></form></section>
+<section class="decision-panel"><div><p class="eyebrow">人工裁决</p><h2>处理此评审结果</h2><p>原因将与当前源数据哈希一起保留，已处理的运行不会自动重新评审。</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>裁决</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入人工处理此结果的原因"></textarea></label><button class="button primary" type="submit">记录裁决</button></form></section>
 {% endif %}
 <script>
   (() => {
@@ -155,9 +165,26 @@
   })();
 </script>
 
-<section class="steps-section"><div class="table-heading"><h2>Execution evidence</h2><span>{{ steps|length }} steps</span></div>
-  <div class="step-list">{% for step in steps %}{% set step_review = step_review_map.get(loop.index, {}) %}{% set equipment = step_review.get('equipment', {}) %}<article class="step"><header><span>STEP {{ step.step_order }}</span><strong>{{ step.name }}</strong>{% if step_review %}<i class="step-review-status status-{{ step_review.get('status', 'pass') }}">{{ step_review.get('status', 'pass')|upper }}</i>{% else %}<i class="alm-status">{{ step.status }}</i>{% endif %}</header>{% if step_review.get('summary') %}<div class="step-review-summary">{{ step_review.get('summary') }}</div>{% endif %}{% for warning in step_review.get('warnings', []) %}<div class="step-warning">Warning: {{ warning.get('summary') }}</div>{% endfor %}{% if equipment and equipment.get('status') != 'not_applicable' %}<div class="step-equipment"><div class="step-equipment-heading"><div><span>Equipment registry</span><strong>{{ equipment.get('summary') }}</strong></div><i class="step-review-status status-{{ equipment.get('status', 'manual') }}">{{ equipment.get('status', 'manual')|upper }}</i></div><dl class="equipment-check-facts"><div><dt>Execution date</dt><dd>{{ equipment.get('execution_date') or '-' }}</dd></div><div><dt>Reported ID</dt><dd>{{ equipment.get('reported_identifiers')|join(', ') or equipment.get('unknown_identifiers')|join(', ') or equipment.get('matches')|map(attribute='equipment_id')|join(', ') or '-' }}</dd></div><div><dt>Reported calibration</dt><dd>{% if equipment.get('reported_calibration_ranges') %}{{ equipment.get('reported_calibration_ranges')|length }} device range(s){% elif equipment.get('reported_calibration_range') %}{{ equipment.get('reported_calibration_range')|join(' to ') }}{% else %}-{% endif %}</dd></div></dl>{% for item in equipment.get('matches', []) %}<div class="equipment-match"><div><strong>{{ item.get('equipment_id') }}</strong><span>{{ item.get('description') or '-' }}</span></div><div><span>Matched by {{ item.get('matched_by')|join(', ') }}</span><small>Serial {{ item.get('serial_number') or '-' }}</small></div><div><span>Registry {{ item.get('calibration_date') or '-' }} to {{ item.get('calibration_due_date') or '-' }}</span><small>{% if item.get('reported_calibration_range') %}Actual {{ item.get('reported_calibration_range')|join(' to ') }}{% else %}Actual calibration not recorded{% endif %}</small></div><div><span>{{ item.get('manufacturer') or '-' }} / {{ item.get('model_number') or '-' }}</span><small>{{ item.get('equipment_status') or 'Status not recorded' }} &middot; {{ item.get('source_filename') or '-' }}{% if item.get('source_row') %} row {{ item.get('source_row') }}{% endif %}</small></div></div>{% endfor %}</div>{% endif %}<div class="step-columns"><div><h3>Description</h3><div class="alm-rich-text">{{ step.description or '-' }}</div></div><div><h3>Expected</h3><div class="alm-rich-text">{{ step.expected or '-' }}</div></div><div class="actual"><h3>Actual</h3><div class="alm-rich-text">{{ step.actual or '-' }}</div></div></div></article>{% else %}<p class="empty">No Run Steps found.</p>{% endfor %}</div>
+{% set image_audit = namespace(count=0) %}
+{% for step_review in review_step_results %}{% set image_audit.count = image_audit.count + step_review.get('image_evidence', [])|length %}{% endfor %}
+{% if image_audit.count %}
+<section class="image-evidence-section">
+  <div class="table-heading"><h2>图像证据审计</h2><span>{{ image_audit.count }} 个来源</span></div>
+  <div class="image-evidence-list">
+    {% for step_review in review_step_results %}{% for evidence in step_review.get('image_evidence', []) %}
+    <article>
+      <header><strong>步骤 {{ step_review.get('review_step') }}</strong><span>{{ 'ALM 附件' if evidence.get('source_kind') == 'alm_attachment' else '网络路径' }}</span><i>{{ review_status_labels.get(evidence.get('status'), evidence.get('status')) }}</i></header>
+      <code>{{ evidence.get('source_path') }}</code>
+      {% for image in evidence.get('images', []) %}<dl><div><dt>文件</dt><dd>{{ image.get('name') }}</dd></div><div><dt>尺寸</dt><dd>{{ image.get('width') or '-' }} × {{ image.get('height') or '-' }}</dd></div><div><dt>大小</dt><dd>{{ image.get('size_bytes') or 0 }} bytes</dd></div><div><dt>SHA-256</dt><dd class="hash">{{ image.get('sha256') }}</dd></div></dl>{% endfor %}
+    </article>
+    {% endfor %}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="steps-section"><div class="table-heading"><h2>执行证据</h2><span>{{ steps|length }} 个步骤</span></div>
+  <div class="step-list">{% for step in steps %}{% set step_review = step_review_map.get(loop.index, {}) %}{% set equipment = step_review.get('equipment', {}) %}<article class="step"><header><span>步骤 {{ step.step_order }}</span><strong>{{ step.name }}</strong>{% if step_review %}<i class="step-review-status status-{{ step_review.get('status', 'pass') }}">{{ review_status_labels.get(step_review.get('status', 'pass'), step_review.get('status', 'pass')) }}</i>{% else %}<i class="alm-status">{{ step.status }}</i>{% endif %}</header>{% if step_review.get('summary') %}<div class="step-review-summary">{{ step_review.get('summary') }}</div>{% endif %}{% for warning in step_review.get('warnings', []) %}<div class="step-warning">警告：{{ warning.get('summary') }}</div>{% endfor %}{% if equipment and equipment.get('status') != 'not_applicable' %}<div class="step-equipment"><div class="step-equipment-heading"><div><span>设备台账</span><strong>{{ equipment.get('summary') }}</strong></div><i class="step-review-status status-{{ equipment.get('status', 'manual') }}">{{ review_status_labels.get(equipment.get('status', 'manual'), equipment.get('status', 'manual')) }}</i></div><dl class="equipment-check-facts"><div><dt>执行日期</dt><dd>{{ equipment.get('execution_date') or '-' }}</dd></div><div><dt>记录的 ID</dt><dd>{{ equipment.get('reported_identifiers')|join(', ') or equipment.get('unknown_identifiers')|join(', ') or equipment.get('matches')|map(attribute='equipment_id')|join(', ') or '-' }}</dd></div><div><dt>记录的校准信息</dt><dd>{% if equipment.get('reported_calibration_ranges') %}{{ equipment.get('reported_calibration_ranges')|length }} 个设备有效期{% elif equipment.get('reported_calibration_range') %}{{ equipment.get('reported_calibration_range')|join(' 至 ') }}{% else %}-{% endif %}</dd></div></dl>{% for item in equipment.get('matches', []) %}<div class="equipment-match"><div><strong>{{ item.get('equipment_id') }}</strong><span>{{ item.get('description') or '-' }}</span></div><div><span>匹配方式：{% for method in item.get('matched_by', []) %}{{ match_labels.get(method, method) }}{% if not loop.last %}、{% endif %}{% endfor %}</span><small>序列号 {{ item.get('serial_number') or '-' }}</small></div><div><span>台账 {{ item.get('calibration_date') or '-' }} 至 {{ item.get('calibration_due_date') or '-' }}</span><small>{% if item.get('reported_calibration_range') %}Actual {{ item.get('reported_calibration_range')|join(' 至 ') }}{% else %}Actual 未记录校准有效期{% endif %}</small></div><div><span>{{ item.get('manufacturer') or '-' }} / {{ item.get('model_number') or '-' }}</span><small>{{ item.get('equipment_status') or '未记录状态' }} &middot; {{ item.get('source_filename') or '-' }}{% if item.get('source_row') %} 第 {{ item.get('source_row') }} 行{% endif %}</small></div></div>{% endfor %}</div>{% endif %}<div class="step-columns"><div><h3>Description（描述）</h3><div class="alm-rich-text">{{ step.description or '-' }}</div></div><div><h3>Expected（预期）</h3><div class="alm-rich-text">{{ step.expected or '-' }}</div></div><div class="actual"><h3>Actual（实际）</h3><div class="alm-rich-text">{{ step.actual or '-' }}</div></div></div></article>{% else %}<p class="empty">未找到运行步骤。</p>{% endfor %}</div>
 </section>
 
-<section class="history-section"><div class="table-heading"><h2>Revision history</h2><span>{{ revisions|length }} source versions</span></div><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Source modified</th><th>Imported</th><th>Review hash</th></tr></thead><tbody>{% for revision in revisions %}<tr><td>#{{ revision.revision_number }}{% if revision.id == run.current_revision_id %} <span class="current-tag">Current</span>{% endif %}</td><td>{{ revision.source_last_modified or '-' }}</td><td>{{ revision.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td><td class="hash">{{ revision.review_hash }}</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="history-section"><div class="table-heading"><h2>版本历史</h2><span>{{ revisions|length }} 个源版本</span></div><div class="table-scroll"><table><thead><tr><th>版本</th><th>源数据修改时间</th><th>导入时间</th><th>评审哈希</th></tr></thead><tbody>{% for revision in revisions %}<tr><td>#{{ revision.revision_number }}{% if revision.id == run.current_revision_id %} <span class="current-tag">当前</span>{% endif %}</td><td>{{ revision.source_last_modified or '-' }}</td><td>{{ revision_created_at.get(revision.id).strftime('%Y-%m-%d %H:%M:%S') if revision_created_at.get(revision.id) else '-' }}</td><td class="hash">{{ revision.review_hash }}</td></tr>{% endfor %}</tbody></table></div></section>
 {% endblock %}

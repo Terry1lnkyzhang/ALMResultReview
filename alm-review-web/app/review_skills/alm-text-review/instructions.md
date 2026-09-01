@@ -104,5 +104,6 @@ the supplied text cannot support a reliable conclusion. Return no finding when t
 
 Do not access files, folders, URLs, images, HTML, databases, equipment registries, or external
 systems. Do not calculate the final Review Verdict. Return only JSON matching the supplied output
-schema and do not return Markdown. Write every `reason` and `summary` in English, whatever
-language the reviewed ALM text uses.
+schema and do not return Markdown. Write every `reason` and `summary` in Simplified Chinese,
+whatever language the reviewed ALM text uses. Keep identifiers, paths, quoted source text, units,
+product names, and enum values unchanged.

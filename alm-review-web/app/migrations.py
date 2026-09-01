@@ -1,4 +1,46 @@
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, MetaData, Table, inspect, text
+from sqlalchemy.engine import Connection
+
+
+def _make_sqlite_column_nullable(
+    connection: Connection,
+    table_name: str,
+    column_name: str,
+) -> None:
+    inspector = inspect(connection)
+    indexes = inspector.get_indexes(table_name)
+    source = Table(table_name, MetaData(), autoload_with=connection)
+    target_name = f"_{table_name}_{column_name}_nullable"
+    target = source.to_metadata(MetaData(), name=target_name)
+    target.c[column_name].nullable = True
+    target.indexes.clear()
+    target.create(connection)
+
+    quote = connection.dialect.identifier_preparer.quote
+    columns = ", ".join(quote(column.name) for column in source.columns)
+    connection.execute(
+        text(
+            f"INSERT INTO {quote(target_name)} ({columns}) "
+            f"SELECT {columns} FROM {quote(table_name)}"
+        )
+    )
+    source.drop(connection)
+    connection.execute(
+        text(f"ALTER TABLE {quote(target_name)} RENAME TO {quote(table_name)}")
+    )
+    for index in indexes:
+        index_name = index.get("name")
+        column_names = index.get("column_names") or []
+        if not index_name or not column_names or any(name is None for name in column_names):
+            continue
+        unique = "UNIQUE " if index.get("unique") else ""
+        indexed_columns = ", ".join(quote(name) for name in column_names)
+        connection.execute(
+            text(
+                f"CREATE {unique}INDEX {quote(index_name)} "
+                f"ON {quote(table_name)} ({indexed_columns})"
+            )
+        )
 
 
 def ensure_compatible_schema(engine: Engine) -> None:
@@ -246,6 +288,38 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 column["name"]: column
                 for column in inspector.get_columns("equipment_registry")
             }
+            equipment_id_column = columns.get("equipment_id")
+            if equipment_id_column and not equipment_id_column.get("nullable", True):
+                if engine.dialect.name == "mysql":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE equipment_registry MODIFY COLUMN "
+                            "equipment_id VARCHAR(128) NULL"
+                        )
+                    )
+                elif engine.dialect.name == "sqlite":
+                    _make_sqlite_column_nullable(
+                        connection, "equipment_registry", "equipment_id"
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE equipment_registry ALTER COLUMN "
+                            "equipment_id DROP NOT NULL"
+                        )
+                    )
+                inspector = inspect(connection)
+                columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns("equipment_registry")
+                }
+            if "revision" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE equipment_registry ADD COLUMN revision "
+                        "VARCHAR(64) NOT NULL DEFAULT ''"
+                    )
+                )
             serial_column = columns.get("serial_number")
             serial_length = getattr(
                 serial_column.get("type") if serial_column else None,
@@ -353,3 +427,11 @@ def ensure_compatible_schema(engine: Engine) -> None:
                             "network_evidence_enabled = 1 OR image_review_enabled = 1"
                         )
                     )
+            if "automation_release_project_name" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE evidence_configs ADD COLUMN "
+                        "automation_release_project_name VARCHAR(255) "
+                        "NOT NULL DEFAULT ''"
+                    )
+                )

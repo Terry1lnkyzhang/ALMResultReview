@@ -151,18 +151,33 @@ Each completed review displays nine independent checkpoints:
 4. `Path validation`: evidence uses an absolute UNC path below the approved network root.
 5. `HTML report sequence`: related automation reports start with `.html`, then continue as
 	`_2.html`, `_3.html`, and so on without missing numbers.
-6. `Automation results`: every value after `Result (Passed/Failed)` in every referenced HTML
-	report is `Passed`. Any other value or a missing result row fails the checkpoint.
+6. `Automation results`: AI locates the sections of each explicitly referenced HTML report that
+	cover the current Step, then checks Description, Expected, Actual, and detailed/final result
+	consistency. A relevant non-passing result or contradiction fails the checkpoint.
 7. `Date validation`: reserved for deterministic execution-date rules; currently not enabled.
 8. `Reference data validation`: unresolved phantom or reference data requires manual review.
 9. `Equipment traceability`: controlled equipment identity and execution-date calibration validity.
 
 HTML reports are read only when `Enable external evidence review` is enabled. The parser reads at
-most 5 MB per file and extracts table text without executing scripts, loading linked content, or
-modifying the source. Missing reports, filename sequence gaps, missing result rows, and non-Passed
-results are unqualified; permission, network, oversized-file, and parse errors require manual
-review. `html-evidence-review@0.1.0` is listed as Planned; it has no instructions or contract and
-is not invoked yet, so deterministic parsing remains authoritative.
+most 5 MB per file and extracts bounded visible text plus static JSON assigned to `var resultData`
+without executing scripts, loading linked content, or modifying the source. When a configured
+approved-root path is unavailable, the same validated relative path may be resolved below the
+optional fallback root; arbitrary paths and directory searches remain forbidden.
+`html-evidence-review` reviews only files explicitly referenced by the ALM Step and may combine
+several sections or reports that jointly cover that Step. Missing reports, filename sequence gaps,
+and the `checkcontent`, `checkstep`, or `fail` filename markers are unqualified; permission,
+network, oversized-file, empty-content, and ambiguous AI results require manual review. A pass or
+fail must cite every supplied report, and each report, block, and quoted line is validated against
+the application-supplied evidence.
+
+When `Automation release project` is configured for a Workspace, each HTML-bearing ALM Step is
+also checked against `atframeworkdb.releasetable`. The application queries by the configured
+`ProjectName` and the ALM Test ID, selects the latest release revision, and compares the claimed
+script name and validation-document number/revision with the released record. Explicit Test ID or
+document conflicts and missing release records are unqualified; database availability and
+incomplete claims require manual review. Historical shortened script names are supplied to the
+HTML Skill for semantic comparison, but the Skill cannot read the database or override a
+deterministic conflict.
 
 ## Run
 
@@ -191,6 +206,9 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 	Expected, and Actual text from the standard export layout. UNC paths in Actual text
 	continue through the existing evidence pipeline. Embedded Word images are not stored;
 	image review still reads approved paths configured under Network image evidence.
+- Live ALM synchronization downloads supported run-step image attachments only when external
+	evidence review is enabled. Attachments use the authenticated ALM API and enter the same
+	bounded visual review as approved network images; they are not treated as UNC paths.
 - `Sync ALM now` recursively refreshes the configured Test Lab scope. Only the latest
 	Passed Run for each Test Instance is imported by the Worker. The same synchronization reads the ALM
 	project user directory and displays people as `Full Name (CODE1 ID)`.
@@ -245,11 +263,13 @@ Each explicit Review Job builds one plan and completes these stages before savin
 	program-detected path and equipment candidates. Every candidate receives a stable ID.
 2. Run `alm-text-review` once. It reviews applicability, language quality, completeness, and
 	Expected/Actual support, then classifies the semantic role of every supplied candidate ID.
-3. Build the specialist plan from the validated first-pass output. ALM attachments remain
-	mandatory checks, while the application retains all path-access and final-routing authority.
+3. Build the specialist plan from the validated first-pass output. ALM image attachments remain
+	mandatory checks and are routed directly to image review, while the application retains all
+	path-access and final-routing authority.
 4. Resolve approved images with deterministic path, file-signature, count, byte, and pixel
 	guards. `image-evidence-review` sees only the bounded images granted by the application.
-5. Parse supported HTML Reports with deterministic code; Report review does not call AI.
+5. Resolve and parse explicitly referenced HTML Reports with deterministic security and size
+	guards, then call `html-evidence-review` to judge current-Step coverage and result consistency.
 6. Validate equipment against the registry with deterministic rules. A clear first-pass role is
 	reused; only an uncertain role invokes `equipment-role`, which may select supplied IDs only.
 7. Aggregate all stage outcomes with code: any failure is Unqualified, otherwise any

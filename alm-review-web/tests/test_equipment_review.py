@@ -2,6 +2,7 @@ from datetime import date
 
 from app.models import EquipmentRegistry
 from app.services.equipment_review import (
+    Candidate,
     OpenQuestion,
     _candidate_equipment,
     _serial_aliases,
@@ -14,7 +15,7 @@ from app.services.equipment_review import (
 
 
 def equipment(
-    equipment_id: str,
+    equipment_id: str | None,
     serial_number: str,
     *,
     description: str = "ECG simulator",
@@ -102,6 +103,34 @@ def test_equipment_marked_no_calibration_required_passes_without_dates() -> None
     assert ambiguous == []
     assert checks[0]["status"] == "pass"
     assert checks[0]["code"] == "equipment_valid"
+
+
+def test_equipment_without_id_matches_by_serial_number() -> None:
+    registry = [
+        equipment(
+            None,
+            "HJH-20X1806-0003",
+            description="System Phantom",
+            model_number="459801550744",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+        )
+    ]
+    content = review_content(
+        "System Phantom S/N: HJH-20X1806-0003; P/N: 459801550744; Rev: A. "
+        "Calibration is not required. Refer to DEP136285 for details.",
+        description="Record the System Phantom SN, PN, and revision.",
+        expected="System Phantom details are recorded.",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
+    assert checks[0]["matches"][0]["equipment_id"] is None
+    assert checks[0]["matches"][0]["serial_number"] == "HJH-20X1806-0003"
 
 
 def test_bilingual_registry_name_aliases_are_equipment_candidates() -> None:
@@ -312,7 +341,7 @@ def test_execution_outside_calibration_window_fails() -> None:
     checks, _ = analyze_equipment_steps(content, registry)
 
     assert checks[0]["status"] == "fail"
-    assert "outside the calibration period" in checks[0]["summary"]
+    assert "超出校准有效期" in checks[0]["summary"]
 
 
 def test_reported_calibration_range_must_match_registry() -> None:
@@ -325,7 +354,8 @@ def test_reported_calibration_range_must_match_registry() -> None:
     checks, _ = analyze_equipment_steps(content, registry)
 
     assert checks[0]["status"] == "fail"
-    assert "does not match the registry" in checks[0]["summary"]
+    assert "与台账中的" in checks[0]["summary"]
+    assert "不一致" in checks[0]["summary"]
 
 
 def test_current_non_use_status_is_warning_not_historical_failure() -> None:
@@ -417,7 +447,7 @@ def test_dut_disambiguation_with_previous_equipment_stays_manual() -> None:
 
     assert checks[0]["status"] == "manual"
     assert checks[0]["code"] == "equipment_role_ambiguous"
-    assert "previously verified equipment" in checks[0]["summary"]
+    assert "此前已核验的设备" in checks[0]["summary"]
 
 def test_calibration_tool_does_not_match_to_inside_tool_as_date_requirement() -> None:
     content = review_content(
@@ -633,7 +663,8 @@ def test_each_equipment_calibration_range_is_checked_in_multi_device_step() -> N
 
     assert checks[0]["status"] == "fail"
     assert "PCCSY-RD-CT-1-0076" in checks[0]["summary"]
-    assert "does not match the registry" in checks[0]["summary"]
+    assert "与台账中的" in checks[0]["summary"]
+    assert "不一致" in checks[0]["summary"]
     stop_watch = next(
         item
         for item in checks[0]["matches"]
@@ -693,6 +724,46 @@ def test_extracted_name_matches_registry_when_regexes_found_nothing() -> None:
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
     assert checks[0]["matches"][0]["matched_by"] == ["extracted_device_name"]
+
+
+def test_extracted_name_cannot_replace_previous_equipment_without_identity() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-0-0001",
+            "80508-2927",
+            description="CT System ACR Phantom",
+        ),
+        equipment(
+            "PHSZ-RD-VV-0-0034",
+            "804882-3881",
+            description="ACR Phantom",
+        ),
+    ]
+    content = review_content(
+        "The scan was completed successfully.",
+        description="Scan the second layer of the ACR Phantom.",
+        expected="The scan should be completed successfully.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["previously_matched_equipment_ids"] = ["PCCSY-RD-CT-0-0001"]
+
+    resolved, pending = apply_extracted_equipment(
+        content,
+        checks,
+        {
+            1: [
+                _extracted(
+                    device_name="ACR Phantom",
+                    source_text="Scan the second layer of the ACR Phantom.",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert resolved == set()
+    assert pending == {1: ["ACR Phantom"]}
+    assert checks[0]["matches"] == []
 
 
 def test_shared_name_with_identical_calibration_data_still_decides() -> None:
@@ -1347,6 +1418,84 @@ def test_first_pass_candidate_can_reuse_equipment_verified_in_a_prior_step() -> 
     assert remaining == []
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
+
+
+def test_first_pass_keeps_unresolved_previous_equipment_for_second_pass() -> None:
+    from app.services.equipment_pipeline import apply_first_pass_equipment_decisions
+
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-0-0001",
+            "80508-2927",
+            description="CT System ACR Phantom",
+        ),
+        equipment(
+            "PHSZ-RD-VV-0-0034",
+            "804882-3881",
+            description="ACR Phantom",
+        ),
+    ]
+    content = review_content(
+        "The scan was completed successfully.",
+        description="Scan the second layer of the ACR phantom.",
+        expected="The scan should be completed successfully.",
+    )
+    content["steps"][0]["reference_candidates"] = [
+        {
+            "candidate_id": "step-1-ref-1",
+            "type": "equipment",
+            "value": "PHSZ-RD-VV-0-0034",
+            "source_field": "description",
+            "detection_source": "equipment_registry_match",
+        }
+    ]
+    content["steps"][0]["reference_decisions"] = [
+        {
+            "candidate_id": "step-1-ref-1",
+            "role": "test_equipment",
+            "requires_check": True,
+            "reason": "The phantom is controlled test equipment.",
+        }
+    ]
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["previously_matched_equipment_ids"] = ["PCCSY-RD-CT-0-0001"]
+    question = OpenQuestion(
+        review_step=1,
+        kind="role",
+        description="Scan the second layer of the ACR phantom.",
+        expected="The scan should be completed successfully.",
+        actual="The scan was completed successfully.",
+        previously_matched_equipment_ids=("PCCSY-RD-CT-0-0001",),
+        candidates=tuple(Candidate.of(item) for item in registry),
+    )
+
+    remaining = apply_first_pass_equipment_decisions(
+        content, checks, [question], registry
+    )
+
+    assert remaining == [question]
+    assert checks[0]["required"] is False
+    assert checks[0]["status"] == "manual"
+    assert checks[0]["code"] == "equipment_role_ambiguous"
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": ["PCCSY-RD-CT-0-0001"],
+                "selected_equipment_names": ["CT System ACR Phantom"],
+                "reason": "The Step continues to use the previously recorded ACR phantom.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
+    assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-0-0001"
 
 
 def test_new_device_name_cannot_be_satisfied_only_by_a_previous_match() -> None:

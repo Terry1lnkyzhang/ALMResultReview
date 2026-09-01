@@ -1,0 +1,54 @@
+[
+  {
+    "input": {
+      "review_mode": "final",
+      "batch_index": 1,
+      "batch_count": 1,
+      "review_step": 2,
+      "description": "Verify slice thickness",
+      "expected": "The slice thickness is within tolerance and the test passes.",
+      "actual": "The measured result was within tolerance and passed.",
+      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34834", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
+      "batch_observations": [],
+      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-4", "text": "Slice thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed"}]}]
+    },
+    "output": {
+      "review_step": 2,
+      "status": "pass",
+      "description_coverage": "supported",
+      "expected_coverage": "supported",
+      "actual_coverage": "supported",
+      "result_consistency": "consistent",
+      "release_consistency": "not_checked",
+      "reviewed_report_ids": ["report-1"],
+      "evidence": [{"report_id": "report-1", "block_id": "block-4", "quote": "Slice thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed", "supports": ["description", "expected", "actual", "result"]}],
+      "reason": "引用的报告结果覆盖了该步骤，并支持通过结论。"
+    }
+  },
+  {
+    "input": {
+      "review_mode": "final",
+      "batch_index": 1,
+      "batch_count": 1,
+      "review_step": 3,
+      "description": "Verify reconstruction",
+      "expected": "All reconstruction checks pass.",
+      "actual": "The checks passed.",
+      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34835", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
+      "batch_observations": [],
+      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-8", "text": "Reconstruction check: Failed | Overall result: Passed"}]}]
+    },
+    "output": {
+      "review_step": 3,
+      "status": "fail",
+      "description_coverage": "supported",
+      "expected_coverage": "contradicted",
+      "actual_coverage": "contradicted",
+      "result_consistency": "inconsistent",
+      "release_consistency": "not_checked",
+      "reviewed_report_ids": ["report-1"],
+      "evidence": [{"report_id": "report-1", "block_id": "block-8", "quote": "Reconstruction check: Failed | Overall result: Passed", "supports": ["expected", "actual", "result"]}],
+      "reason": "一项必需的详细检查失败，与 Actual 以及整体 Passed 结论均不一致。"
+    }
+  }
+]

@@ -1,22 +1,26 @@
 [
   {
     "input": {"review_step": 1, "actual": "Measured with meter EQ-100.", "candidate_equipment": [{"equipment_id": "EQ-100", "description": "Digital meter"}], "extracted_device_names": []},
-    "output": {"review_step": 1, "role": "controlled_equipment", "required": true, "selected_equipment_ids": ["EQ-100"], "selected_equipment_names": [], "reason": "The referenced meter is a controlled measurement tool."}
+    "output": {"review_step": 1, "role": "controlled_equipment", "required": true, "selected_equipment_ids": ["EQ-100"], "selected_equipment_names": [], "reason": "引用的仪表是受控测量设备。"}
   },
   {
     "input": {"review_step": 2, "actual": "DUT serial is SN-42.", "candidate_equipment": [], "extracted_device_names": []},
-    "output": {"review_step": 2, "role": "dut_or_other", "required": false, "selected_equipment_ids": [], "selected_equipment_names": [], "reason": "The identifier is explicitly the DUT serial."}
+    "output": {"review_step": 2, "role": "dut_or_other", "required": false, "selected_equipment_ids": [], "selected_equipment_names": [], "reason": "该标识符明确属于 DUT 序列号。"}
   },
   {
     "input": {"review_step": 3, "actual": "Temperature recorded with a Digital Thermometer.", "candidate_equipment": [], "extracted_device_names": ["Digital Thermometer"]},
-    "output": {"review_step": 3, "role": "controlled_equipment", "required": true, "selected_equipment_ids": [], "selected_equipment_names": ["\u6570\u5b57\u6e29\u5ea6\u8ba1"], "reason": "The recorded device is the registry thermometer written in another language."}
+    "output": {"review_step": 3, "role": "controlled_equipment", "required": true, "selected_equipment_ids": [], "selected_equipment_names": ["\u6570\u5b57\u6e29\u5ea6\u8ba1"], "reason": "记录的设备是台账中以另一种语言书写的数字温度计。"}
   },
   {
     "input": {"review_step": 4, "description": "Check the stopwatch display time.", "actual": "Time was 53.66 seconds.", "previously_matched_equipment_ids": ["EQ-STOPWATCH"], "candidate_equipment": [{"equipment_id": "EQ-STOPWATCH", "description": "\u79d2\u8868"}], "registry_equipment_names": ["\u79d2\u8868"]},
-    "output": {"review_step": 4, "role": "controlled_equipment", "required": false, "selected_equipment_ids": ["EQ-STOPWATCH"], "selected_equipment_names": ["\u79d2\u8868"], "reason": "The stopwatch in the current Step is the previously recorded registry device named \u79d2\u8868."}
+    "output": {"review_step": 4, "role": "controlled_equipment", "required": false, "selected_equipment_ids": ["EQ-STOPWATCH"], "selected_equipment_names": ["\u79d2\u8868"], "reason": "当前步骤中的秒表是此前已记录的台账设备“秒表”。"}
   },
   {
     "input": {"review_step": 5, "description": "Disconnect and reconnect the ECG simulator, then disconnect one simulator cable.", "expected": "ECG Leads Disconnected displays.", "actual": "Disconnected RL/N cable; ECG Leads Disconnected displayed.", "previously_matched_equipment_ids": ["EQ-ECG"], "candidate_equipment": [{"equipment_id": "EQ-ECG", "description": "\u5fc3\u7535\u6a21\u62df\u5668"}], "registry_equipment_names": ["\u5fc3\u7535\u6a21\u62df\u5668"]},
-    "output": {"review_step": 5, "role": "controlled_equipment", "required": false, "selected_equipment_ids": ["EQ-ECG"], "selected_equipment_names": ["\u5fc3\u7535\u6a21\u62df\u5668"], "reason": "The Step explicitly operates the previously recorded ECG simulator, and Actual confirms the cable-disconnection result."}
+    "output": {"review_step": 5, "role": "controlled_equipment", "required": false, "selected_equipment_ids": ["EQ-ECG"], "selected_equipment_names": ["\u5fc3\u7535\u6a21\u62df\u5668"], "reason": "该步骤明确操作了此前记录的心电模拟器，Actual 确认了断开电缆的结果。"}
+  },
+  {
+    "input": {"review_step": 2, "description": "Scan the second layer of the ACR phantom.", "expected": "The scan should be completed successfully.", "actual": "The scan was completed successfully.", "previously_matched_equipment_ids": ["PCCSY-RD-CT-0-0001"], "candidate_equipment": [{"equipment_id": "PCCSY-RD-CT-0-0001", "description": "CT System ACR Phantom"}, {"equipment_id": "PHSZ-RD-VV-0-0034", "description": "ACR Phantom"}], "registry_equipment_names": ["CT System ACR Phantom", "ACR Phantom"]},
+    "output": {"review_step": 2, "role": "controlled_equipment", "required": false, "selected_equipment_ids": ["PCCSY-RD-CT-0-0001"], "selected_equipment_names": ["CT System ACR Phantom"], "reason": "\u8be5\u6b65\u9aa4\u7ee7\u7eed\u626b\u63cf\u524d\u4e00\u6b65\u5df2\u8bb0\u5f55\u7684 ACR \u6a21\u4f53\uff0cExpected \u672a\u8981\u6c42\u91cd\u590d\u8bb0\u5f55\u8bbe\u5907\u6807\u8bc6\u7b26\u3002"}
   }
 ]

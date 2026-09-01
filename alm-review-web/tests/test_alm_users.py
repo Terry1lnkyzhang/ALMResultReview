@@ -73,3 +73,64 @@ def test_alm_custom_field_name_is_resolved_from_its_label(monkeypatch) -> None:
     field_name = client.field_name_by_label("run", "Location")
 
     assert field_name == "user-07"
+
+
+def test_alm_image_attachments_use_run_step_entities_and_global_download(
+    monkeypatch,
+) -> None:
+    attachment_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<Entities TotalResults="1">
+  <Entity Type="attachment">
+    <Fields>
+      <Field Name="id"><Value>36083</Value></Field>
+      <Field Name="name"><Value>37411-Step1.JPG</Value></Field>
+      <Field Name="file-size"><Value>12</Value></Field>
+      <Field Name="parent-id"><Value>544363</Value></Field>
+      <Field Name="parent-type"><Value>run-step</Value></Field>
+    </Fields>
+  </Entity>
+</Entities>
+"""
+    image = b"\xff\xd8\xff" + b"test-image"
+    requested_requests: list[tuple[str, dict | None]] = []
+    client = AlmClient(
+        SimpleNamespace(
+            server_url="http://alm.example",
+            domain="DEFAULT",
+            project="PROJECT",
+        )
+    )
+
+    def fake_get(url, **kwargs):
+        requested_requests.append((url, kwargs.get("params")))
+        content = image if url.endswith("/attachments/36083") else attachment_xml
+        headers = {"content-type": "image/jpeg"} if content is image else {}
+        return httpx.Response(
+            200,
+            content=content,
+            headers=headers,
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(client.client, "get", fake_get)
+
+    attachments = client.image_attachments("544363")
+
+    assert requested_requests == [
+        (
+            "http://alm.example/qcbin/rest/domains/DEFAULT/projects/PROJECT/"
+            "run-steps/544363/attachments",
+            {"page-size": 100, "start-index": 1},
+        ),
+        (
+            "http://alm.example/qcbin/rest/domains/DEFAULT/projects/PROJECT/"
+            "attachments/36083",
+            None,
+        ),
+    ]
+    assert attachments[0]["attachment_id"] == "36083"
+    assert attachments[0]["name"] == "37411-Step1.JPG"
+    assert attachments[0]["mime_type"] == "image/jpeg"
+    assert attachments[0]["size_bytes"] == len(image)
+    assert len(attachments[0]["sha256"]) == 64
+    assert attachments[0]["data_url"].startswith("data:image/jpeg;base64,")
