@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models import AlmRun, AlmUser, ReviewJob, ReviewResult, RunRevision
+from app.models import AlmRun, AlmUser, ReviewJob, ReviewResult, RunRevision, RunStep
 from app.services.review_policy import current_review_policy_key
 from app.services.reviews import save_manual_decision
 from app.web import export_reviews, run_index
@@ -113,3 +113,74 @@ def test_export_includes_ai_result_and_manual_override() -> None:
         )
     )
     assert other_owner_rows == []
+
+
+def test_export_writes_step_text_as_plain_readable_blocks() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = AlmRun(
+            run_id=43,
+            test_id=8,
+            test_name="Exported test with steps",
+            test_set_name="Regression",
+            folder_path="Root / Export",
+            execution_location="Bay 5",
+            run_status="Passed",
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        revision = RunRevision(
+            run_id=run.run_id,
+            revision_number=1,
+            source_hash=run.source_hash,
+            review_hash=run.review_hash,
+            snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        run.current_revision_id = revision.id
+        db.add_all(
+            (
+                RunStep(
+                    revision_id=revision.id,
+                    step_id=1,
+                    step_order=1,
+                    name="Hide curve",
+                    status="Passed",
+                    description="<p>Hide Artery&nbsp; curve.</p>",
+                    expected="<div>The curve is hidden.</div>",
+                    actual="<div>Result passed.</div>",
+                ),
+                RunStep(
+                    revision_id=revision.id,
+                    step_id=2,
+                    step_order=2,
+                    name="Show curve",
+                    status="Passed",
+                    description="",
+                    expected="",
+                    actual="",
+                ),
+            )
+        )
+        db.commit()
+
+        response = export_reviews(status="all", tester="all", owner="all", query="", db=db)
+
+    rows = list(csv.DictReader(io.StringIO(response.body.decode("utf-8-sig"))))
+    assert len(rows) == 1
+    steps_text = rows[0]["steps"]
+
+    assert "<p>" not in steps_text
+    assert "&nbsp;" not in steps_text
+    assert "\xa0" not in steps_text
+    assert "Step 1 - Hide curve [Passed]" in steps_text
+    assert "Description: Hide Artery  curve." in steps_text
+    assert "Expected: The curve is hidden." in steps_text
+    assert "Actual: Result passed." in steps_text
+    assert "Step 2 - Show curve [Passed]" in steps_text
+    assert "Description: -" in steps_text

@@ -97,6 +97,7 @@ def current_review_policy_key(
         authoritative_skill_ids.append("equipment-role")
     policy = {
         "workspace_id": workspace.id,
+        "project": workspace.project,
         "engine_version": REVIEW_ENGINE_VERSION,
         "implementation_hash": _review_implementation_hash(),
         "ai_base_url": ai_config.base_url if ai_config else None,

@@ -362,6 +362,73 @@ def test_create_workspace_creates_independent_sync_and_evidence_configs() -> Non
         assert evidence_config.id is not None
 
 
+def test_create_workspace_copy_reuses_source_configuration() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source = Workspace(
+            name="Project A",
+            slug="project-a",
+            project="earth_kylin",
+            equipment_review_enabled=False,
+            equipment_area_filter="Lab 3",
+            queue_priority=25,
+        )
+        db.add(source)
+        db.flush()
+        db.add(
+            SyncConfig(
+                workspace_id=source.id,
+                name="Project A",
+                server_url="http://alm.example/qcbin",
+                domain="SY",
+                project="sy_vnv",
+                folder_id=1234,
+                folder_path="Testing / A",
+                schedule_hour=5,
+                schedule_minute=30,
+                enabled=True,
+            )
+        )
+        db.add(
+            EvidenceConfig(
+                workspace_id=source.id,
+                allowed_network_root="\\\\server\\share",
+                local_html_fallback_root="D:\\cache",
+                external_evidence_review_enabled=True,
+            )
+        )
+        db.commit()
+
+        create_workspace("Project B", db, mode="copy", source_workspace_id=source.id)
+
+        workspace = db.scalar(select(Workspace).where(Workspace.slug == "project-b"))
+        assert workspace is not None
+        assert workspace.project == "earth_kylin"
+        assert workspace.equipment_review_enabled is False
+        assert workspace.equipment_area_filter == "Lab 3"
+        assert workspace.queue_priority == 25
+        sync_config = db.scalar(
+            select(SyncConfig).where(SyncConfig.workspace_id == workspace.id)
+        )
+        assert sync_config is not None
+        assert sync_config.server_url == "http://alm.example/qcbin"
+        assert sync_config.domain == "SY"
+        assert sync_config.project == "sy_vnv"
+        assert sync_config.schedule_hour == 5
+        assert sync_config.schedule_minute == 30
+        assert sync_config.enabled is False
+        assert sync_config.folder_id == 0
+        assert sync_config.folder_path == ""
+        evidence_config = db.scalar(
+            select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
+        )
+        assert evidence_config is not None
+        assert evidence_config.allowed_network_root == "\\\\server\\share"
+        assert evidence_config.local_html_fallback_root == "D:\\cache"
+        assert evidence_config.external_evidence_review_enabled is True
+
+
 def test_pause_review_queue_preserves_existing_jobs() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -672,6 +739,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
                 request=request,
                 workspace_id=workspace.id,
                 workspace_name="Project A",
+                workspace_project="earth_kylin",
                 server_url="http://alm.example.test",
                 domain="domain",
                 project="project",
@@ -704,6 +772,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
         ai_config = db.get(AiConfig, 1)
         assert ai_config.review_concurrency == 4
         assert ai_config.api_key == "saved-key"
+        assert workspace.project == "earth_kylin"
         evidence_config = db.scalar(
             select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
         )

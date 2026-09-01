@@ -18,6 +18,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     f"id {identity}, "
                     "name VARCHAR(255) NOT NULL UNIQUE, "
                     "slug VARCHAR(128) NOT NULL UNIQUE, "
+                    "project VARCHAR(255) NOT NULL DEFAULT '', "
                     f"equipment_review_enabled {boolean_type} NOT NULL DEFAULT 1, "
                     "equipment_area_filter VARCHAR(255) NOT NULL DEFAULT '', "
                     f"legacy_policy_adopted {boolean_type} NOT NULL DEFAULT 0, "
@@ -40,12 +41,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     "BOOLEAN NOT NULL DEFAULT 0"
                 )
             )
-        workspace_queue_columns = {
+        workspace_added_columns = {
             "review_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
             "sync_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
             "queue_priority": "INTEGER NOT NULL DEFAULT 0",
+            "project": "VARCHAR(255) NOT NULL DEFAULT ''",
         }
-        for column_name, column_definition in workspace_queue_columns.items():
+        for column_name, column_definition in workspace_added_columns.items():
             if column_name not in workspace_columns:
                 connection.execute(
                     text(

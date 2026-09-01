@@ -357,6 +357,25 @@ def test_evidence_configuration_change_updates_review_policy() -> None:
         assert current_review_policy_key(db) != first_key
 
 
+def test_workspace_project_change_updates_review_policy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(
+            name="Project context",
+            slug="project-context",
+            project="earth_kylin",
+        )
+        db.add(workspace)
+        db.commit()
+        first_key = current_review_policy_key(db, workspace.id)
+
+        workspace.project = "kunpeng"
+        db.commit()
+
+        assert current_review_policy_key(db, workspace.id) != first_key
+
+
 def test_equipment_review_switch_updates_authoritative_policy() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

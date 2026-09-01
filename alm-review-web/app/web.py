@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import secrets
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session, load_only
 
 from app.config import PROJECT_DIR, get_settings
 from app.database import get_db
+from app.hashing import normalize_text
 from app.models import (
     AiConfig,
     AlmRun,
@@ -178,6 +180,8 @@ STATUS_LABELS = {
     "warning": "Has warning",
 }
 
+_SEARCH_WHITESPACE_RE = re.compile(r"\s+")
+
 
 def _redirect(path: str, message: str, kind: str = "success") -> RedirectResponse:
     separator = "&" if "?" in path else "?"
@@ -233,12 +237,59 @@ def _matches_status(item: dict, status: str) -> bool:
     return status == "all" or item["final_status"] == status
 
 
+def _flatten_step_text(value: str | None) -> str:
+    # ALM step fields are rich text, so tags and &nbsp; have to go before comparing.
+    return _SEARCH_WHITESPACE_RE.sub(" ", normalize_text(value)).strip().casefold()
+
+
+def _step_text_run_ids(
+    db: Session,
+    workspace_id: int,
+    include_legacy: bool,
+    query: str,
+) -> set[int]:
+    """Run ids whose current revision mentions the query in a step description, expected or actual."""
+    needle = _flatten_step_text(query)
+    if not needle:
+        return set()
+    # Narrow the LongText scan in SQL first; the longest token survives tag and entity noise.
+    token = max(needle.split(" "), key=len)
+    pattern = "%{}%".format(
+        token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    rows = db.execute(
+        select(AlmRun.run_id, RunStep.description, RunStep.expected, RunStep.actual)
+        .join(RunRevision, RunRevision.id == AlmRun.current_revision_id)
+        .join(RunStep, RunStep.revision_id == RunRevision.id)
+        .where(
+            or_(
+                AlmRun.workspace_id == workspace_id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            ),
+            or_(
+                RunStep.description.ilike(pattern, escape="\\"),
+                RunStep.expected.ilike(pattern, escape="\\"),
+                RunStep.actual.ilike(pattern, escape="\\"),
+            ),
+        )
+    ).all()
+    return {
+        run_id
+        for run_id, description, expected, actual in rows
+        if any(
+            needle in _flatten_step_text(field)
+            for field in (description, expected, actual)
+        )
+    }
+
+
 def _matches_dashboard_filters(
     item: dict,
     status: str,
     tester: str,
     owner: str,
     query: str,
+    step_text_run_ids: set[int] | None = None,
 ) -> bool:
     normalized_query = query.strip().casefold()
     return (
@@ -256,6 +307,10 @@ def _matches_dashboard_filters(
             or normalized_query in item["actual_tester_label"].casefold()
             or normalized_query in item["test_owner_label"].casefold()
             or normalized_query in item["review_summary"].casefold()
+            or (
+                step_text_run_ids is not None
+                and item["run"].run_id in step_text_run_ids
+            )
         )
     )
 
@@ -266,10 +321,12 @@ def _dashboard_filter_path(
     tester: str,
     owner: str,
     query: str,
+    search_steps: bool = False,
 ) -> str:
     return (
         f"/?workspace={workspace_id}&status={quote(status)}&tester={quote(tester)}"
         f"&owner={quote(owner)}&query={quote(query)}"
+        f"&search_steps={'1' if search_steps else '0'}"
     )
 
 
@@ -281,6 +338,7 @@ def _filtered_run_ids(
     tester: str,
     owner: str,
     query: str,
+    search_steps: bool = False,
 ) -> list[int]:
     runs = db.scalars(
         select(AlmRun)
@@ -294,6 +352,11 @@ def _filtered_run_ids(
     ).all()
     policy_key = current_review_policy_key(db, workspace_id)
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    step_matches = (
+        _step_text_run_ids(db, workspace_id, include_legacy, query)
+        if search_steps
+        else None
+    )
     return [
         item["run"].run_id
         for run in runs
@@ -303,6 +366,7 @@ def _filtered_run_ids(
             tester,
             owner,
             query,
+            step_matches,
         )
     ]
 
@@ -386,6 +450,23 @@ def _csv_value(value: Any) -> str:
     if text.lstrip().startswith(("=", "+", "-", "@")):
         return f"'{text}"
     return text
+
+
+def _format_steps_for_export(steps: list[RunStep]) -> str:
+    """Plain, human-readable step text for CSV -- rich text markup stripped, no JSON."""
+
+    def _plain(value: str) -> str:
+        # ALM's &nbsp; survives normalize_text as U+00A0; flatten it for a CSV reader.
+        return normalize_text(value).replace("\xa0", " ")
+
+    blocks = [
+        f"Step {step.step_order} - {step.name or 'Untitled'} [{step.status or 'n/a'}]\n"
+        f"Description: {_plain(step.description) or '-'}\n"
+        f"Expected: {_plain(step.expected) or '-'}\n"
+        f"Actual: {_plain(step.actual) or '-'}"
+        for step in steps
+    ]
+    return "\n\n".join(blocks)
 
 
 def _optional_date(value: str) -> date | None:
@@ -494,6 +575,8 @@ def dashboard(
     tester: str = Query(default="all"),
     owner: str = Query(default="all"),
     query: str = Query(default=""),
+    search_steps: bool = Query(default=False),
+    project: str = Query(default="all"),
     workspace: int | None = None,
     db: Session = Depends(get_db),
 ):
@@ -504,6 +587,21 @@ def dashboard(
         .where(Workspace.archived.is_(False))
         .order_by(Workspace.name)
     ).all()
+    project_options = sorted(
+        {item.project for item in workspaces},
+        key=lambda name: (name == "", name.casefold()),
+    )
+    selected_project = project if project in project_options else "all"
+    workspace_options = [
+        item
+        for item in workspaces
+        if selected_project == "all" or item.project == selected_project
+    ]
+    if workspace_options and all(
+        item.id != current_workspace.id for item in workspace_options
+    ):
+        current_workspace = workspace_options[0]
+        include_legacy = False
     runs = db.scalars(
         select(AlmRun)
         .options(
@@ -562,10 +660,15 @@ def dashboard(
     status_counts = Counter(item["final_status"] for item in all_views)
     status_counts["force_qualified"] = sum(item["force_qualified"] for item in all_views)
     status_counts["warning"] = sum(item["has_warning"] for item in all_views)
+    step_matches = (
+        _step_text_run_ids(db, current_workspace.id, include_legacy, query)
+        if search_steps
+        else None
+    )
     tester_scope = [
         item
         for item in all_views
-        if _matches_dashboard_filters(item, status, "all", owner, query)
+        if _matches_dashboard_filters(item, status, "all", owner, query, step_matches)
     ]
     tester_counts = Counter(
         item["run"].actual_tester or "Unassigned" for item in tester_scope
@@ -573,7 +676,7 @@ def dashboard(
     owner_scope = [
         item
         for item in all_views
-        if _matches_dashboard_filters(item, status, tester, "all", query)
+        if _matches_dashboard_filters(item, status, tester, "all", query, step_matches)
     ]
     owner_counts = Counter(
         item["run"].test_owner or "Unassigned" for item in owner_scope
@@ -582,7 +685,7 @@ def dashboard(
     filtered = [
         item
         for item in all_views
-        if _matches_dashboard_filters(item, status, tester, owner, query)
+        if _matches_dashboard_filters(item, status, tester, owner, query, step_matches)
     ]
     max_tester_count = max(tester_counts.values(), default=1)
     max_owner_count = max(owner_counts.values(), default=1)
@@ -696,6 +799,10 @@ def dashboard(
         context={
             "runs": filtered,
             "workspaces": workspaces,
+            "workspace_options": workspace_options,
+            "project_options": project_options,
+            "selected_project": selected_project,
+            "current_project": current_workspace.project,
             "current_workspace": current_workspace,
             "total_runs": len(all_views),
             "status_counts": status_counts,
@@ -714,6 +821,7 @@ def dashboard(
             "selected_tester": tester,
             "selected_owner": owner,
             "query": query,
+            "search_steps": search_steps,
             "review_job_counts": review_job_counts,
             "queue_overview": queue_overview,
             "queued_review_preview": queued_review_preview,
@@ -862,6 +970,7 @@ def export_reviews(
     tester: str = Query(default="all"),
     owner: str = Query(default="all"),
     query: str = Query(default=""),
+    search_steps: bool = Query(default=False),
     workspace: int | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
@@ -879,6 +988,11 @@ def export_reviews(
     ).all()
     policy_key = current_review_policy_key(db, current_workspace.id)
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    step_matches = (
+        _step_text_run_ids(db, current_workspace.id, include_legacy, query)
+        if search_steps
+        else None
+    )
     views = [
         item
         for run in runs
@@ -888,8 +1002,23 @@ def export_reviews(
             tester,
             owner,
             query,
+            step_matches,
         )
     ]
+
+    revision_ids = {
+        item["run"].current_revision_id
+        for item in views
+        if item["run"].current_revision_id is not None
+    }
+    steps_by_revision: dict[int, list[RunStep]] = {}
+    if revision_ids:
+        for step in db.scalars(
+            select(RunStep)
+            .where(RunStep.revision_id.in_(revision_ids))
+            .order_by(RunStep.revision_id, RunStep.step_order, RunStep.id)
+        ).all():
+            steps_by_revision.setdefault(step.revision_id, []).append(step)
 
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -912,6 +1041,7 @@ def export_reviews(
             "ai_verdict",
             "final_status",
             "issue_summary",
+            "steps",
             "criteria_json",
             "step_results_json",
             "warnings_json",
@@ -949,6 +1079,9 @@ def export_reviews(
                 result.verdict if result else None,
                 review.final_status,
                 result.issue_summary if result else None,
+                _format_steps_for_export(
+                    steps_by_revision.get(run.current_revision_id, [])
+                ),
                 result.criteria_json if result else None,
                 result.step_results_json if result else None,
                 result.warnings_json if result else None,
@@ -1406,12 +1539,15 @@ def rereview_filtered_runs(
     tester: str = Form(default="all"),
     owner: str = Form(default="all"),
     query: str = Form(default=""),
+    search_steps: bool = Form(default=False),
     db: Session = Depends(get_db),
     workspace_id: int | None = Form(None),
 ):
     include_legacy = workspace_id is None
     workspace = resolve_workspace(db, workspace_id)
-    redirect_path = _dashboard_filter_path(workspace.id, status, tester, owner, query)
+    redirect_path = _dashboard_filter_path(
+        workspace.id, status, tester, owner, query, search_steps
+    )
     ai_config = db.get(AiConfig, 1)
     if ai_config is None or not ai_config.enabled:
         return _redirect(
@@ -1420,7 +1556,7 @@ def rereview_filtered_runs(
             "error",
         )
     run_ids = _filtered_run_ids(
-        db, workspace.id, include_legacy, status, tester, owner, query
+        db, workspace.id, include_legacy, status, tester, owner, query, search_steps
     )
     result = queue_rereviews_for_run_ids(db, run_ids, workspace.id)
     message = (
@@ -1440,12 +1576,15 @@ def sync_and_review_filtered_runs(
     tester: str = Form(default="all"),
     owner: str = Form(default="all"),
     query: str = Form(default=""),
+    search_steps: bool = Form(default=False),
     db: Session = Depends(get_db),
     workspace_id: int | None = Form(None),
 ):
     include_legacy = workspace_id is None
     workspace = resolve_workspace(db, workspace_id)
-    redirect_path = _dashboard_filter_path(workspace.id, status, tester, owner, query)
+    redirect_path = _dashboard_filter_path(
+        workspace.id, status, tester, owner, query, search_steps
+    )
     if workspace_sync_config(db, workspace.id) is None:
         return _redirect(
             redirect_path,
@@ -1460,7 +1599,7 @@ def sync_and_review_filtered_runs(
             "error",
         )
     run_ids = _filtered_run_ids(
-        db, workspace.id, include_legacy, status, tester, owner, query
+        db, workspace.id, include_legacy, status, tester, owner, query, search_steps
     )
     result = queue_run_sync_jobs(db, run_ids, workspace.id)
     message = (
@@ -1717,11 +1856,24 @@ def configuration(
             .limit(1)
         )
     )
+    # A source field only locks once it holds a value, so blanks stay fillable.
+    locked_source_fields = {
+        "server_url": source_locked and bool(sync_config and sync_config.server_url.strip()),
+        "domain": source_locked and bool(sync_config and sync_config.domain.strip()),
+        "project": source_locked and bool(sync_config and sync_config.project.strip()),
+        "folder_id": source_locked and bool(sync_config and sync_config.folder_id),
+    }
     equipment_areas = db.scalars(
         select(EquipmentRegistry.subordinate_area)
         .where(EquipmentRegistry.subordinate_area != "")
         .distinct()
         .order_by(EquipmentRegistry.subordinate_area)
+    ).all()
+    project_options = db.scalars(
+        select(Workspace.project)
+        .where(Workspace.project != "", Workspace.archived.is_(False))
+        .distinct()
+        .order_by(Workspace.project)
     ).all()
     return templates.TemplateResponse(
         request=request,
@@ -1731,7 +1883,9 @@ def configuration(
             "workspaces": workspaces,
             "current_workspace": current_workspace,
             "source_locked": source_locked,
+            "locked_source_fields": locked_source_fields,
             "equipment_areas": equipment_areas,
+            "project_options": project_options,
             "ai_config": ai_config,
             "evidence_config": evidence_config,
             "prompt": prompt,
@@ -1792,6 +1946,7 @@ def save_configuration(
     request: Request,
     workspace_id: int = Form(...),
     workspace_name: str = Form(...),
+    workspace_project: str = Form(""),
     server_url: str = Form(...),
     domain: str = Form(...),
     project: str = Form(...),
@@ -1825,7 +1980,23 @@ def save_configuration(
     redirect_path = f"/ops/configuration?workspace={workspace.id}"
     if not 0 <= schedule_hour <= 23 or not 0 <= schedule_minute <= 59:
         return _redirect(redirect_path, "Invalid schedule time.", "error")
-    workspace.name = workspace_name.strip()
+    normalized_workspace_name = workspace_name.strip()
+    if not normalized_workspace_name:
+        return _redirect(redirect_path, "Workspace name is required.", "error")
+    duplicate_name = db.scalar(
+        select(Workspace.id).where(
+            Workspace.id != workspace.id,
+            func.lower(Workspace.name) == normalized_workspace_name.casefold(),
+        )
+    )
+    if duplicate_name is not None:
+        return _redirect(
+            redirect_path,
+            f"Another Workspace is already named {normalized_workspace_name}.",
+            "error",
+        )
+    workspace.name = normalized_workspace_name
+    workspace.project = workspace_project.strip()
     workspace.equipment_review_enabled = equipment_review_enabled
     workspace.equipment_area_filter = equipment_area_filter.strip()
     workspace.review_queue_paused = review_queue_paused
@@ -1861,7 +2032,12 @@ def save_configuration(
         sync_config.project.casefold(),
         sync_config.folder_id,
     )
-    if source_locked and proposed_source != current_source:
+    # Only a source value that was already set is protected; blanks stay fillable.
+    locked_change = source_locked and any(
+        current and proposed != current
+        for proposed, current in zip(proposed_source, current_source, strict=True)
+    )
+    if locked_change:
         db.rollback()
         return _redirect(
             redirect_path,
@@ -1997,10 +2173,37 @@ def update_workspace_queue(
 def create_workspace(
     name: str = Form(...),
     db: Session = Depends(get_db),
+    mode: str = Form("empty"),
+    source_workspace_id: int | None = Form(None),
 ):
     normalized_name = name.strip()
     if not normalized_name:
         return _redirect("/ops/configuration", "Workspace name is required.", "error")
+    if db.scalar(
+        select(Workspace.id).where(
+            func.lower(Workspace.name) == normalized_name.casefold()
+        )
+    ) is not None:
+        return _redirect(
+            "/ops/configuration",
+            f"A Workspace named {normalized_name} already exists.",
+            "error",
+        )
+    source: Workspace | None = None
+    if mode == "copy":
+        source = (
+            db.get(Workspace, source_workspace_id)
+            if source_workspace_id is not None
+            else None
+        )
+        if source is None or source.archived:
+            return _redirect(
+                "/ops/configuration",
+                "The Workspace to copy was not found.",
+                "error",
+            )
+    source_sync = workspace_sync_config(db, source.id) if source else None
+    source_evidence = workspace_evidence_config(db, source.id) if source else None
     base_slug = workspace_slug(normalized_name)
     slug = base_slug
     suffix = 2
@@ -2010,8 +2213,10 @@ def create_workspace(
     workspace = Workspace(
         name=normalized_name,
         slug=slug,
-        equipment_review_enabled=True,
-        equipment_area_filter="",
+        project=source.project if source else "",
+        equipment_review_enabled=source.equipment_review_enabled if source else True,
+        equipment_area_filter=source.equipment_area_filter if source else "",
+        queue_priority=source.queue_priority if source else 0,
         archived=False,
     )
     db.add(workspace)
@@ -2020,20 +2225,42 @@ def create_workspace(
         SyncConfig(
             workspace_id=workspace.id,
             name=normalized_name,
-            server_url="",
-            domain="",
-            project="",
+            server_url=source_sync.server_url if source_sync else "",
+            domain=source_sync.domain if source_sync else "",
+            project=source_sync.project if source_sync else "",
+            # The Test Lab root stays empty so the copy points at a different folder.
             folder_id=0,
             folder_path="",
+            schedule_hour=source_sync.schedule_hour if source_sync else 2,
+            schedule_minute=source_sync.schedule_minute if source_sync else 0,
             enabled=False,
         )
     )
-    db.add(EvidenceConfig(workspace_id=workspace.id))
-    db.commit()
-    return _redirect(
-        f"/ops/configuration?workspace={workspace.id}",
-        f"Workspace {workspace.name} created. Configure its ALM source before syncing.",
+    db.add(
+        EvidenceConfig(
+            workspace_id=workspace.id,
+            allowed_network_root=(
+                source_evidence.allowed_network_root if source_evidence else ""
+            ),
+            local_html_fallback_root=(
+                source_evidence.local_html_fallback_root if source_evidence else ""
+            ),
+            external_evidence_review_enabled=(
+                source_evidence.external_evidence_review_enabled
+                if source_evidence
+                else False
+            ),
+        )
     )
+    db.commit()
+    message = (
+        f"Workspace {workspace.name} created from {source.name}. "
+        "Set its Test Lab root folder before syncing."
+        if source
+        else f"Workspace {workspace.name} created. "
+        "Configure its ALM source before syncing."
+    )
+    return _redirect(f"/ops/configuration?workspace={workspace.id}", message)
 
 
 @router.get("/api/health")

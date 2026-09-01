@@ -320,6 +320,9 @@ class Workspace(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     slug: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    project: Mapped[str] = mapped_column(
+        String(255), default="", nullable=False, index=True
+    )
     equipment_review_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )

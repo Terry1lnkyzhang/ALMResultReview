@@ -3,12 +3,15 @@
 {% block content %}
 <section class="page-heading">
   <div>
-    <p class="eyebrow">{{ current_workspace.name|upper }} / RECURSIVE SCOPE</p>
+    <p class="eyebrow">{{ (current_project or 'NO PROJECT')|upper }} / {{ current_workspace.name|upper }} / RECURSIVE SCOPE</p>
     <h1>Review Dashboard</h1>
     <p class="subtle">Current ALM revisions and their final review decisions.</p>
   </div>
   <div class="actions">
-    <form method="get" action="/"><label class="workspace-switcher"><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspaces %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label></form>
+    <form class="workspace-scope" method="get" action="/">
+      <label class="workspace-switcher"><span>Project</span><select name="project" onchange="this.form.submit()"><option value="all" {% if selected_project == 'all' %}selected{% endif %}>All projects</option>{% for option in project_options %}<option value="{{ option }}" {% if selected_project == option %}selected{% endif %}>{{ option or 'Unassigned' }}</option>{% endfor %}</select></label>
+      <label class="workspace-switcher"><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspace_options %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label>
+    </form>
     <nav class="page-links" aria-label="Workspace pages">
       <a href="/ops/configuration?workspace={{ current_workspace.id }}">Configuration</a>
       <a href="/ops/equipment">Equipment registry</a>
@@ -261,7 +264,8 @@
   <div class="main-workspace">
     <form class="filterbar" method="get">
       <input type="hidden" name="workspace" value="{{ current_workspace.id }}">
-      <label class="search-field"><span>Search</span><input type="search" name="query" value="{{ query }}" placeholder="Run, Test Case, name or path"></label>
+      <input type="hidden" name="project" value="{{ selected_project }}">
+      <label class="search-field"><span>Search</span><div class="search-input-row"><input type="search" name="query" value="{{ query }}" placeholder="Run, Test Case, name or path"><label class="search-steps-toggle" title="Also match the Description, Expected and Actual text of every step in the current revision. Slower on large workspaces."><input type="checkbox" name="search_steps" value="1" {% if search_steps %}checked{% endif %}><span>Steps</span></label></div></label>
       <label><span>Status</span><select name="status">
         <option value="all" {% if selected_status == 'all' %}selected{% endif %}>All statuses</option>
         {% for value, label in status_labels.items() %}<option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
@@ -275,7 +279,7 @@
         {% for code1_id, label, count in owner_counts %}<option value="{{ code1_id }}" {% if selected_owner == code1_id %}selected{% endif %}>{{ label }} &middot; {{ count }}</option>{% endfor %}
       </select></label>
       <button class="button secondary" type="submit">Apply</button>
-      <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}">Export CSV</a>
+      <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export CSV</a>
     </form>
     <div class="table-heading">
       <h2>Runs</h2>
@@ -287,6 +291,7 @@
           <input type="hidden" name="tester" value="{{ selected_tester }}">
           <input type="hidden" name="owner" value="{{ selected_owner }}">
           <input type="hidden" name="query" value="{{ query }}">
+          <input type="hidden" name="search_steps" value="{{ 1 if search_steps else 0 }}">
           <button class="button secondary" type="submit">Sync ALM &amp; review</button>
         </form>
         <form method="post" action="/actions/rereview-filtered" onsubmit="return confirm('Queue AI review for the {{ runs|length }} filtered Runs?');">
@@ -295,6 +300,7 @@
           <input type="hidden" name="tester" value="{{ selected_tester }}">
           <input type="hidden" name="owner" value="{{ selected_owner }}">
           <input type="hidden" name="query" value="{{ query }}">
+          <input type="hidden" name="search_steps" value="{{ 1 if search_steps else 0 }}">
           <button class="button primary" type="submit">Review these Runs</button>
         </form>
       </div>

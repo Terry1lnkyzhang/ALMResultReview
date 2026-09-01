@@ -75,6 +75,7 @@ class AlmTextReviewStep(ReviewTextStep):
 class AlmTextReviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    project: str = ""
     steps: list[AlmTextReviewStep] = Field(min_length=1)
 
 

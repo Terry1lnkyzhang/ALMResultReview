@@ -127,6 +127,7 @@ class ReviewContext:
     content: dict[str, Any]
     evidence_config: EvidenceConfig | None
     equipment_enabled: bool
+    project: str = ""
     equipment_registry: list[EquipmentRegistry] = field(default_factory=list)
     equipment_checks: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[OpenQuestion] = field(default_factory=list)
@@ -1342,6 +1343,7 @@ def _apply_reference_routing(content: dict[str, Any]) -> None:
 def _run_text_semantic_skills(
     ai_config: AiConfig,
     content: dict[str, Any],
+    project: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     steps = _text_skill_steps(content)
     truncated_steps: set[int] = set()
@@ -1369,7 +1371,7 @@ def _run_text_semantic_skills(
     for batch in _text_skill_batches(payloads):
         trace = skill_runner.run(
             "alm-text-review",
-            {"steps": batch},
+            {"project": project, "steps": batch},
             endpoint=_completion_url(ai_config.base_url),
             model_name=ai_config.model_name,
             headers=_ai_headers(ai_config),
@@ -1547,7 +1549,11 @@ def _prepare_stage(ctx: ReviewContext) -> None:
 
 
 def _text_review_stage(ctx: ReviewContext) -> dict[str, Any]:
-    ctx.text_result, traces = _run_text_semantic_skills(ctx.ai_config, ctx.content)
+    ctx.text_result, traces = _run_text_semantic_skills(
+        ctx.ai_config,
+        ctx.content,
+        ctx.project,
+    )
     ctx.content["text_skill_traces"] = traces
     ctx.raw_response = json.dumps(
         {trace["skill_id"]: trace["output"] for trace in traces},
@@ -1842,6 +1848,7 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
     ctx = ReviewContext(
         ai_config=ai_config,
         content=review_payload(snapshot),
+        project=workspace.project,
         evidence_config=workspace_evidence_config(db, workspace.id),
         equipment_enabled=workspace.equipment_review_enabled,
         equipment_registry=equipment_registry,

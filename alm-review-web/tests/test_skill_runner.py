@@ -64,7 +64,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.4.0"
+    assert definition.version == "1.5.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -72,14 +72,14 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.4.0",
+        "alm-text-review": "1.5.0",
         "equipment-role": "1.3.1",
         "image-evidence-review": "1.1.0",
     }
@@ -152,7 +152,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.4.0"
+    assert trace["skill_version"] == "1.5.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64

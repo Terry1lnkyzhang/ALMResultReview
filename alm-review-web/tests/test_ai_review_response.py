@@ -378,6 +378,57 @@ def test_not_applicable_step_drops_text_findings(monkeypatch) -> None:
     ]
 
 
+def test_text_review_sends_workspace_project_context(monkeypatch) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "This step not for Earth.",
+                "expected": "Timing shall be no more than 1s.",
+                "actual": "This step not for Earth.",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [],
+            }
+        ],
+    }
+    supplied_inputs = []
+
+    def post(*_args, **kwargs):
+        supplied_inputs.append(json.loads(kwargs["json"]["messages"][1]["content"]))
+        return IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "not_applicable",
+                            "findings": [],
+                            "reference_decisions": [],
+                            "summary": "The configured project contains Earth.",
+                        }
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", post)
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+        project="earth_kylin",
+    )
+
+    assert len(supplied_inputs) == 1
+    assert supplied_inputs[0]["project"] == "earth_kylin"
+    assert supplied_inputs[0]["steps"][0]["description"] == (
+        "This step not for Earth."
+    )
+    assert parsed["step_results"][0]["applicability"] == "not_applicable"
+
+
 def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> None:
     content = {
         "review_plan": {"text_steps": [1]},

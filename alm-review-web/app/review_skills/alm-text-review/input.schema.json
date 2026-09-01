@@ -2,8 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["steps"],
+  "required": ["project", "steps"],
   "properties": {
+    "project": {
+      "type": "string",
+      "description": "Trusted Workspace project identifier for the execution under review, such as earth_kylin."
+    },
     "steps": {
       "type": "array",
       "minItems": 1,
