@@ -1,0 +1,250 @@
+.insights-heading {
+  margin-bottom: 18px;
+}
+
+.insights-actions {
+  align-items: flex-end;
+}
+
+.insights-nav {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.insights-nav a {
+  padding: 10px 2px;
+  border-bottom: 3px solid transparent;
+  color: var(--muted);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.insights-nav a.active {
+  border-bottom-color: var(--teal);
+  color: var(--ink);
+}
+
+.insights-advisory {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 16px;
+  border-left: 4px solid var(--amber);
+  background: var(--amber-soft);
+  color: #6f4708;
+}
+
+.insights-advisory span {
+  font-size: 13px;
+}
+
+.insights-coverage,
+.insights-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 18px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.insights-coverage div,
+.insights-metrics div {
+  min-width: 0;
+  padding: 15px 18px;
+  border-right: 1px solid var(--line);
+}
+
+.insights-coverage div:last-child,
+.insights-metrics div:last-child {
+  border-right: 0;
+}
+
+.insights-coverage span,
+.insights-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.insights-coverage strong,
+.insights-metrics strong {
+  display: block;
+  margin-top: 5px;
+  font: 700 26px "Bahnschrift", "Trebuchet MS", sans-serif;
+}
+
+.insights-coverage {
+  background: #edf2f1;
+}
+
+.insights-coverage strong {
+  font-size: 19px;
+}
+
+.insights-metrics .attention strong {
+  color: var(--amber);
+}
+
+.insights-list-section,
+.insights-unresolved-section {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.insights-filterbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: end;
+  gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  background: #f3f5f5;
+}
+
+.insights-filterbar label {
+  display: grid;
+  gap: 5px;
+}
+
+.insights-filterbar label span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.insights-filterbar input {
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid #bec9ce;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.insights-list-section > .table-heading,
+.insights-unresolved-section > .table-heading {
+  padding: 16px 20px 10px;
+}
+
+.insights-table th,
+.insights-table td {
+  vertical-align: top;
+}
+
+.insights-table td > strong,
+.insights-table td > span,
+.insights-table td > small,
+.unresolved-table td > small {
+  display: block;
+}
+
+.insights-table td > span {
+  margin-top: 3px;
+}
+
+.insights-table td > small,
+.unresolved-table td > small {
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.usage-references {
+  min-width: 240px;
+}
+
+.usage-references summary {
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.usage-references > div {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.usage-references a {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--teal);
+  background: var(--teal-soft);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.usage-references a:hover {
+  filter: brightness(.97);
+}
+
+.usage-references a span,
+.usage-references a small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.section-note {
+  margin: 0;
+  padding: 0 20px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.unresolved-table td:first-child strong {
+  color: var(--amber);
+}
+
+.unresolved-table a {
+  color: var(--ink);
+  font-weight: 700;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 900px) {
+  .insights-coverage,
+  .insights-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .insights-coverage div:nth-child(2),
+  .insights-metrics div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .insights-coverage div:nth-child(-n + 2),
+  .insights-metrics div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 700px) {
+  .insights-actions,
+  .insights-advisory {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .insights-actions .workspace-select-form,
+  .insights-actions .button,
+  .insights-actions select {
+    width: 100%;
+  }
+
+  .insights-filterbar {
+    grid-template-columns: 1fr;
+  }
+
+  .insights-filterbar .button {
+    width: 100%;
+  }
+}

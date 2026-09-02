@@ -192,6 +192,19 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     text(f"CREATE INDEX {index_name} ON {table_name} (workspace_id)")
                 )
 
+        if "sync_configs" in table_names:
+            columns = {
+                column["name"]
+                for column in inspect(connection).get_columns("sync_configs")
+            }
+            if "auto_review_after_sync" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE sync_configs ADD COLUMN "
+                        f"auto_review_after_sync {boolean_type} NOT NULL DEFAULT 0"
+                    )
+                )
+
         if "review_jobs" in table_names:
             columns = {column["name"] for column in inspector.get_columns("review_jobs")}
             if "batch_id" not in columns:

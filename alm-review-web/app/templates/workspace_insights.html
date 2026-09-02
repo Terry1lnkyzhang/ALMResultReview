@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Workspace Insights{% endblock %}
+{% block content %}
+<a class="back-link" href="/?workspace={{ current_workspace.id }}">&larr; Dashboard</a>
+<section class="page-heading insights-heading">
+  <div>
+    <p class="eyebrow">WORKSPACE INSIGHTS / {{ current_workspace.name|upper }}</p>
+    <h1>Used equipment</h1>
+    <p class="subtle">Controlled equipment confirmed in current Run revisions and their active reviews.</p>
+  </div>
+  <div class="actions insights-actions">
+    <form class="workspace-select-form" method="get">
+      <label><span>Workspace</span><select name="workspace" onchange="this.form.submit()">{% for workspace in workspaces %}<option value="{{ workspace.id }}" {% if workspace.id == current_workspace.id %}selected{% endif %}>{{ workspace.name }}</option>{% endfor %}</select></label>
+    </form>
+    <a class="button secondary button-link" href="/exports/equipment-usage.csv?workspace={{ current_workspace.id }}">Export usage CSV</a>
+  </div>
+</section>
+
+<nav class="insights-nav" aria-label="Insight views">
+  <a class="active" href="/insights/equipment?workspace={{ current_workspace.id }}">Used equipment</a>
+</nav>
+
+{% if metrics.stale_review_runs %}
+<section class="insights-advisory">
+  <strong>{{ metrics.stale_review_runs }} Run{% if metrics.stale_review_runs != 1 %}s{% endif %} use earlier review settings.</strong>
+  <span>Their recorded equipment usage remains included and may change after re-review.</span>
+</section>
+{% endif %}
+
+<section class="insights-coverage" aria-label="Data coverage">
+  <div><span>Current Runs</span><strong>{{ metrics.total_runs }}</strong></div>
+  <div><span>Reviewed</span><strong>{{ metrics.reviewed_runs }}</strong></div>
+  <div><span>Equipment analyzed</span><strong>{{ metrics.analyzed_runs }}</strong></div>
+  <div><span>Not covered</span><strong>{{ metrics.uncovered_runs }}</strong></div>
+</section>
+
+<section class="insights-metrics" aria-label="Equipment usage totals">
+  <div><span>Unique devices</span><strong>{{ metrics.unique_devices }}</strong></div>
+  <div><span>Runs using equipment</span><strong>{{ metrics.runs_using_equipment }}</strong></div>
+  <div><span>Usage records</span><strong>{{ metrics.usage_records }}</strong></div>
+  <div class="attention"><span>Unresolved references</span><strong>{{ metrics.unresolved_references }}</strong></div>
+</section>
+
+<section class="insights-list-section">
+  <form class="insights-filterbar" method="get">
+    <input type="hidden" name="workspace" value="{{ current_workspace.id }}">
+    <label><span>Search usage</span><input type="search" name="query" value="{{ query }}" placeholder="Equipment ID, device, model, serial, Run or Test Case"></label>
+    <button class="button secondary" type="submit">Search</button>
+    {% if query %}<a class="button secondary button-link" href="/insights/equipment?workspace={{ current_workspace.id }}">Clear</a>{% endif %}
+  </form>
+  <div class="table-heading">
+    <h2>Confirmed equipment</h2>
+    <span>{{ devices|length }} shown{% if query %} for “{{ query }}”{% endif %}</span>
+  </div>
+  <div class="table-scroll">
+    <table class="insights-table">
+      <thead><tr><th>Equipment</th><th>Model / Serial</th><th>Review-time registry snapshot</th><th>Usage</th><th>Run / Step references</th></tr></thead>
+      <tbody>
+      {% for item in devices %}
+        <tr>
+          <td><strong>{{ item.equipment_id or item.registry_reference }}</strong><span>{{ item.description or 'No description' }}</span>{% if item.manufacturer %}<small>{{ item.manufacturer }}</small>{% endif %}</td>
+          <td><span>{{ item.model_number or 'No model' }}</span><small>SN: {{ item.serial_number or 'Not recorded' }}</small></td>
+          <td><span>{{ item.equipment_status or 'Status not recorded' }}</span><small>{% if item.calibration_date or item.calibration_due_date %}Calibration {{ item.calibration_date or '?' }} to {{ item.calibration_due_date or '?' }}{% else %}Calibration dates not recorded{% endif %}</small></td>
+          <td><strong>{{ item.run_count }} Run{% if item.run_count != 1 %}s{% endif %} / {{ item.step_count }} Step{% if item.step_count != 1 %}s{% endif %}</strong><small>{% if item.first_used %}{{ item.first_used }}{% if item.last_used != item.first_used %} to {{ item.last_used }}{% endif %}{% else %}Execution date unavailable{% endif %}</small></td>
+          <td>
+            <details class="usage-references"><summary>{{ item.references|length }} reference{% if item.references|length != 1 %}s{% endif %}</summary><div>{% for reference in item.references %}<a href="/runs/{{ reference.run_id }}"><strong>Run #{{ reference.alm_run_id }}</strong><span>Step {{ reference.step }} · TC {{ reference.test_id or '-' }}{% if reference.execution_date %} · {{ reference.execution_date }}{% endif %}</span><small>{{ reference.test_name or 'Unnamed test' }}{% if reference.matched_by %} · {{ reference.matched_by|join(', ') }}{% endif %}</small></a>{% endfor %}</div></details>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td class="empty-table" colspan="5">{% if query %}No confirmed equipment matches this search.{% elif metrics.analyzed_runs %}No controlled equipment was confirmed in the analyzed Runs.{% else %}No current review includes equipment analysis yet.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="insights-unresolved-section">
+  <div class="table-heading"><h2>Unresolved equipment references</h2><span>{{ unresolved|length }} shown</span></div>
+  <p class="section-note">These references are not counted as confirmed devices. Open the Run to inspect the original Step and review finding.</p>
+  <div class="table-scroll">
+    <table class="insights-table unresolved-table">
+      <thead><tr><th>Reference</th><th>Finding</th><th>Run / Step</th><th>Executed</th></tr></thead>
+      <tbody>{% for item in unresolved %}<tr><td><strong>{{ item.identifiers|join(', ') or 'Identity not recorded' }}</strong><small>{{ item.code|replace('_', ' ') }}</small></td><td>{{ item.summary or 'Equipment identity requires review.' }}</td><td><a href="/runs/{{ item.run_id }}">Run #{{ item.alm_run_id }} · Step {{ item.step }}</a><small>TC {{ item.test_id or '-' }} · {{ item.test_name or 'Unnamed test' }}</small></td><td>{{ item.execution_date or '-' }}</td></tr>{% else %}<tr><td class="empty-table" colspan="4">{% if query %}No unresolved references match this search.{% else %}No unresolved equipment references were found.{% endif %}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

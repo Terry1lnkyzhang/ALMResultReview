@@ -104,6 +104,13 @@ Worker claims use database row locks and expiring leases so two Workers cannot n
 process the same job and interrupted work can be retried. Restart the Worker after changing
 the configured daily schedule so it reloads the Cron trigger.
 
+`Enable daily sync` creates the Workspace's scheduled ALM synchronization. When
+`Auto-review after scheduled sync` is also enabled, a successful scheduled folder sync queues
+both Runs whose review content was added or changed by that sync and completed Runs marked
+`Review update recommended` because they use an older review policy. Manual decisions and
+already queued or running Reviews are preserved. Manual Sync and Full resync actions do not
+trigger this automatic review batch.
+
 `Concurrent AI Reviews` in Configuration is a global Worker limit from 1 to 4. Each
 concurrent Review uses an independent database session; ALM synchronization remains serial.
 Start with 2 and increase only when the AI endpoint and database have enough capacity. The
@@ -117,7 +124,8 @@ value remains the fallback for existing deployments.
 
 `Enable AI Review processing` is the global Worker gate for Review jobs. When disabled, workers
 do not claim queued Reviews and the batch/re-review actions reject new requests. Enabling it does
-not create Review jobs by itself.
+not create Review jobs by itself. Auto-reviewed jobs wait in the queue while this gate or the
+Workspace Review queue is paused.
 
 Do not expose Uvicorn or MySQL directly to the public Internet. Put the Web server behind
 company VPN/internal networking and an HTTPS reverse proxy. `APP_ROLE=web` requires HTTP

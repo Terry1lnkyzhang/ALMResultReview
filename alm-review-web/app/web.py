@@ -77,6 +77,7 @@ from app.services.skill_runner import (
     skill_manifest_metadata,
 )
 from app.services.worker_tasks import queue_run_sync_jobs, queue_sync_job
+from app.services.workspace_insights import workspace_equipment_insights
 from app.services.workspaces import (
     resolve_workspace,
     workspace_evidence_config,
@@ -260,7 +261,7 @@ def _step_text_run_ids(
     include_legacy: bool,
     query: str,
 ) -> set[int]:
-    """Run ids whose current revision mentions the query in a step description, expected or actual."""
+    """Return Run ids whose current revision mentions the query in a reviewed step."""
     needle = _flatten_step_text(query)
     if not needle:
         return set()
@@ -983,6 +984,120 @@ def sync_progress(workspace: int | None = None, db: Session = Depends(get_db)):
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error": job.error_message,
     }
+
+
+@router.get("/insights/equipment")
+def equipment_usage_insights(
+    request: Request,
+    workspace: int | None = None,
+    query: str = Query(default=""),
+    db: Session = Depends(get_db),
+):
+    current_workspace = resolve_workspace(db, workspace)
+    workspaces = db.scalars(
+        select(Workspace)
+        .where(Workspace.archived.is_(False))
+        .order_by(Workspace.name)
+    ).all()
+    policy_key = current_review_policy_key(db, current_workspace.id)
+    insights = workspace_equipment_insights(db, current_workspace.id, policy_key)
+    normalized_query = query.strip().casefold()
+    devices = insights["devices"]
+    unresolved = insights["unresolved"]
+    if normalized_query:
+        devices = [
+            item
+            for item in devices
+            if normalized_query
+            in json.dumps(item, ensure_ascii=False, default=str).casefold()
+        ]
+        unresolved = [
+            item
+            for item in unresolved
+            if normalized_query
+            in json.dumps(item, ensure_ascii=False, default=str).casefold()
+        ]
+    return templates.TemplateResponse(
+        request=request,
+        name="workspace_insights.html",
+        context={
+            "current_workspace": current_workspace,
+            "workspaces": workspaces,
+            "metrics": insights["metrics"],
+            "devices": devices,
+            "unresolved": unresolved,
+            "query": query,
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.get("/exports/equipment-usage.csv")
+def export_equipment_usage(
+    workspace: int | None = None,
+    db: Session = Depends(get_db),
+) -> Response:
+    current_workspace = resolve_workspace(db, workspace)
+    policy_key = current_review_policy_key(db, current_workspace.id)
+    insights = workspace_equipment_insights(db, current_workspace.id, policy_key)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        (
+            "workspace",
+            "registry_reference",
+            "equipment_id",
+            "description",
+            "manufacturer",
+            "model_number",
+            "serial_number",
+            "calibration_date",
+            "calibration_due_date",
+            "equipment_status",
+            "run_id",
+            "alm_run_id",
+            "testcase_id",
+            "test_name",
+            "step",
+            "execution_date",
+            "review_status",
+            "review_code",
+            "matched_by",
+        )
+    )
+    for device in insights["devices"]:
+        for reference in device["references"]:
+            writer.writerow(
+                _csv_value(value)
+                for value in (
+                    current_workspace.name,
+                    device["registry_reference"],
+                    device["equipment_id"],
+                    device["description"],
+                    device["manufacturer"],
+                    device["model_number"],
+                    device["serial_number"],
+                    device["calibration_date"],
+                    device["calibration_due_date"],
+                    device["equipment_status"],
+                    reference["run_id"],
+                    reference["alm_run_id"],
+                    reference["test_id"],
+                    reference["test_name"],
+                    reference["step"],
+                    reference["execution_date"],
+                    reference["status"],
+                    reference["code"],
+                    ", ".join(reference["matched_by"]),
+                )
+            )
+    filename = f"{workspace_slug(current_workspace.name)}-equipment-usage.csv"
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/exports/reviews.csv")
@@ -1959,6 +2074,7 @@ def configuration(
             "evidence_config": evidence_config,
             "prompt": prompt,
             "skill_catalog": _skill_catalog(),
+            "app_timezone": get_settings().app_timezone,
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
@@ -2021,9 +2137,9 @@ def save_configuration(
     project: str = Form(...),
     folder_id: int = Form(...),
     folder_path: str = Form(""),
-    schedule_hour: int = Form(...),
-    schedule_minute: int = Form(...),
+    schedule_time: str = Form(...),
     sync_enabled: bool = Form(False),
+    auto_review_after_sync: bool = Form(False),
     ai_base_url: str = Form(...),
     model_name: str = Form(...),
     timeout_seconds: int = Form(...),
@@ -2048,7 +2164,20 @@ def save_configuration(
     if workspace is None or workspace.archived:
         return _redirect("/ops/configuration", "Workspace not found.", "error")
     redirect_path = f"/ops/configuration?workspace={workspace.id}"
-    if not 0 <= schedule_hour <= 23 or not 0 <= schedule_minute <= 59:
+    try:
+        schedule_hour_text, schedule_minute_text = schedule_time.split(":", 1)
+        schedule_hour = int(schedule_hour_text)
+        schedule_minute = int(schedule_minute_text)
+    except (TypeError, ValueError):
+        return _redirect(redirect_path, "Invalid schedule time.", "error")
+    if (
+        len(schedule_hour_text) != 2
+        or len(schedule_minute_text) != 2
+        or not schedule_hour_text.isdigit()
+        or not schedule_minute_text.isdigit()
+        or not 0 <= schedule_hour <= 23
+        or not 0 <= schedule_minute <= 59
+    ):
         return _redirect(redirect_path, "Invalid schedule time.", "error")
     normalized_workspace_name = workspace_name.strip()
     if not normalized_workspace_name:
@@ -2139,6 +2268,7 @@ def save_configuration(
     sync_config.schedule_hour = schedule_hour
     sync_config.schedule_minute = schedule_minute
     sync_config.enabled = sync_enabled
+    sync_config.auto_review_after_sync = auto_review_after_sync
 
     ai_config = db.get(AiConfig, 1)
     if ai_config is None:
@@ -2191,8 +2321,13 @@ def save_configuration(
     )
     return _redirect(
         redirect_path,
-        "Configuration and schedule saved. Reviews were not queued automatically."
-        f"{schedule_note}",
+        "Configuration and schedule saved."
+        + (
+            " Automatic review will run after the next scheduled ALM sync."
+            if sync_enabled and auto_review_after_sync
+            else ""
+        )
+        + schedule_note,
     )
 
 
@@ -2307,6 +2442,9 @@ def create_workspace(
             schedule_hour=source_sync.schedule_hour if source_sync else 2,
             schedule_minute=source_sync.schedule_minute if source_sync else 0,
             enabled=False,
+            auto_review_after_sync=(
+                source_sync.auto_review_after_sync if source_sync else False
+            ),
         )
     )
     db.add(

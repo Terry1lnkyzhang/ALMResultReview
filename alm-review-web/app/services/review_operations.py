@@ -283,6 +283,40 @@ def queue_rereviews(
     return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
 
 
+def queue_recommended_review_updates(
+    db: Session,
+    workspace_id: int | None = None,
+) -> RereviewQueueResult:
+    """Queue current Runs whose latest completed review uses an older policy."""
+    include_legacy = workspace_id is None
+    workspace = resolve_workspace(db, workspace_id)
+    policy_key = current_review_policy_key(db, workspace.id)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            or_(
+                AlmRun.workspace_id == workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            ),
+            AlmRun.run_status == "Passed",
+            AlmRun.current_revision_id.is_not(None),
+        )
+        .order_by(AlmRun.run_id)
+    ).all()
+    reviews = current_reviews(db, runs, policy_key)
+    matched_runs = []
+    manually_resolved = 0
+    for run in runs:
+        review = reviews[run.run_id]
+        if review.result is None or review.result.review_policy_key == policy_key:
+            continue
+        if review.manual_decision is not None:
+            manually_resolved += 1
+            continue
+        matched_runs.append(run)
+    return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
+
+
 def queue_rereviews_for_run_ids(
     db: Session,
     run_ids: Sequence[int],

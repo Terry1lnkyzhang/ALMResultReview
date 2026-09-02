@@ -43,7 +43,7 @@
       "review_step": 2,
       "applicability": "applicable",
       "findings": [
-        {"code": "actual_insufficient", "severity": "fail", "reason": "Actual 缺少 Expected 编号项 2 所要求的电压结果。"}
+        {"code": "actual_insufficient", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 缺少 Expected 编号项 2 所要求的电压结果。"}
       ],
       "reference_decisions": [],
       "extracted_equipment": [],
@@ -156,6 +156,54 @@
       ],
       "extracted_equipment": [],
       "summary": "Actual 记录了扫描完成，并引用了包含支持性图像证据的文件夹。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 8,
+      "description": "Gantry angle = -5 degrees, Image definition=Soft tissue, slice thickness=1.25.",
+      "expected": "The image displays the configured parameters.",
+      "actual": "The automated test passed. Refer to \\\\server\\results\\58125\\CT-NMP.SRS.Fun.576.Precise Image_Gantry tilt_Standard Couch_58125.html.",
+      "actual_format": {"layout_text": "The automated test passed.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": [
+        {"candidate_id": "html-08", "type": "html_report", "value": "\\\\server\\results\\58125\\CT-NMP.SRS.Fun.576.Precise Image_Gantry tilt_Standard Couch_58125.html", "source_field": "actual", "detection_source": "path_extension"}
+      ]
+    },
+    "output": {
+      "review_step": 8,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [
+        {"candidate_id": "html-08", "role": "result_evidence", "requires_check": true, "reason": "Actual 引用了整案自动化报告；参数覆盖情况由后续 HTML 证据评审确认。"}
+      ],
+      "extracted_equipment": [],
+      "summary": "脚本名和文件名是证据身份，不证明报告缺少 -5 度参数；该引用已转交 HTML 证据评审。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 9,
+      "description": "Gantry angle = -5 degrees.",
+      "expected": "The image displays the configured parameters.",
+      "actual": "Gantry angle was 5 degrees. Refer to \\\\server\\results\\58125\\Gantry tilt_58125.html.",
+      "actual_format": {"layout_text": "Gantry angle was 5 degrees.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": [
+        {"candidate_id": "html-09", "type": "html_report", "value": "\\\\server\\results\\58125\\Gantry tilt_58125.html", "source_field": "actual", "detection_source": "path_extension"}
+      ]
+    },
+    "output": {
+      "review_step": 9,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 正文记录 Gantry angle 为 5 度，与要求的 -5 度直接冲突。"}
+      ],
+      "reference_decisions": [
+        {"candidate_id": "html-09", "role": "result_evidence", "requires_check": true, "reason": "Actual 还引用了自动化报告作为结果证据。"}
+      ],
+      "extracted_equipment": [],
+      "summary": "Actual 正文明示的角度与要求直接冲突，因此不能由报告引用自动消除。"
     }
   }
 ]

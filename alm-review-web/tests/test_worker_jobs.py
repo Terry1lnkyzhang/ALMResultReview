@@ -611,6 +611,114 @@ def test_interrupted_sync_resumes_from_the_stored_cursor(monkeypatch) -> None:
         assert queued.job.status == "completed"
 
 
+@pytest.mark.parametrize(
+    ("requested_by", "auto_review_after_sync", "expected_calls"),
+    [
+        ("scheduler", True, ["alm_changes", "recommended"]),
+        ("scheduler", False, []),
+        ("web", True, []),
+    ],
+)
+def test_folder_sync_auto_queues_reviews_only_for_enabled_schedule(
+    monkeypatch,
+    requested_by,
+    auto_review_after_sync,
+    expected_calls,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(
+            SyncConfig(
+                workspace_id=workspace.id,
+                name="Project A",
+                server_url="http://alm.example.test",
+                domain="global",
+                project="project-a",
+                folder_id=42,
+                auto_review_after_sync=auto_review_after_sync,
+            )
+        )
+        db.commit()
+        queued = queue_sync_job(db, requested_by, workspace.id)
+        job = claim_next_sync_job(db, "worker-one", lease_seconds=60)
+        assert job is not None
+
+        monkeypatch.setattr(
+            worker_tasks,
+            "iter_folder_batches",
+            lambda *_args, **_kwargs: iter(()),
+        )
+        calls = []
+        monkeypatch.setattr(
+            worker_tasks,
+            "queue_latest_alm_changes",
+            lambda *_args, **_kwargs: (
+                calls.append("alm_changes") or SimpleNamespace(queued=1)
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            worker_tasks,
+            "queue_recommended_review_updates",
+            lambda *_args, **_kwargs: (
+                calls.append("recommended") or SimpleNamespace(queued=2)
+            ),
+            raising=False,
+        )
+
+        worker_tasks.process_sync_job(db, queued.job)
+
+        assert calls == expected_calls
+        assert queued.job.status == "completed"
+
+
+def test_auto_review_queue_failure_does_not_fail_completed_sync(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(
+            SyncConfig(
+                workspace_id=workspace.id,
+                name="Project A",
+                server_url="http://alm.example.test",
+                domain="global",
+                project="project-a",
+                folder_id=42,
+                auto_review_after_sync=True,
+            )
+        )
+        db.commit()
+        queued = queue_sync_job(db, "scheduler", workspace.id)
+        job = claim_next_sync_job(db, "worker-one", lease_seconds=60)
+        assert job is not None
+
+        monkeypatch.setattr(
+            worker_tasks,
+            "iter_folder_batches",
+            lambda *_args, **_kwargs: iter(()),
+        )
+        monkeypatch.setattr(
+            worker_tasks,
+            "queue_latest_alm_changes",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("Review queue unavailable")
+            ),
+        )
+
+        result = worker_tasks.process_sync_job(db, queued.job)
+
+        assert result.discovered_runs == 0
+        assert queued.job.status == "completed"
+        assert queued.job.progress_stage == "completed"
+
+
 def test_sync_progress_refreshes_worker_heartbeat(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

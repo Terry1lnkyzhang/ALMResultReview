@@ -516,6 +516,7 @@ def test_not_applicable_step_drops_text_findings(monkeypatch) -> None:
                                 {
                                     "code": "expected_actual_mismatch",
                                     "severity": "fail",
+                                    "basis": "direct_step_text",
                                     "reason": "Actual does not confirm the update.",
                                 }
                             ],
@@ -632,11 +633,13 @@ def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> N
                                 {
                                     "code": "actual_insufficient",
                                     "severity": "fail",
+                                    "basis": "direct_step_text",
                                     "reason": "Actual supplies a path instead of values.",
                                 },
                                 {
                                     "code": "language_quality",
                                     "severity": "warning",
+                                    "basis": "direct_step_text",
                                     "reason": "Actual mixes tenses.",
                                 },
                             ],
@@ -669,6 +672,165 @@ def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> N
     assert [item["cause"] for item in step_result["suppressed_findings"]] == [
         "result_evidence_routed"
     ]
+
+
+def test_routed_report_drops_mismatch_inferred_only_from_reference_metadata(
+    monkeypatch,
+) -> None:
+    report = r"\\server\case\Gantry tilt_58125.html"
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Gantry angle = -5 degrees.",
+                "expected": "The image displays the configured parameters.",
+                "actual": f"Result passed. Refer to {report}",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "type": "html_report",
+                        "value": report,
+                        "source_field": "actual",
+                        "detection_source": "path_extension",
+                    }
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *args, **kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [
+                                {
+                                    "code": "expected_actual_mismatch",
+                                    "severity": "fail",
+                                    "basis": "reference_metadata_inference",
+                                    "reason": (
+                                        "The report name does not contain the -5 degree "
+                                        "parameter."
+                                    ),
+                                }
+                            ],
+                            "reference_decisions": [
+                                {
+                                    "candidate_id": "step-1-ref-1",
+                                    "role": "result_evidence",
+                                    "requires_check": True,
+                                    "reason": "Actual cites the automation report.",
+                                }
+                            ],
+                            "summary": "The report name appears inconsistent.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    step_result = parsed["step_results"][0]
+    assert parsed["verdict"] == "qualified"
+    assert step_result["issues"] == []
+    assert step_result["suppressed_findings"] == [
+        {
+            "code": "expected_actual_mismatch",
+            "severity": "fail",
+            "summary": "The report name does not contain the -5 degree parameter.",
+            "cause": "reference_metadata_deferred",
+        }
+    ]
+
+
+def test_routed_report_keeps_mismatch_stated_directly_in_actual(monkeypatch) -> None:
+    report = r"\\server\case\Gantry tilt_58125.html"
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Gantry angle = -5 degrees.",
+                "expected": "The image displays the configured parameters.",
+                "actual": f"Gantry angle was 5 degrees. Refer to {report}",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "type": "html_report",
+                        "value": report,
+                        "source_field": "actual",
+                        "detection_source": "path_extension",
+                    }
+                ],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *args, **kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [
+                                {
+                                    "code": "expected_actual_mismatch",
+                                    "severity": "fail",
+                                    "basis": "direct_step_text",
+                                    "reason": (
+                                        "Actual states 5 degrees while the Step requires "
+                                        "-5 degrees."
+                                    ),
+                                }
+                            ],
+                            "reference_decisions": [
+                                {
+                                    "candidate_id": "step-1-ref-1",
+                                    "role": "result_evidence",
+                                    "requires_check": True,
+                                    "reason": "Actual cites the automation report.",
+                                }
+                            ],
+                            "summary": "Actual directly contradicts the requirement.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    step_result = parsed["step_results"][0]
+    assert parsed["verdict"] == "unqualified"
+    assert step_result["issues"] == [
+        {
+            "status": "fail",
+            "type": "expected_actual",
+            "summary": (
+                "Actual states 5 degrees while the Step requires -5 degrees."
+            ),
+        }
+    ]
+    assert "suppressed_findings" not in step_result
 
 
 def test_not_applicable_step_does_not_route_external_reference() -> None:
@@ -808,11 +970,13 @@ def test_repeated_language_findings_produce_one_warning_each(monkeypatch) -> Non
     repeated = {
         "code": "language_quality",
         "severity": "warning",
+        "basis": "direct_step_text",
         "reason": "Actual has a minor spelling mistake.",
     }
     distinct = {
         "code": "language_quality",
         "severity": "warning",
+        "basis": "direct_step_text",
         "reason": "Actual has another grammar mistake.",
     }
     content = {

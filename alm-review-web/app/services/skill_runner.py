@@ -90,6 +90,7 @@ class AlmTextFinding(BaseModel):
         "evidence_reference_missing",
     ]
     severity: Literal["warning", "fail", "manual"]
+    basis: Literal["direct_step_text", "reference_metadata_inference"]
     reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
 
 

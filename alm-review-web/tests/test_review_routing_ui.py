@@ -29,6 +29,15 @@ def test_configuration_exposes_skill_and_capability_controls() -> None:
     assert "Enforced safety boundaries" in source
     assert "Enable AI Review processing" in source
     assert "It does not queue Reviews by itself" in source
+    assert 'name="auto_review_after_sync"' in source
+    assert "Auto-review after scheduled sync" in source
+    assert "new or changed ALM Runs" in source
+    assert "Review update recommended" in source
+    assert 'type="time"' in source
+    assert 'name="schedule_time"' in source
+    assert 'name="schedule_hour"' not in source
+    assert 'name="schedule_minute"' not in source
+    assert "app_timezone" in source
     assert "Review processing &amp; Skills" in source
     assert "Global processing" in source
     assert "Workspace queue" in source

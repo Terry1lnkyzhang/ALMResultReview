@@ -388,6 +388,7 @@ def test_create_workspace_copy_reuses_source_configuration() -> None:
                 schedule_hour=5,
                 schedule_minute=30,
                 enabled=True,
+                auto_review_after_sync=True,
             )
         )
         db.add(
@@ -418,6 +419,7 @@ def test_create_workspace_copy_reuses_source_configuration() -> None:
         assert sync_config.schedule_hour == 5
         assert sync_config.schedule_minute == 30
         assert sync_config.enabled is False
+        assert sync_config.auto_review_after_sync is True
         assert sync_config.folder_id == 0
         assert sync_config.folder_path == ""
         evidence_config = db.scalar(
@@ -734,6 +736,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
             review_concurrency: int,
             ai_api_key: str = "",
             clear_ai_api_key: bool = False,
+            schedule_time: str = "01:30",
         ):
             return save_configuration(
                 request=request,
@@ -745,9 +748,9 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
                 project="project",
                 folder_id=42,
                 folder_path="Root",
-                schedule_hour=1,
-                schedule_minute=30,
+                schedule_time=schedule_time,
                 sync_enabled=False,
+                auto_review_after_sync=True,
                 ai_base_url="http://ai.example.test/v1",
                 model_name="test-model",
                 timeout_seconds=120,
@@ -774,6 +777,16 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
         assert ai_config.review_concurrency == 4
         assert ai_config.api_key == "saved-key"
         assert workspace.project == "earth_kylin"
+        sync_config = db.scalar(
+            select(SyncConfig).where(SyncConfig.workspace_id == workspace.id)
+        )
+        assert sync_config is not None
+        assert sync_config.auto_review_after_sync is True
+        assert sync_config.schedule_hour == 1
+        assert sync_config.schedule_minute == 30
+        assert save(2, schedule_time="25:00").status_code == 303
+        assert sync_config.schedule_hour == 1
+        assert sync_config.schedule_minute == 30
         evidence_config = db.scalar(
             select(EvidenceConfig).where(EvidenceConfig.workspace_id == workspace.id)
         )

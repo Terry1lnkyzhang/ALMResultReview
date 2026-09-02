@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -22,13 +23,23 @@ from app.models import (
     utcnow,
 )
 from app.services.alm import FolderCollectionProgress, collect_run, iter_folder_batches
-from app.services.importer import ImportResult, import_batch, unchanged_run_check
-from app.services.review_operations import queue_run_review
+from app.services.importer import (
+    ImportResult,
+    import_batch,
+    queue_latest_alm_changes,
+    unchanged_run_check,
+)
+from app.services.review_operations import (
+    queue_recommended_review_updates,
+    queue_run_review,
+)
 from app.services.workspaces import (
     resolve_workspace,
     workspace_evidence_config,
     workspace_sync_config,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_JOB_ATTEMPTS = 3
 FAILED_JOB_RETRY_BACKOFF_SECONDS = 60
@@ -387,6 +398,24 @@ def process_sync_job(db: Session, job: SyncJob) -> ImportResult:
         raise
 
     _finish_sync_job(db, job.id, history, result, "Synchronization complete")
+    if job.requested_by == "scheduler" and config.auto_review_after_sync:
+        try:
+            latest = queue_latest_alm_changes(db, workspace.id)
+            recommended = queue_recommended_review_updates(db, workspace.id)
+            logger.info(
+                "Queued reviews after scheduled ALM sync workspace=%s "
+                "alm_changes=%s recommended_updates=%s",
+                workspace.id,
+                latest.queued,
+                recommended.queued,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Scheduled ALM sync completed but auto-review queuing failed "
+                "workspace=%s",
+                workspace.id,
+            )
     return result
 
 

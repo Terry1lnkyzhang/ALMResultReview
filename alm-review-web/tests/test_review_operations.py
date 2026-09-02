@@ -16,6 +16,7 @@ from app.services.review_operations import (
     cancel_queued_reviews,
     delete_local_run,
     latest_rereview_progress,
+    queue_recommended_review_updates,
     queue_rereviews,
     workspace_review_progress,
 )
@@ -170,6 +171,40 @@ def test_queue_rereviews_never_touches_a_manually_resolved_run() -> None:
         assert (result.matched, result.queued, result.manually_resolved) == (1, 1, 1)
         assert [job.run_id for job in queued] == [2]
         assert is_force_qualified(current_review(db, forced))
+
+
+def test_queue_recommended_review_updates_only_queues_outdated_policy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        current = add_reviewed_run(db, 1, "qualified")
+        outdated = add_reviewed_run(db, 2, "qualified")
+        manually_resolved = add_reviewed_run(db, 3, "unqualified")
+        db.scalar(
+            select(ReviewResult).where(ReviewResult.run_id == outdated.run_id)
+        ).review_policy_key = "outdated-policy"
+        db.scalar(
+            select(ReviewResult).where(
+                ReviewResult.run_id == manually_resolved.run_id
+            )
+        ).review_policy_key = "outdated-policy"
+        db.commit()
+        save_manual_decision(
+            db,
+            manually_resolved,
+            "override_qualified",
+            "tester",
+            "Reviewed manually",
+        )
+
+        result = queue_recommended_review_updates(db)
+        queued = db.scalars(
+            select(ReviewJob).where(ReviewJob.status == "queued")
+        ).all()
+
+        assert current.run_id not in [job.run_id for job in queued]
+        assert [job.run_id for job in queued] == [outdated.run_id]
+        assert (result.matched, result.queued, result.manually_resolved) == (1, 1, 1)
 
 
 def test_latest_rereview_progress_counts_terminal_jobs() -> None:

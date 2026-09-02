@@ -2239,6 +2239,15 @@ def _run_text_semantic_skills(
                     _suppressed_finding(finding, "result_evidence_routed")
                 )
                 continue
+            if (
+                code == "expected_actual_mismatch"
+                and finding["basis"] == "reference_metadata_inference"
+                and evidence_routed
+            ):
+                suppressed.append(
+                    _suppressed_finding(finding, "reference_metadata_deferred")
+                )
+                continue
             if severity == "warning" and code != "language_quality":
                 raise SkillFailure(
                     "ALM text review Skill returned a non-language warning.",

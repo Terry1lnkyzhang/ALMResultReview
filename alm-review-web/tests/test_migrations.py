@@ -300,6 +300,10 @@ def test_existing_runs_and_configs_are_assigned_to_default_workspace() -> None:
 
     columns = {column["name"] for column in inspect(engine).get_columns("alm_runs")}
     assert "execution_location" in columns
+    sync_columns = {
+        column["name"] for column in inspect(engine).get_columns("sync_configs")
+    }
+    assert "auto_review_after_sync" in sync_columns
 
     with engine.connect() as connection:
         workspace_id = connection.execute(
@@ -311,6 +315,10 @@ def test_existing_runs_and_configs_are_assigned_to_default_workspace() -> None:
         config_workspace_id = connection.execute(
             text("SELECT workspace_id FROM sync_configs WHERE id = 1")
         ).scalar_one()
+        auto_review_after_sync = connection.execute(
+            text("SELECT auto_review_after_sync FROM sync_configs WHERE id = 1")
+        ).scalar_one()
 
     assert tuple(run) == (workspace_id, 152459)
     assert config_workspace_id == workspace_id
+    assert not auto_review_after_sync
