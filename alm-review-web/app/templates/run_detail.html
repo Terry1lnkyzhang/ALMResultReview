@@ -18,6 +18,7 @@
     <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
     {% if active_sync_job %}<span class="queue-tag">ALM 刷新：{{ queue_status_labels.get(active_sync_job.status, active_sync_job.status) }}</span>{% endif %}
     {% if active_review_job %}<span class="queue-tag">AI 评审：{{ queue_status_labels.get(active_review_job.status, active_review_job.status) }}</span>{% endif %}
+    {% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job %}<span class="queue-tag queue-tag-failed">AI 评审：失败</span>{% endif %}
   </div>
 </section>
 
@@ -80,9 +81,21 @@
 </section>
 {% endif %}
 
+{% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job %}
+<section class="review-job-state review-job-failed" aria-label="AI review job failed">
+  <div><p class="eyebrow">AI 评审任务失败</p><h2>最近一次评审没有生成新结果</h2><p>{{ latest_review_job_error or 'Worker 未返回错误详情。' }}</p><small>任务 {{ latest_review_job.id }} &middot; 已尝试 {{ latest_review_job.attempt_count }} 次</small></div>
+  <form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button secondary" type="submit">重新加入评审队列</button></form>
+</section>
+{% elif active_review_job %}
+<section class="review-job-state" aria-label="AI review job status">
+  <div><p class="eyebrow">AI 评审任务</p><h2>{{ '正在执行' if active_review_job.status == 'running' else '正在排队' }}</h2><p>{{ 'Worker 正在处理此运行。' if active_review_job.status == 'running' else '任务已保留在队列中，轮到后会自动开始；离开页面不会取消任务。' }}</p><small>任务 {{ active_review_job.id }} &middot; {{ queue_status_labels.get(active_review_job.status, active_review_job.status) }}</small></div>
+  <button class="button secondary" type="button" disabled>已加入评审队列</button>
+</section>
+{% endif %}
+
 {% if review.result %}
 <section class="review-band">
-  <div><p class="eyebrow">AI 评审 / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit">加入重新评审队列</button></form></div>
+  <div><p class="eyebrow">AI 评审 / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
   {% if review.manual_decision %}<div class="manual-record"><span>人工裁决</span><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
 </section>
 {% if review_pipeline %}
@@ -148,7 +161,7 @@
   </div>
 </section>
 {% endif %}
-{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>此版本正在排队，或最近一次评审失败。</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit">加入评审队列</button></form></section>{% endif %}
+{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>{% if active_review_job %}此版本已加入评审队列。{% elif latest_review_job and latest_review_job.status == 'failed' %}最近一次评审失败，可查看上方错误并重新加入队列。{% else %}此版本尚未执行 AI 评审。{% endif %}</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入评审队列' }}</button></form></section>{% endif %}
 
 {% if allowed_decisions %}
 <section class="decision-panel"><div><p class="eyebrow">人工裁决</p><h2>处理此评审结果</h2><p>原因将与当前源数据哈希一起保留，已处理的运行不会自动重新评审。</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>裁决</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入人工处理此结果的原因"></textarea></label><button class="button primary" type="submit">记录裁决</button></form></section>

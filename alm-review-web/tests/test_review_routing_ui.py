@@ -91,6 +91,35 @@ def test_run_detail_exposes_guarded_local_delete_action() -> None:
     assert "window.prompt" not in source
 
 
+def test_run_detail_keeps_review_job_status_and_errors_visible() -> None:
+    template = templates.get_template("run_detail.html")
+    source, _, _ = templates.env.loader.get_source(
+        templates.env,
+        template.name,
+    )
+
+    assert "latest_review_job.status == 'failed'" in source
+    assert "latest_review_job_error" in source
+    assert "最近一次评审没有生成新结果" in source
+    assert "正在排队" in source
+    assert "离开页面不会取消任务" in source
+    assert "已加入评审队列" in source
+
+
+def test_public_job_error_redacts_api_key_identifiers() -> None:
+    error = (
+        "Rate limit exceeded for api_key: "
+        "48fc76828c923d2b8ffc483b8ccc5bd8ca48178ede53fd10a13158dabf5924ec. "
+        "Current limit: 5"
+    )
+
+    public_error = web._public_job_error(error)
+
+    assert public_error is not None
+    assert "48fc7682" not in public_error
+    assert "api_key: [REDACTED]. Current limit: 5" in public_error
+
+
 def test_run_detail_uses_chinese_review_labels_without_changing_internal_codes() -> None:
     template = templates.get_template("run_detail.html")
     source, _, _ = templates.env.loader.get_source(

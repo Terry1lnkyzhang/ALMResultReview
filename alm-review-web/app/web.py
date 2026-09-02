@@ -211,6 +211,16 @@ def _to_app_timezone(value: datetime | None) -> datetime | None:
     return value.astimezone(local_tz)
 
 
+def _public_job_error(error_message: str | None) -> str | None:
+    if error_message is None:
+        return None
+    return re.sub(
+        r"(?i)(api[_ -]?key\s*:\s*)[^\s,.'\"}]+",
+        r"\1[REDACTED]",
+        error_message,
+    )
+
+
 def _run_view(
     db: Session,
     run: AlmRun,
@@ -1367,6 +1377,16 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         .order_by(desc(SyncJob.id))
         .limit(1)
     )
+    active_review_job = active_run_review_job(db, run)
+    latest_review_job = db.scalar(
+        select(ReviewJob)
+        .where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.revision_id == run.current_revision_id,
+        )
+        .order_by(desc(ReviewJob.id))
+        .limit(1)
+    )
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
@@ -1377,7 +1397,11 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "actual_tester_label": _person_label(run.actual_tester, users),
             "review": review,
             "review_update_reasons": update_reasons,
-            "active_review_job": active_run_review_job(db, run),
+            "active_review_job": active_review_job,
+            "latest_review_job": latest_review_job,
+            "latest_review_job_error": _public_job_error(
+                latest_review_job.error_message if latest_review_job else None
+            ),
             "active_sync_job": active_sync_job,
             "steps": steps,
             "revisions": revisions,
