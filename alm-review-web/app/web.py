@@ -211,6 +211,7 @@ templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
     "qualified": "合格",
+    "not_qualified": "除合格外全部 + 警告",
     "force_qualified": "人工判定合格",
     "unqualified": "不合格",
     "needs_manual_review": "需人工复核",
@@ -288,6 +289,8 @@ def _run_view(
 
 def _matches_status(item: dict, status: str) -> bool:
     # Force qualified and warning are lenses over the final statuses, not statuses.
+    if status == "not_qualified":
+        return item["final_status"] != "qualified" or item["has_warning"]
     if status == "force_qualified":
         return item["force_qualified"]
     if status == "warning":
@@ -357,6 +360,7 @@ def _matches_dashboard_filters(
         and (
             not normalized_query
             or normalized_query in str(item["run"].run_id)
+            or normalized_query in str(item["run"].alm_run_id or "")
             or normalized_query in str(item["run"].test_id or "")
             or normalized_query in item["run"].test_name.casefold()
             or normalized_query in item["run"].test_set_name.casefold()
@@ -1062,6 +1066,9 @@ def equipment_usage_insights(
     ).all()
     policy_key = current_review_policy_key(db, current_workspace.id)
     insights = workspace_equipment_insights(db, current_workspace.id, policy_key)
+    users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    for item in insights["unresolved"]:
+        item["actual_tester_label"] = _person_label(item["actual_tester"], users)
     normalized_query = query.strip().casefold()
     devices = insights["devices"]
     unresolved = insights["unresolved"]
@@ -1471,6 +1478,32 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
+    )
+
+
+@router.get("/workspaces/{workspace_id}/runs/{alm_run_id}")
+def workspace_alm_run_detail(
+    request: Request,
+    workspace_id: int,
+    alm_run_id: int,
+    db: Session = Depends(get_db),
+):
+    run_id = _workspace_run_id(db, workspace_id, alm_run_id)
+    if run_id is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_detail(request, run_id, db)
+
+
+def _workspace_run_id(
+    db: Session,
+    workspace_id: int,
+    displayed_run_id: int,
+) -> int | None:
+    return db.scalar(
+        select(AlmRun.run_id).where(
+            AlmRun.workspace_id == workspace_id,
+            func.coalesce(AlmRun.alm_run_id, AlmRun.run_id) == displayed_run_id,
+        )
     )
 
 

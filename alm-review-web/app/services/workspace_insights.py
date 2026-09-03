@@ -54,14 +54,10 @@ def _device_reference(match: dict[str, Any], key: str) -> str:
 
 def _attention_identifiers(equipment: dict[str, Any]) -> list[str]:
     values = [
-        *_values(equipment.get("reported_identifiers")),
         *_values(equipment.get("unknown_identifiers")),
         *_values(equipment.get("unrecognized_reported_identifiers")),
         *_values(equipment.get("pending_device_names")),
     ]
-    disambiguation = equipment.get("disambiguation")
-    if isinstance(disambiguation, dict):
-        values.extend(_values(disambiguation.get("selected_equipment_names")))
     return list(dict.fromkeys(values))
 
 
@@ -78,6 +74,7 @@ def workspace_equipment_insights(
                 AlmRun.alm_run_id,
                 AlmRun.test_id,
                 AlmRun.test_name,
+                AlmRun.actual_tester,
                 AlmRun.execution_at,
                 AlmRun.source_hash,
                 AlmRun.current_revision_id,
@@ -182,8 +179,8 @@ def workspace_equipment_insights(
             identifiers = _attention_identifiers(equipment)
             status = str(equipment.get("status") or "")
             code = str(equipment.get("code") or "")
-            needs_attention = bool(identifiers) or (
-                not confirmed and status in {"fail", "manual"}
+            needs_attention = status in {"fail", "manual"} and (
+                bool(identifiers) or not confirmed
             )
             if not needs_attention:
                 continue
@@ -197,6 +194,7 @@ def workspace_equipment_insights(
                     "alm_run_id": run.alm_run_id or run.run_id,
                     "test_id": run.test_id,
                     "test_name": run.test_name,
+                    "actual_tester": run.actual_tester,
                     "step": step,
                     "execution_date": usage_date.isoformat() if usage_date else "",
                     "status": status,

@@ -27,7 +27,7 @@ from app.services.review_status import (
     review_update_reasons,
 )
 from app.services.reviews import current_review, save_manual_decision
-from app.web import _matches_status
+from app.web import STATUS_LABELS, _matches_status
 
 
 def prepare_run(db: Session, verdict: str, warnings_json: str | None = None) -> AlmRun:
@@ -138,6 +138,43 @@ def test_force_qualified_is_a_lens_over_qualified_runs() -> None:
         assert _matches_status(item, "qualified")
         assert _matches_status(item, "force_qualified")
         assert not _matches_status(item, "unqualified")
+
+
+@pytest.mark.parametrize(
+    ("final_status", "expected"),
+    [
+        ("qualified", False),
+        ("unqualified", True),
+        ("needs_manual_review", True),
+        ("pending_review", True),
+        ("review_failed", True),
+    ],
+)
+def test_not_qualified_filter_includes_every_other_final_status(
+    final_status: str,
+    expected: bool,
+) -> None:
+    item = {
+        "final_status": final_status,
+        "force_qualified": final_status == "qualified",
+        "has_warning": False,
+    }
+
+    assert _matches_status(item, "not_qualified") is expected
+    assert STATUS_LABELS["not_qualified"] == "除合格外全部 + 警告"
+
+
+@pytest.mark.parametrize("force_qualified", [False, True])
+def test_not_qualified_filter_also_includes_qualified_runs_with_warnings(
+    force_qualified: bool,
+) -> None:
+    item = {
+        "final_status": "qualified",
+        "force_qualified": force_qualified,
+        "has_warning": True,
+    }
+
+    assert _matches_status(item, "not_qualified")
 
 
 def test_confirmed_unqualified_is_not_force_qualified() -> None:
