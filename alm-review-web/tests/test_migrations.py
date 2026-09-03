@@ -1,7 +1,35 @@
-from sqlalchemy import create_engine, inspect, text
+from unittest.mock import MagicMock
 
-from app.migrations import ensure_compatible_schema
+import pytest
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
+
+from app.migrations import _schema_migration_connection, ensure_compatible_schema
 from app.models import EvidenceConfig, Workspace
+
+
+def test_mysql_schema_migration_uses_short_metadata_lock_timeout() -> None:
+    engine = MagicMock()
+    engine.dialect.name = "mysql"
+    connection = engine.begin.return_value.__enter__.return_value
+
+    with _schema_migration_connection(engine):
+        pass
+
+    connection.exec_driver_sql.assert_called_once_with(
+        "SET SESSION lock_wait_timeout = 5"
+    )
+
+
+def test_mysql_schema_migration_explains_metadata_lock_timeout() -> None:
+    engine = MagicMock()
+    engine.dialect.name = "mysql"
+    driver_error = RuntimeError(1205, "Lock wait timeout exceeded")
+    error = OperationalError("ALTER TABLE review_jobs", {}, driver_error)
+
+    with pytest.raises(RuntimeError, match="Stop the existing ALM Review Web and Worker"):
+        with _schema_migration_connection(engine):
+            raise error
 
 
 def test_image_evidence_capabilities_default_to_disabled() -> None:
@@ -239,12 +267,32 @@ def test_ai_review_settings_are_added_to_existing_config() -> None:
     ensure_compatible_schema(engine)
 
     columns = {column["name"] for column in inspect(engine).get_columns("ai_configs")}
-    assert {"api_key", "review_concurrency"} <= columns
+    assert {
+        "api_key",
+        "review_concurrency",
+        "health_status",
+        "consecutive_failures",
+        "cooldown_until",
+        "last_error",
+        "last_success_at",
+        "last_failure_at",
+    } <= columns
     with engine.connect() as connection:
         values = connection.execute(
-            text("SELECT api_key, review_concurrency FROM ai_configs WHERE id = 1")
+            text(
+                "SELECT api_key, review_concurrency, health_status, "
+                "consecutive_failures FROM ai_configs WHERE id = 1"
+            )
         ).one()
-    assert values == ("", 1)
+    assert values == ("", 1, "healthy", 0)
+
+
+def test_worker_singleton_lease_table_is_created_by_compatible_schema() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    ensure_compatible_schema(engine)
+
+    assert "worker_lease" in inspect(engine).get_table_names()
 
 
 def test_sync_progress_columns_are_added_to_existing_sync_jobs() -> None:

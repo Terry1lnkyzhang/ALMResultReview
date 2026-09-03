@@ -86,6 +86,7 @@ SCHEDULER_ENABLED=true
 WORKER_ID=my-laptop
 WORKER_POLL_SECONDS=5
 WORKER_LEASE_SECONDS=900
+WORKER_SINGLETON_LEASE_SECONDS=30
 ALM_USERNAME=code1-id
 ALM_PASSWORD=secret
 AI_API_KEY=
@@ -97,12 +98,25 @@ Start the laptop Worker without exposing a Web port:
 .\start-worker.ps1
 ```
 
+Before deploying a version that changes the database schema, stop every old Web and Worker
+process connected to the shared MySQL database. Start one upgraded Web process and wait for
+startup to complete so it can apply the compatibility migration, then start the remaining Web
+processes and the single Worker. MySQL migrations wait at most five seconds for a metadata lock;
+if startup reports a metadata-lock timeout, find and stop the remaining old process or transaction
+before trying again. This limit prevents a queued `ALTER TABLE` from holding up new Dashboard
+queries while an old process keeps a transaction open.
+
 The Dashboard shows the latest Worker heartbeat and polls active re-review progress every
 15 seconds. Other lists display newly committed results after a page refresh. ALM sync and
 review buttons only queue work; processing continues while the laptop Worker is online.
-Worker claims use database row locks and expiring leases so two Workers cannot normally
-process the same job and interrupted work can be retried. Restart the Worker after changing
-the configured daily schedule so it reloads the Cron trigger.
+The Worker must acquire a database singleton lease before starting its scheduler. A second
+Worker connected to the same database is rejected while that lease is active, including a
+second process on the same computer. The lease is renewed every poll cycle and expires after
+an abnormal shutdown so a replacement Worker can take over. Final Review writes and each
+incremental Sync commit fence on the same lease row, preventing a Worker that lost ownership
+from committing stale work. Job-level row locks and leases still provide interrupted-work
+recovery. Restart the Worker after changing the configured daily schedule so it reloads the
+Cron trigger.
 
 `Enable daily sync` creates the Workspace's scheduled ALM synchronization. When
 `Auto-review after scheduled sync` is also enabled, a successful scheduled folder sync queues
@@ -111,21 +125,30 @@ both Runs whose review content was added or changed by that sync and completed R
 already queued or running Reviews are preserved. Manual Sync and Full resync actions do not
 trigger this automatic review batch.
 
-`Concurrent AI Reviews` in Configuration is a global Worker limit from 1 to 4. Each
-concurrent Review uses an independent database session; ALM synchronization remains serial.
-Start with 2 and increase only when the AI endpoint and database have enough capacity. The
-Worker reads this value at the start of every queue cycle, so later concurrency changes do
-not require a restart.
+Configuration provides two independent chat-completions endpoints. Each endpoint has its own
+URL, model, API key, timeout, enabled state, and `Concurrent AI Reviews` limit from 1 to 4.
+The enabled capacities are added together. Each Review is bound to one endpoint for its full
+text, HTML, image, equipment, and repair pipeline; when a slot finishes, that same endpoint
+immediately claims the next queued Review. Faster endpoints therefore receive more work while
+each endpoint stays within its own limit. ALM synchronization remains serial. The Worker reads
+the pool at the start of every queue cycle, so capacity and endpoint changes do not require a
+restart.
+
+Endpoint outcomes are persisted and shown on the Dashboard. Three consecutive retryable
+transport failures cool an endpoint down for 60 seconds; HTTP 401/403 errors block that endpoint
+until its connection configuration is corrected and saved. Other enabled endpoints continue
+processing during the cooldown. Every Review result records the actual endpoint profile, URL,
+and model used.
 
 The shared AI configuration can store an API key for the Worker. The page never displays a
 saved key: leave the field blank to keep it, enter a value to replace it, or select the clear
 option to remove it. A saved key takes precedence over `AI_API_KEY` in `.env`; the environment
 value remains the fallback for existing deployments.
 
-`Enable AI Review processing` is the global Worker gate for Review jobs. When disabled, workers
-do not claim queued Reviews and the batch/re-review actions reject new requests. Enabling it does
-not create Review jobs by itself. Auto-reviewed jobs wait in the queue while this gate or the
-Workspace Review queue is paused.
+`Enable AI Review processing` enables Endpoint 1; Endpoint 2 has its own enable control. When no
+endpoint is enabled, workers do not claim queued Reviews and batch/re-review actions reject new
+requests. Enabling an endpoint does not create Review jobs by itself. Auto-reviewed jobs wait in
+the queue while all endpoints are disabled or the Workspace Review queue is paused.
 
 Do not expose Uvicorn or MySQL directly to the public Internet. Put the Web server behind
 company VPN/internal networking and an HTTPS reverse proxy. `APP_ROLE=web` requires HTTP

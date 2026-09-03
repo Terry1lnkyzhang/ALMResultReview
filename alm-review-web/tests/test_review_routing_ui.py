@@ -58,6 +58,7 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "('image_review', '图像评审')" in source
     assert "证据路由记录" in source
     assert "匹配条件" in source
+    assert "'html_report_equipment_id': 'HTML 报告设备 ID'" in source
     assert "route.get('actions', [])" in source
     assert "stage.get('steps')|length" in source
     assert "Evidence intent Skill" not in source

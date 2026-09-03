@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     worker_id: str = ""
     worker_poll_seconds: int = 5
     worker_lease_seconds: int = 900
+    worker_singleton_lease_seconds: int = 30
     web_auth_enabled: bool = False
     web_auth_username: str = ""
     web_auth_password: str = ""

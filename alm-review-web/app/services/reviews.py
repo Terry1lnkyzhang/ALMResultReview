@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.services.ai_transport import ai_headers as _ai_headers
 from app.services.ai_transport import completion_url as _completion_url
+from app.services.ai_transport import record_ai_endpoint_failure, record_ai_endpoint_success
 from app.services.ai_transport import skill_failure as _skill_failure
 from app.services.automation_release import (
     assess_automation_release,
@@ -39,7 +40,11 @@ from app.services.equipment_pipeline import (
 from app.services.equipment_pipeline import (
     run_equipment_pipeline as _run_equipment_pipeline,
 )
-from app.services.equipment_review import OpenQuestion, analyze_equipment_steps
+from app.services.equipment_review import (
+    OpenQuestion,
+    analyze_equipment_steps,
+    apply_html_report_equipment,
+)
 from app.services.evidence import (
     CAPABILITIES,
     analyze_html_filename_anomalies,
@@ -49,7 +54,11 @@ from app.services.evidence import (
     is_html_report_path,
     validate_network_evidence_path,
 )
-from app.services.html_evidence import HtmlEvidenceResolver, HtmlEvidenceResult
+from app.services.html_evidence import (
+    HtmlEvidenceResolver,
+    HtmlEvidenceResult,
+    actual_phantom_codes,
+)
 from app.services.image_evidence import (
     ImageEvidenceResult,
     NetworkImageResolver,
@@ -59,6 +68,11 @@ from app.services.image_evidence import (
 from app.services.review_pipeline import build_pipeline_trace
 from app.services.review_policy import current_review_policy_key
 from app.services.skill_runner import SkillFailure, skill_runner
+from app.services.worker_lease import (
+    WorkerLeaseLost,
+    fence_worker_lease,
+    owns_worker_lease,
+)
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 VALID_VERDICTS = {"qualified", "unqualified", "needs_manual_review"}
@@ -112,6 +126,9 @@ class PreparedImageEvidence:
     results: dict[int, dict[str, ImageEvidenceResult]]
     html_results: dict[int, dict[str, HtmlEvidenceResult]] = field(default_factory=dict)
     html_assessments: dict[int, dict[str, Any]] = field(default_factory=dict)
+    html_reported_equipment: dict[int, list[dict[str, str]]] = field(
+        default_factory=dict
+    )
     image_skill_traces: list[dict[str, Any]] = field(default_factory=list)
     html_skill_traces: list[dict[str, Any]] = field(default_factory=list)
 
@@ -2454,6 +2471,52 @@ def _report_review_stage(ctx: ReviewContext) -> dict[str, Any]:
         traces, assessment = _run_html_review_batches(ctx, skill_input)
         ctx.evidence.html_skill_traces.extend(traces)
         ctx.evidence.html_assessments[request.review_step] = assessment
+        report_paths = {
+            f"step-{request.review_step}-report-{index}": path
+            for index, path in enumerate(request.paths, start=1)
+        }
+        reported_equipment: list[dict[str, str]] = []
+        for citation in assessment.get("evidence", []):
+            if "actual" not in citation.get("supports", []):
+                continue
+            source_path = report_paths.get(citation.get("report_id", ""))
+            result = (
+                ctx.evidence.html_results.get(request.review_step, {}).get(source_path)
+                if source_path
+                else None
+            )
+            if result is None:
+                continue
+            block = next(
+                (
+                    item
+                    for item in result.blocks
+                    if item.block_id == citation.get("block_id")
+                ),
+                None,
+            )
+            if block is None:
+                continue
+            for label, identifier in actual_phantom_codes(block):
+                reported_equipment.append(
+                    {
+                        "equipment_id": identifier,
+                        "source_path": source_path,
+                        "block_id": block.block_id,
+                        "label": label,
+                    }
+                )
+        if reported_equipment:
+            ctx.evidence.html_reported_equipment[request.review_step] = list(
+                {
+                    (
+                        item["equipment_id"],
+                        item["source_path"],
+                        item["block_id"],
+                    ): item
+                    for item in reported_equipment
+                }.values()
+            )
     if not ctx.evidence.external_review_enabled:
         status = "disabled"
     elif ctx.plan.report_requests:
@@ -2499,6 +2562,12 @@ def _equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
             ctx.content,
             ctx.equipment_checks,
             ctx.open_questions,
+            ctx.equipment_registry,
+        )
+        apply_html_report_equipment(
+            ctx.content,
+            ctx.equipment_checks,
+            ctx.evidence.html_reported_equipment,
             ctx.equipment_registry,
         )
         status = "completed" if ctx.plan.equipment_steps else "not_applicable"
@@ -2598,7 +2667,12 @@ def manual_decision_locks_run(db: Session, run: AlmRun) -> ManualDecision | None
     )
 
 
-def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> ReviewResult:
+def process_job(
+    db: Session,
+    job: ReviewJob,
+    allow_disabled: bool = False,
+    worker_owner_token: str | None = None,
+) -> ReviewResult:
     run = db.get(AlmRun, job.run_id)
     revision = db.get(RunRevision, job.revision_id)
     if run is None or revision is None:
@@ -2631,7 +2705,7 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
     prompt = db.scalar(
         select(PromptVersion).where(PromptVersion.is_active.is_(True)).order_by(desc(PromptVersion.id))
     )
-    ai_config = db.get(AiConfig, 1)
+    ai_config = db.get(AiConfig, job.ai_config_id or 1)
     if prompt is None or ai_config is None or (not ai_config.enabled and not allow_disabled):
         raise ValueError("AI review is not configured or is disabled.")
 
@@ -2707,7 +2781,11 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
     )
     started = time.perf_counter()
     try:
+        if worker_owner_token and not owns_worker_lease(db, worker_owner_token):
+            raise WorkerLeaseLost("Worker singleton lease was lost before review execution.")
         outcome = execute_review(ctx)
+        if worker_owner_token and not fence_worker_lease(db, worker_owner_token):
+            raise WorkerLeaseLost("Worker singleton lease was lost during review execution.")
         parsed = outcome.parsed
         duration_ms = round((time.perf_counter() - started) * 1000)
         result = ReviewResult(
@@ -2719,6 +2797,8 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
             source_hash=revision.source_hash,
             review_policy_key=policy_key,
             model_name=ai_config.model_name,
+            ai_config_id=ai_config.id,
+            ai_endpoint=_completion_url(ai_config.base_url),
             verdict=parsed["verdict"],
             issue_summary=parsed["issue_summary"],
             criteria_json=json.dumps(parsed["criteria"], ensure_ascii=False),
@@ -2736,6 +2816,20 @@ def process_job(db: Session, job: ReviewJob, allow_disabled: bool = False) -> Re
         db.commit()
         db.refresh(result)
         return result
+    except WorkerLeaseLost:
+        db.rollback()
+        interrupted_job = db.get(ReviewJob, job.id)
+        if interrupted_job is not None and interrupted_job.status == "running":
+            interrupted_job.status = "queued"
+            interrupted_job.ai_config_id = None
+            interrupted_job.claimed_by = None
+            interrupted_job.lease_expires_at = None
+            interrupted_job.started_at = None
+            interrupted_job.completed_at = None
+            interrupted_job.attempt_count = max(0, interrupted_job.attempt_count - 1)
+            interrupted_job.error_message = ""
+            db.commit()
+        raise
     except Exception as exc:
         db.rollback()
         failed_job = db.get(ReviewJob, job.id)
@@ -2785,6 +2879,7 @@ def claim_next_review_job(
     db: Session,
     worker_id: str,
     lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
+    ai_config_id: int | None = None,
 ) -> ReviewJob | None:
     now = utcnow()
     retry_after = now - timedelta(seconds=FAILED_JOB_RETRY_BACKOFF_SECONDS)
@@ -2825,6 +2920,8 @@ def claim_next_review_job(
         db.rollback()
         return None
     job.status = "running"
+    if ai_config_id is not None:
+        job.ai_config_id = ai_config_id
     job.claimed_by = worker_id
     job.lease_expires_at = now + timedelta(seconds=max(1, lease_seconds))
     job.started_at = now
@@ -2842,13 +2939,23 @@ def process_queued_jobs(
     worker_id: str = "local-worker",
     lease_seconds: int = DEFAULT_JOB_LEASE_SECONDS,
 ) -> tuple[int, int]:
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    ai_config = db.scalar(
+        select(AiConfig)
+        .where(AiConfig.enabled.is_(True))
+        .order_by(AiConfig.id)
+        .limit(1)
+    )
+    if ai_config is None:
         return 0, 0
     completed = 0
     failed = 0
     for _ in range(limit):
-        job = claim_next_review_job(db, worker_id, lease_seconds)
+        job = claim_next_review_job(
+            db,
+            worker_id,
+            lease_seconds,
+            ai_config_id=ai_config.id,
+        )
         if job is None:
             break
         job_completed, job_failed = process_claimed_review_job(db, job.id)
@@ -2857,14 +2964,24 @@ def process_queued_jobs(
     return completed, failed
 
 
-def process_claimed_review_job(db: Session, job_id: int) -> tuple[int, int]:
+def process_claimed_review_job(
+    db: Session,
+    job_id: int,
+    worker_owner_token: str | None = None,
+) -> tuple[int, int]:
     job = db.get(ReviewJob, job_id)
     if job is None or job.status != "running":
         return 0, 0
     try:
-        process_job(db, job)
+        if worker_owner_token is None:
+            process_job(db, job)
+        else:
+            process_job(db, job, worker_owner_token=worker_owner_token)
+        record_ai_endpoint_success(db, job.ai_config_id)
         return 1, 0
     except ManualDecisionLock:
+        return 0, 0
+    except WorkerLeaseLost:
         return 0, 0
     except Exception as exc:
         db.rollback()
@@ -2872,4 +2989,5 @@ def process_claimed_review_job(db: Session, job_id: int) -> tuple[int, int]:
         if failed_job is not None and failed_job.status == "running":
             _mark_job_failed(failed_job, exc)
             db.commit()
+        record_ai_endpoint_failure(db, job.ai_config_id, exc)
         return 0, 1

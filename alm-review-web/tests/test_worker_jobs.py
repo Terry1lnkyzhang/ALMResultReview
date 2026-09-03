@@ -64,6 +64,24 @@ def test_review_job_claim_is_exclusive_until_lease_expires() -> None:
         assert recovered_claim.attempt_count == 2
 
 
+def test_review_job_claim_records_the_selected_endpoint() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(ReviewJob(run_id=42, revision_id=7, status="queued"))
+        db.commit()
+
+        job = claim_next_review_job(
+            db,
+            "worker-one",
+            lease_seconds=60,
+            ai_config_id=2,
+        )
+
+        assert job is not None
+        assert job.ai_config_id == 2
+
+
 def test_review_queue_concurrency_uses_independent_sessions(monkeypatch) -> None:
     sessions = []
     processing_sessions = []
@@ -155,6 +173,141 @@ def test_review_queue_refills_a_free_slot_before_the_batch_finishes(monkeypatch)
 
     assert (completed, failed) == (4, 0)
     assert finished_fast_jobs == [2, 3, 4]
+
+
+def test_review_queue_respects_each_endpoint_capacity(monkeypatch) -> None:
+    claimed_job_ids = iter(range(1, 4))
+    endpoint_by_job = {}
+    active_by_endpoint = {1: 0, 2: 0}
+    maximum_by_endpoint = {1: 0, 2: 0}
+    barrier = Barrier(3)
+    lock = Lock()
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def claim_job(_db, _worker_id, _lease_seconds, ai_config_id=None):
+        job_id = next(claimed_job_ids, None)
+        if job_id is None:
+            return None
+        endpoint_by_job[job_id] = ai_config_id
+        return SimpleNamespace(id=job_id)
+
+    def process_claimed(_db, job_id):
+        endpoint_id = endpoint_by_job[job_id]
+        with lock:
+            active_by_endpoint[endpoint_id] += 1
+            maximum_by_endpoint[endpoint_id] = max(
+                maximum_by_endpoint[endpoint_id],
+                active_by_endpoint[endpoint_id],
+            )
+        barrier.wait(timeout=2)
+        with lock:
+            active_by_endpoint[endpoint_id] -= 1
+        return 1, 0
+
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(scheduler, "claim_next_review_job", claim_job)
+    monkeypatch.setattr(scheduler, "process_claimed_review_job", process_claimed)
+
+    completed, failed = scheduler.process_review_queue(
+        limit=3,
+        endpoint_concurrency=((1, 1), (2, 2)),
+        worker_id="worker-one",
+        lease_seconds=60,
+    )
+
+    assert (completed, failed) == (3, 0)
+    assert maximum_by_endpoint == {1: 1, 2: 2}
+
+
+def test_review_queue_gives_refills_to_the_endpoint_that_finishes_first(
+    monkeypatch,
+) -> None:
+    claimed_job_ids = iter(range(1, 5))
+    endpoint_by_job = {}
+    fast_jobs_finished = []
+    release_slow_endpoint = Event()
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def claim_job(_db, _worker_id, _lease_seconds, ai_config_id=None):
+        job_id = next(claimed_job_ids, None)
+        if job_id is None:
+            return None
+        endpoint_by_job[job_id] = ai_config_id
+        return SimpleNamespace(id=job_id)
+
+    def process_claimed(_db, job_id):
+        if endpoint_by_job[job_id] == 1:
+            assert release_slow_endpoint.wait(timeout=5)
+        else:
+            fast_jobs_finished.append(job_id)
+            if len(fast_jobs_finished) == 3:
+                release_slow_endpoint.set()
+        return 1, 0
+
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(scheduler, "claim_next_review_job", claim_job)
+    monkeypatch.setattr(scheduler, "process_claimed_review_job", process_claimed)
+
+    completed, failed = scheduler.process_review_queue(
+        limit=4,
+        endpoint_concurrency=((1, 1), (2, 1)),
+        worker_id="worker-one",
+        lease_seconds=60,
+    )
+
+    assert (completed, failed) == (4, 0)
+    assert endpoint_by_job == {1: 1, 2: 2, 3: 2, 4: 2}
+
+
+def test_review_queue_stops_claiming_when_singleton_lease_is_lost(
+    monkeypatch,
+) -> None:
+    claimed_job_ids = iter(range(1, 5))
+    claimed = []
+    lease_checks = iter((True, True, False))
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def claim_job(_db, _worker_id, _lease_seconds, ai_config_id=None):
+        job_id = next(claimed_job_ids)
+        claimed.append((job_id, ai_config_id))
+        return SimpleNamespace(id=job_id)
+
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(scheduler, "claim_next_review_job", claim_job)
+    monkeypatch.setattr(
+        scheduler,
+        "process_claimed_review_job",
+        lambda _db, _job_id: (1, 0),
+    )
+
+    completed, failed = scheduler.process_review_queue(
+        limit=4,
+        endpoint_concurrency=((1, 2), (2, 2)),
+        worker_id="worker-one",
+        lease_seconds=60,
+        lease_guard=lambda: next(lease_checks),
+    )
+
+    assert (completed, failed) == (2, 0)
+    assert claimed == [(1, 1), (2, 1)]
 
 
 def test_failed_review_job_is_retried_only_after_the_backoff() -> None:

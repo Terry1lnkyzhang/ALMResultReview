@@ -601,6 +601,18 @@ def test_queue_status_reports_live_counts_concurrency_and_worker(monkeypatch) ->
             "review_paused": False,
             "pending_run_sync": 0,
             "review_concurrency": 4,
+                "endpoints": [
+                    {
+                        "id": 1,
+                        "model_name": "qwen3",
+                        "enabled": True,
+                        "available": True,
+                        "health_status": "healthy",
+                        "running": 1,
+                        "capacity": 4,
+                        "last_error": "",
+                    }
+                ],
             "worker_online": True,
             "worker_status": "working",
             "worker_id": "worker-one",
@@ -737,6 +749,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
             ai_api_key: str = "",
             clear_ai_api_key: bool = False,
             schedule_time: str = "01:30",
+            **secondary_config,
         ):
             return save_configuration(
                 request=request,
@@ -770,6 +783,7 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
                 prompt_name="Test prompt",
                 prompt_template="Review {{RUN_CONTENT}}",
                 db=db,
+                **secondary_config,
             )
 
         assert save(10, ai_api_key="saved-key").status_code == 303
@@ -800,3 +814,20 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
             clear_ai_api_key=True,
         ).status_code == 303
         assert ai_config.api_key == ""
+        assert save(
+            2,
+            ai_base_url_2="http://ai-two.example.test/v1",
+            model_name_2="test-model-two",
+            timeout_seconds_2=180,
+            ai_api_key_2="secondary-key",
+            review_concurrency_2=3,
+            ai_enabled_2=True,
+        ).status_code == 303
+        secondary = db.get(AiConfig, 2)
+        assert secondary is not None
+        assert secondary.base_url == "http://ai-two.example.test/v1"
+        assert secondary.model_name == "test-model-two"
+        assert secondary.timeout_seconds == 180
+        assert secondary.api_key == "secondary-key"
+        assert secondary.review_concurrency == 3
+        assert secondary.enabled is True

@@ -19,6 +19,13 @@ _AUTOMATION_RESULT_DIRECTORIES = {
 }
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 _RESULT_DATA_PATTERN = re.compile(r"\bvar\s+resultData\s*=\s*")
+_ACTUAL_FIELD_PATTERN = re.compile(
+    r"(?ims)^actual:\s*(.*?)(?=^(?:stepName|description|expect|status|log|evidence):|\Z)"
+)
+_PHANTOM_CODE_PATTERN = re.compile(
+    r"(?i)(?P<label>phantom\s*code|模体(?:代码|编号))\s*[:：]\s*"
+    r"(?P<identifier>[A-Z0-9]+(?:-[A-Z0-9]+){2,})"
+)
 _SUMMARY_FIELDS = (
     "testName",
     "testProject",
@@ -64,6 +71,20 @@ class HtmlEvidenceResult:
     sha256: str = ""
     blocks: tuple[HtmlEvidenceBlock, ...] = ()
     detail: str = ""
+
+
+def actual_phantom_codes(block: HtmlEvidenceBlock) -> tuple[tuple[str, str], ...]:
+    """Return labeled phantom identifiers from structured report actual fields."""
+    found: list[tuple[str, str]] = []
+    for actual_match in _ACTUAL_FIELD_PATTERN.finditer(block.text):
+        for code_match in _PHANTOM_CODE_PATTERN.finditer(actual_match.group(1)):
+            found.append(
+                (
+                    " ".join(code_match.group("label").split()),
+                    code_match.group("identifier").upper(),
+                )
+            )
+    return tuple(dict.fromkeys(found))
 
 
 class _VisibleTextParser(HTMLParser):

@@ -5,7 +5,7 @@
 {% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
 {% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
 {% set action_labels = {'validate_path': '校验路径', 'load_images': '读取图像', 'send_to_visual_ai': '发送给视觉 AI', 'parse_html_report': '解析 HTML 报告', 'manual_review': '人工复核', 'review_attachment': '评审附件'} %}
-{% set match_labels = {'equipment_id': '设备 ID', 'serial_number': '序列号', 'model_number': '型号', 'extracted_equipment_id': 'AI 抽取的设备 ID', 'extracted_serial_number': 'AI 抽取的序列号', 'extracted_device_name': 'AI 抽取的设备名称', 'ai_disambiguation': 'AI 消歧', 'ai_registry_name': 'AI 台账名称匹配'} %}
+{% set match_labels = {'equipment_id': '设备 ID', 'serial_number': '序列号', 'model_number': '型号', 'extracted_equipment_id': 'AI 抽取的设备 ID', 'extracted_serial_number': 'AI 抽取的序列号', 'extracted_device_name': 'AI 抽取的设备名称', 'previous_step_equipment': '前序步骤已验证设备', 'ai_disambiguation': 'AI 消歧', 'ai_registry_name': 'AI 台账名称匹配', 'html_report_equipment_id': 'HTML 报告设备 ID'} %}
 {% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
 {% set queue_status_labels = {'queued': '排队中', 'running': '执行中', 'completed': '已完成', 'failed': '失败'} %}
 {% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
@@ -95,7 +95,7 @@
 
 {% if review.result %}
 <section class="review-band">
-  <div><p class="eyebrow">AI 评审 / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
+  <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
   {% if review.manual_decision %}<div class="manual-record"><span>人工裁决</span><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
 </section>
 {% if review_pipeline %}

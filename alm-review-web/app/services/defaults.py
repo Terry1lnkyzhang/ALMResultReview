@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AiConfig, EvidenceConfig, PromptVersion, SyncConfig
+from app.models import AiConfig, EvidenceConfig, PromptVersion, SyncConfig, WorkerLease
 from app.services.workspaces import default_workspace
 
 # Legacy record only: the review is driven by the packaged Skills under
@@ -20,6 +20,10 @@ def ensure_defaults(db: Session) -> None:
     workspace = default_workspace(db)
     if db.get(AiConfig, 1) is None:
         db.add(AiConfig(id=1))
+    if db.get(AiConfig, 2) is None:
+        db.add(AiConfig(id=2, enabled=False))
+    if db.get(WorkerLease, 1) is None:
+        db.add(WorkerLease(id=1))
     evidence_config = db.scalar(
         select(EvidenceConfig)
         .where(EvidenceConfig.workspace_id == workspace.id)

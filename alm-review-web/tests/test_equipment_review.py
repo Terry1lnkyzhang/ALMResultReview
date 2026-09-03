@@ -9,6 +9,7 @@ from app.services.equipment_review import (
     analyze_equipment_steps,
     apply_equipment_disambiguation,
     apply_extracted_equipment,
+    apply_html_report_equipment,
     merge_pending_names,
     registry_equipment_names,
 )
@@ -766,6 +767,54 @@ def test_extracted_name_cannot_replace_previous_equipment_without_identity() -> 
     assert checks[0]["matches"] == []
 
 
+def test_shared_name_reuses_unique_equipment_verified_in_prior_step() -> None:
+    registry = [
+        equipment(
+            None,
+            "FPP32856-0002",
+            description="System Phantom",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=1,
+        ),
+        equipment(
+            None,
+            "OTHER-0002",
+            description="System Phantom",
+            calibration_due_date=date(2027, 4, 2),
+            equipment_pk=2,
+        ),
+    ]
+    content = review_content(
+        "The scan completed successfully.",
+        description="Scan the system phantom (Physics layer).",
+        expected="The scan succeeds.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["previously_matched_equipment_ids"] = ["SN:FPP32856-0002"]
+
+    resolved, pending = apply_extracted_equipment(
+        content,
+        checks,
+        {
+            1: [
+                _extracted(
+                    device_name="system phantom",
+                    source_text="Scan the system phantom (Physics layer).",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert resolved == {1}
+    assert pending == {}
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["matches"][0]["serial_number"] == "FPP32856-0002"
+    assert checks[0]["matches"][0]["matched_by"] == ["previous_step_equipment"]
+
+
 def test_shared_name_with_identical_calibration_data_still_decides() -> None:
     registry = [
         equipment("PCCSY-RD-CT-1-0175", "0001", equipment_pk=1),
@@ -793,6 +842,86 @@ def test_shared_name_with_identical_calibration_data_still_decides() -> None:
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
     assert checks[0]["warnings"][0]["type"] == "equipment_name_shared"
+
+
+def test_html_phantom_code_overrides_name_only_representative() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-0-0002",
+            "N/A",
+            description="全身体模(Whole Body Phantom)",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=2,
+        ),
+        equipment(
+            "PCCSY-RD-CT-0-0045",
+            "K25ME0000239",
+            description="全身体模(Whole Body Phantom)",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=45,
+        ),
+        equipment(
+            "PCCSY-RD-CT-0-0006",
+            "N/A",
+            description="女体模(The Female Body Phantom)",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=6,
+        ),
+    ]
+    content = review_content(
+        r"Saved screenshot: refer to \\server\report.html",
+        description="Use the adult body phantom and record the phantom code.",
+        expected="Phantom Code:__",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": True,
+                "selected_equipment_ids": [],
+                "selected_equipment_names": ["全身体模(Whole Body Phantom)"],
+                "reason": "The ALM Step names an adult body phantom.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-0-0002"
+
+    apply_html_report_equipment(
+        content,
+        checks,
+        {
+            1: [
+                {
+                    "equipment_id": "PCCSY-RD-CT-0-0006",
+                    "source_path": r"\\server\report.html",
+                    "block_id": "test-result-3",
+                    "label": "Phantom Code",
+                }
+            ]
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "fail"
+    assert checks[0]["code"] == "equipment_description_mismatch"
+    assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-0-0006"
+    assert checks[0]["matches"][0]["matched_by"] == ["html_report_equipment_id"]
+    assert checks[0]["html_reported_equipment"][0]["block_id"] == "test-result-3"
+    assert not any(
+        warning["type"] == "equipment_name_shared"
+        for warning in checks[0]["warnings"]
+    )
 
 
 def test_shared_name_with_different_due_dates_fails_without_an_identifier() -> None:

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import (
+    AiConfig,
     AlmRun,
     EquipmentRegistry,
     EvidenceConfig,
@@ -357,6 +358,38 @@ def test_evidence_configuration_change_updates_review_policy() -> None:
         assert current_review_policy_key(db) != first_key
 
 
+def test_review_policy_tracks_enabled_endpoint_identity_but_not_capacity() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        primary = AiConfig(
+            id=1,
+            base_url="http://ai-one.example.test/v1",
+            model_name="model-one",
+            review_concurrency=1,
+            enabled=True,
+        )
+        secondary = AiConfig(
+            id=2,
+            base_url="http://ai-two.example.test/v1",
+            model_name="model-two",
+            review_concurrency=1,
+            enabled=False,
+        )
+        db.add_all((primary, secondary))
+        db.commit()
+        first_key = current_review_policy_key(db)
+
+        primary.review_concurrency = 4
+        secondary.base_url = "http://disabled-change.example.test/v1"
+        db.commit()
+        assert current_review_policy_key(db) == first_key
+
+        secondary.enabled = True
+        db.commit()
+        assert current_review_policy_key(db) != first_key
+
+
 def test_workspace_project_change_updates_review_policy() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -444,7 +477,13 @@ def test_every_verdict_module_is_hashed_into_the_review_policy() -> None:
     from app.services.review_policy import _REVIEW_POLICY_FILES
 
     # Transport and orchestration cannot change a verdict, so they stay out.
-    exempt = {"ai_transport", "review_policy", "workspaces", "worker_tasks"}
+    exempt = {
+        "ai_transport",
+        "review_policy",
+        "worker_lease",
+        "workspaces",
+        "worker_tasks",
+    }
     hashed = {path.stem for path in _REVIEW_POLICY_FILES if path.suffix == ".py"}
     imported = {
         match.group(1)

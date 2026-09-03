@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from app.services.html_evidence import HtmlEvidenceResolver
+from app.services.html_evidence import (
+    HtmlEvidenceBlock,
+    HtmlEvidenceResolver,
+    actual_phantom_codes,
+)
 
 
 def write_report(path: Path, result_values: list[str]) -> None:
@@ -82,6 +86,20 @@ def test_html_extracts_structured_result_data_without_executing_script(
     assert "status: Pass" in text
     assert "do not include" not in text
     assert "Empty report shell" not in text
+
+
+def test_actual_phantom_codes_ignores_expected_and_reads_actual() -> None:
+    block = HtmlEvidenceBlock(
+        "test-result-3",
+        "expect: Phantom Code:PCCSY-RD-CT-0-0002\n"
+        "actual: Phantom Code:PCCSY-RD-CT-0-0006\n"
+        "Patient Orientation:HF S\n"
+        "status: Pass",
+    )
+
+    assert actual_phantom_codes(block) == (
+        ("Phantom Code", "PCCSY-RD-CT-0-0006"),
+    )
 
 
 def test_html_fallback_maps_automation_result_relative_path(tmp_path: Path) -> None:

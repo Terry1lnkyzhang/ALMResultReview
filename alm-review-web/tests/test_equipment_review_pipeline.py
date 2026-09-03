@@ -1034,6 +1034,195 @@ def test_process_job_sends_explicit_html_report_to_ai_review(monkeypatch) -> Non
         assert report_stage["assessment_statuses"] == {"pass": 1}
 
 
+def test_process_job_uses_html_phantom_code_for_equipment_identity(
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        configure_review(db)
+        workspace = default_workspace(db)
+        workspace.equipment_review_enabled = True
+        db.add(
+            EvidenceConfig(
+                workspace_id=workspace.id,
+                allowed_network_root=r"\\server\approved",
+                external_evidence_review_enabled=True,
+            )
+        )
+        db.add_all(
+            [
+                EquipmentRegistry(
+                    id=2,
+                    equipment_id="PCCSY-RD-CT-0-0002",
+                    description="全身体模(Whole Body Phantom)",
+                    manufacturer="KYOTO KAGAKU,Co.LTP",
+                    model_number="PH-2B",
+                    serial_number="N/A",
+                    calibration_interval="No calibration required",
+                ),
+                EquipmentRegistry(
+                    id=45,
+                    equipment_id="PCCSY-RD-CT-0-0045",
+                    description="全身体模(Whole Body Phantom)",
+                    manufacturer="KYOTO KAGAKU,Co.LTP",
+                    model_number="PH-2B",
+                    serial_number="K25ME0000239",
+                    calibration_interval="No calibration required",
+                ),
+                EquipmentRegistry(
+                    id=6,
+                    equipment_id="PCCSY-RD-CT-0-0006",
+                    description="女体模(The Female Body Phantom)",
+                    manufacturer="N/A",
+                    model_number="N/A",
+                    serial_number="N/A",
+                    calibration_interval="No calibration required",
+                ),
+            ]
+        )
+        db.commit()
+        report_path = r"\\server\approved\result_57641.html"
+        report_text = (
+            "description: Use the adult body phantom and record the phantom code.\n"
+            "expect: Phantom Code:__\n"
+            "actual: Phantom Code:PCCSY-RD-CT-0-0006\n"
+            "Patient Orientation:HF S\n"
+            "status: Pass"
+        )
+        job = add_job(
+            db,
+            description="Use the adult body phantom and record the phantom code.",
+            expected="Phantom Code:__",
+            actual=f"Saved screenshot: refer to {report_path}",
+        )
+        run = db.get(AlmRun, job.run_id)
+        assert run is not None
+        run.workspace_id = workspace.id
+        run.test_id = 57641
+        job.workspace_id = workspace.id
+        db.commit()
+
+        def post(*args, **kwargs):
+            request = kwargs["json"]
+            system_content = request["messages"][0]["content"]
+            skill_input = json.loads(request["messages"][1]["content"])
+            step = skill_input["steps"][0]
+            if "ALM Text Review and Evidence Planning" in system_content:
+                output = {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [],
+                            "reference_decisions": [
+                                {
+                                    "candidate_id": candidate["candidate_id"],
+                                    "role": (
+                                        "test_equipment"
+                                        if candidate["type"] == "equipment"
+                                        else "result_evidence"
+                                    ),
+                                    "requires_check": True,
+                                    "reason": "The reference requires review.",
+                                }
+                                for candidate in step["reference_candidates"]
+                            ],
+                            "extracted_equipment": [
+                                {
+                                    "device_name": "adult body phantom",
+                                    "equipment_id": "",
+                                    "serial_number": "",
+                                    "reported_calibration_due_date": "",
+                                    "source_text": "Use the adult body phantom",
+                                }
+                            ],
+                            "summary": "The report carries the execution result.",
+                        }
+                    ]
+                }
+            elif "HTML Evidence Review" in system_content:
+                report = step["reports"][0]
+                output = {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "status": "pass",
+                            "description_coverage": "supported",
+                            "expected_coverage": "supported",
+                            "actual_coverage": "supported",
+                            "result_consistency": "consistent",
+                            "release_consistency": "not_checked",
+                            "reviewed_report_ids": [report["report_id"]],
+                            "evidence": [
+                                {
+                                    "report_id": report["report_id"],
+                                    "block_id": "test-result-3",
+                                    "quote": report_text,
+                                    "supports": [
+                                        "description",
+                                        "expected",
+                                        "actual",
+                                        "result",
+                                    ],
+                                }
+                            ],
+                            "reason": "The report supports the Step result.",
+                        }
+                    ]
+                }
+            elif "Equipment Role Review" in system_content:
+                output = {
+                    "decisions": [
+                        {
+                            "review_step": 1,
+                            "role": "controlled_equipment",
+                            "required": True,
+                            "selected_equipment_ids": [],
+                            "selected_equipment_names": [
+                                "全身体模(Whole Body Phantom)"
+                            ],
+                            "reason": "Adult body phantom maps to Whole Body Phantom.",
+                        }
+                    ]
+                }
+            else:
+                raise AssertionError(f"Unexpected Skill request: {system_content[:80]}")
+            return StubResponse(json.dumps(output, ensure_ascii=False))
+
+        monkeypatch.setattr("app.services.reviews.httpx.post", post)
+        monkeypatch.setattr("app.services.equipment_pipeline.httpx.post", post)
+        monkeypatch.setattr(
+            "app.services.reviews.HtmlEvidenceResolver.resolve",
+            lambda *_args: HtmlEvidenceResult(
+                status="ready",
+                size_bytes=222097,
+                sha256="b" * 64,
+                blocks=(HtmlEvidenceBlock("test-result-3", report_text),),
+            ),
+        )
+
+        result = process_job(db, job)
+        step_result = json.loads(result.step_results_json)[0]
+        equipment_result = step_result["equipment"]
+
+        assert result.verdict == "unqualified"
+        assert equipment_result["code"] == "equipment_description_mismatch"
+        assert equipment_result["matches"][0]["equipment_id"] == (
+            "PCCSY-RD-CT-0-0006"
+        )
+        assert equipment_result["matches"][0]["matched_by"] == [
+            "html_report_equipment_id"
+        ]
+        assert equipment_result["html_reported_equipment"][0]["block_id"] == (
+            "test-result-3"
+        )
+        assert not any(
+            warning["type"] == "equipment_name_shared"
+            for warning in step_result["warnings"]
+        )
+
+
 def test_process_job_supplies_release_record_to_html_review(monkeypatch) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

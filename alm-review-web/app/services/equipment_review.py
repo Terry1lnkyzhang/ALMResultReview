@@ -567,6 +567,7 @@ def _evaluate_matches(
         "model_number",
         "extracted_equipment_id",
         "extracted_serial_number",
+        "html_report_equipment_id",
     }
     reported_part_numbers = {
         _normalized(value).casefold()
@@ -866,7 +867,21 @@ def apply_extracted_equipment(
                         continue
                     method = "extracted_serial_number"
             else:
-                rows, ambiguous = _rows_for_name(name, name_index, check)
+                name_in_actual = bool(name) and _name_key(name) in actual_key
+                previous_name_rows = [
+                    item
+                    for item in name_index.get(_name_key(name), [])
+                    if equipment_reference(item) in previous_references
+                ]
+                if (
+                    previous_references
+                    and not name_in_actual
+                    and len(previous_name_rows) == 1
+                ):
+                    rows, ambiguous = previous_name_rows, False
+                    method = "previous_step_equipment"
+                else:
+                    rows, ambiguous = _rows_for_name(name, name_index, check)
                 if ambiguous:
                     ambiguous_names.append(name)
                     continue
@@ -875,7 +890,6 @@ def apply_extracted_equipment(
                     # language, which only the second pass can map.
                     unmapped_names.append(name)
                     continue
-                name_in_actual = bool(name) and _name_key(name) in actual_key
                 if (
                     previous_references
                     and not name_in_actual
@@ -886,7 +900,8 @@ def apply_extracted_equipment(
                 ):
                     unmapped_names.append(name)
                     continue
-                method = "extracted_device_name"
+                if not method:
+                    method = "extracted_device_name"
             for item in rows:
                 matched[item.id] = item
                 matched_by.setdefault(item.id, set()).add(method)
@@ -970,6 +985,101 @@ def apply_extracted_equipment(
             )
             resolved.add(review_step)
     return resolved, pending
+
+
+def apply_html_report_equipment(
+    content: dict[str, Any],
+    checks: list[dict[str, Any]],
+    reported: dict[int, list[dict[str, str]]],
+    equipment: Iterable[EquipmentRegistry],
+) -> list[dict[str, Any]]:
+    """Apply explicit equipment identifiers read from trusted HTML report blocks."""
+    by_id = {
+        item.equipment_id.casefold(): item
+        for item in equipment
+        if item.equipment_id
+    }
+    steps = {
+        int(step["review_step"]): step for step in content.get("steps", [])
+    }
+    for check in checks:
+        review_step = int(check["review_step"])
+        entries = reported.get(review_step, [])
+        if not entries:
+            continue
+        check["html_reported_equipment"] = entries
+        check["warnings"] = [
+            warning
+            for warning in check.get("warnings", [])
+            if warning.get("type") != "equipment_name_shared"
+        ]
+        identifiers = list(
+            dict.fromkeys(
+                _normalized(entry.get("equipment_id")) for entry in entries
+            )
+        )
+        matched = {
+            item.id: item
+            for identifier in identifiers
+            if (item := by_id.get(identifier.casefold())) is not None
+        }
+        unknown = [
+            identifier
+            for identifier in identifiers
+            if identifier.casefold() not in by_id
+        ]
+        step = steps.get(review_step, {})
+        raw_actual = str(step.get("actual") or "")
+        if matched:
+            _evaluate_matches(
+                check,
+                list(matched.values()),
+                {
+                    item_id: {"html_report_equipment_id"}
+                    for item_id in matched
+                },
+                _execution_date(step, content),
+                _reported_calibration_range(raw_actual),
+                _reported_asset_ranges(raw_actual),
+                _reported_due_date(raw_actual),
+            )
+            selected_names = {
+                _name_key(_normalized(name))
+                for name in check.get("disambiguation", {}).get(
+                    "selected_equipment_names", []
+                )
+            }
+            matched_names = {
+                _name_key(_normalized(item.description)) for item in matched.values()
+            }
+            if selected_names and selected_names.isdisjoint(matched_names):
+                check.update(
+                    status="fail",
+                    code="equipment_description_mismatch",
+                    summary=(
+                        "HTML 报告记录的设备标识符 "
+                        + ", ".join(identifiers)
+                        + " 对应台账设备 "
+                        + ", ".join(item.description for item in matched.values())
+                        + "，与步骤要求识别出的设备名称 "
+                        + ", ".join(
+                            check["disambiguation"]["selected_equipment_names"]
+                        )
+                        + " 不一致。"
+                    ),
+                )
+        else:
+            check["matches"] = []
+        if unknown:
+            check.update(
+                status="fail",
+                code="equipment_not_found",
+                summary=(
+                    "HTML 报告明确记录了以下设备标识符，但台账中不存在："
+                    + ", ".join(unknown)
+                ),
+            )
+    return checks
 
 
 def merge_pending_names(

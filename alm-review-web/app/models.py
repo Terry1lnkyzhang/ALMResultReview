@@ -125,6 +125,14 @@ class AiConfig(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=120)
     review_concurrency: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    health_status: Mapped[str] = mapped_column(
+        String(32), default="healthy", nullable=False
+    )
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime)
+    last_error: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
@@ -210,6 +218,7 @@ class ReviewJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="")
+    ai_config_id: Mapped[int | None] = mapped_column(Integer, index=True)
     claimed_by: Mapped[str | None] = mapped_column(String(255), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -259,6 +268,19 @@ class WorkerHeartbeat(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
+class WorkerLease(Base):
+    __tablename__ = "worker_lease"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    owner_token: Mapped[str | None] = mapped_column(String(36), unique=True)
+    worker_id: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    process_id: Mapped[int | None] = mapped_column(Integer)
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class ReviewResult(Base):
     __tablename__ = "review_results"
 
@@ -273,6 +295,8 @@ class ReviewResult(Base):
     source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     review_policy_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    ai_config_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    ai_endpoint: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
     verdict: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     issue_summary: Mapped[str] = mapped_column(LongText, default="")
     criteria_json: Mapped[str | None] = mapped_column(LongText)

@@ -76,7 +76,8 @@
     <div class="review-progress-facts">
       <span>Worker <strong data-worker-status>{{ worker_heartbeat.status if worker_online else 'offline' }}</strong><span data-worker-id>{% if worker_heartbeat %} &middot; {{ worker_heartbeat.worker_id }}{% endif %}</span></span>
       <span><strong data-review-queued>{{ review_job_counts.get('queued', 0) }}</strong> queued</span>
-      <span><strong data-review-running>{{ review_job_counts.get('running', 0) }}</strong> / <strong data-review-concurrency>{{ ai_config.review_concurrency if ai_config else 1 }}</strong> running</span>
+      <span><strong data-review-running>{{ review_job_counts.get('running', 0) }}</strong> / <strong data-review-concurrency>{{ review_concurrency_total }}</strong> running</span>
+      {% for endpoint in ai_endpoint_statuses %}<span data-endpoint-status="{{ endpoint.id }}">Endpoint {{ endpoint.id }} <strong data-endpoint-health>{{ endpoint.health_status if endpoint.enabled else 'disabled' }}</strong> &middot; <strong data-endpoint-running>{{ endpoint.running }}</strong>/<strong data-endpoint-capacity>{{ endpoint.capacity }}</strong></span>{% endfor %}
       <span><strong data-review-failed>{{ review_progress.review_failed or 0 }}</strong> Runs failed</span>
       <span class="queue-hint-inline" data-review-pending-sync{% if not run_sync_batch.active %} hidden{% endif %}><strong data-review-pending-sync-count>{{ run_sync_batch.queued + run_sync_batch.running }}</strong> Runs still refreshing from ALM before review</span>
       <span class="queue-warning" data-queue-warning{% if not review_job_counts.get('queued', 0) or (worker_online and not current_workspace.review_queue_paused) %} hidden{% endif %}>{% if current_workspace.review_queue_paused %}Review queue is paused; queued jobs stay in the queue until you resume it.{% else %}Worker is offline; queued jobs will wait.{% endif %}</span>
@@ -96,6 +97,14 @@
         panel.querySelector("[data-review-queued]").textContent = status.queued;
         panel.querySelector("[data-review-running]").textContent = status.running;
         panel.querySelector("[data-review-concurrency]").textContent = status.review_concurrency;
+        for (const endpoint of status.endpoints || []) {
+          const endpointRow = panel.querySelector(`[data-endpoint-status="${endpoint.id}"]`);
+          if (!endpointRow) continue;
+          endpointRow.querySelector("[data-endpoint-health]").textContent = endpoint.enabled ? endpoint.health_status : "disabled";
+          endpointRow.querySelector("[data-endpoint-running]").textContent = endpoint.running;
+          endpointRow.querySelector("[data-endpoint-capacity]").textContent = endpoint.capacity;
+          endpointRow.title = endpoint.last_error || "";
+        }
         const pendingSync = panel.querySelector("[data-review-pending-sync]");
         if (pendingSync) {
           panel.querySelector("[data-review-pending-sync-count]").textContent = status.pending_run_sync;

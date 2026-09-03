@@ -19,7 +19,7 @@ from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.09.02.1"
+REVIEW_ENGINE_VERSION = "2026.09.02.2"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",
@@ -55,7 +55,11 @@ def current_review_policy_key(
     workspace_id: int | None = None,
 ) -> str:
     workspace = resolve_workspace(db, workspace_id)
-    ai_config = db.get(AiConfig, 1)
+    ai_pool = db.scalars(
+        select(AiConfig)
+        .where(AiConfig.enabled.is_(True))
+        .order_by(AiConfig.id)
+    ).all()
     evidence_config = workspace_evidence_config(db, workspace.id)
     equipment_statement = select(EquipmentRegistry).order_by(
         EquipmentRegistry.equipment_id,
@@ -111,8 +115,14 @@ def current_review_policy_key(
         "project": workspace.project,
         "engine_version": REVIEW_ENGINE_VERSION,
         "implementation_hash": _review_implementation_hash(),
-        "ai_base_url": ai_config.base_url if ai_config else None,
-        "model_name": ai_config.model_name if ai_config else None,
+        "ai_pool": [
+            {
+                "id": config.id,
+                "base_url": config.base_url,
+                "model_name": config.model_name,
+            }
+            for config in ai_pool
+        ],
         "authoritative_skills": [
             skill_policy_identity(skill_id)
             for skill_id in authoritative_skill_ids

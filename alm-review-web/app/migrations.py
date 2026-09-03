@@ -1,5 +1,36 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from sqlalchemy import Engine, MetaData, Table, inspect, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
+
+from app.models import WorkerLease
+
+_MYSQL_SCHEMA_LOCK_WAIT_SECONDS = 5
+
+
+@contextmanager
+def _schema_migration_connection(engine: Engine) -> Iterator[Connection]:
+    try:
+        with engine.begin() as connection:
+            if engine.dialect.name == "mysql":
+                connection.exec_driver_sql(
+                    "SET SESSION lock_wait_timeout = "
+                    f"{_MYSQL_SCHEMA_LOCK_WAIT_SECONDS}"
+                )
+            yield connection
+    except OperationalError as exc:
+        error_args = getattr(exc.orig, "args", ())
+        error_code = error_args[0] if error_args else None
+        if engine.dialect.name == "mysql" and error_code == 1205:
+            raise RuntimeError(
+                "Schema migration could not acquire a MySQL metadata lock within "
+                f"{_MYSQL_SCHEMA_LOCK_WAIT_SECONDS} seconds. Stop the existing ALM "
+                "Review Web and Worker processes, then start the upgraded service "
+                "again."
+            ) from exc
+        raise
 
 
 def _make_sqlite_column_nullable(
@@ -44,7 +75,8 @@ def _make_sqlite_column_nullable(
 
 
 def ensure_compatible_schema(engine: Engine) -> None:
-    with engine.begin() as connection:
+    with _schema_migration_connection(engine) as connection:
+        WorkerLease.__table__.create(connection, checkfirst=True)
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         boolean_type = "BOOLEAN" if engine.dialect.name != "mysql" else "TINYINT(1)"
@@ -228,6 +260,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                         "DATETIME NULL"
                     )
                 )
+            if "ai_config_id" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE review_jobs ADD COLUMN ai_config_id "
+                        "INTEGER NULL"
+                    )
+                )
             indexes = {index["name"] for index in inspector.get_indexes("review_jobs")}
             if "ix_review_jobs_batch_id" not in indexes:
                 connection.execute(
@@ -248,6 +287,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     text(
                         "CREATE INDEX ix_review_jobs_lease_expires_at "
                         "ON review_jobs (lease_expires_at)"
+                    )
+                )
+            if "ix_review_jobs_ai_config_id" not in indexes:
+                connection.execute(
+                    text(
+                        "CREATE INDEX ix_review_jobs_ai_config_id "
+                        "ON review_jobs (ai_config_id)"
                     )
                 )
 
@@ -375,6 +421,22 @@ def ensure_compatible_schema(engine: Engine) -> None:
                         "INTEGER NOT NULL DEFAULT 1"
                     )
                 )
+            health_columns = {
+                "health_status": "VARCHAR(32) NOT NULL DEFAULT 'healthy'",
+                "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+                "cooldown_until": "DATETIME NULL",
+                "last_error": "VARCHAR(2000) NOT NULL DEFAULT ''",
+                "last_success_at": "DATETIME NULL",
+                "last_failure_at": "DATETIME NULL",
+            }
+            for column_name, column_definition in health_columns.items():
+                if column_name not in columns:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE ai_configs ADD COLUMN {column_name} "
+                            f"{column_definition}"
+                        )
+                    )
 
         if "review_results" in table_names:
             columns = {
@@ -400,6 +462,30 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     text(
                         "ALTER TABLE review_results ADD COLUMN review_policy_key "
                         "VARCHAR(64) NOT NULL DEFAULT ''"
+                    )
+                )
+            if "ai_config_id" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE review_results ADD COLUMN ai_config_id "
+                        "INTEGER NULL"
+                    )
+                )
+            if "ai_endpoint" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE review_results ADD COLUMN ai_endpoint "
+                        "VARCHAR(1000) NOT NULL DEFAULT ''"
+                    )
+                )
+            indexes = {
+                index["name"] for index in inspector.get_indexes("review_results")
+            }
+            if "ix_review_results_ai_config_id" not in indexes:
+                connection.execute(
+                    text(
+                        "CREATE INDEX ix_review_results_ai_config_id "
+                        "ON review_results (ai_config_id)"
                     )
                 )
 

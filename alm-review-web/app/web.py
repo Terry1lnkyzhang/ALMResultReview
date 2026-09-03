@@ -40,6 +40,7 @@ from app.models import (
     WorkerHeartbeat,
     Workspace,
 )
+from app.services.ai_transport import ai_endpoint_available, ai_endpoint_health_status
 from app.services.docx_import import MAX_DOCX_BYTES, parse_alm_docx
 from app.services.equipment_registry import (
     import_equipment_workbook,
@@ -86,6 +87,40 @@ from app.services.workspaces import (
 )
 
 basic_auth = HTTPBasic(auto_error=False)
+
+
+def _has_enabled_ai_endpoint(db: Session) -> bool:
+    return db.scalar(
+        select(AiConfig.id).where(AiConfig.enabled.is_(True)).limit(1)
+    ) is not None
+
+
+def _ai_endpoint_statuses(
+    db: Session,
+    configs: list[AiConfig],
+) -> list[dict[str, Any]]:
+    running_by_config = dict(
+        db.execute(
+            select(ReviewJob.ai_config_id, func.count())
+            .where(ReviewJob.status == "running")
+            .group_by(ReviewJob.ai_config_id)
+        ).all()
+    )
+    if None in running_by_config:
+        running_by_config[1] = running_by_config.get(1, 0) + running_by_config.pop(None)
+    return [
+        {
+            "id": config.id,
+            "model_name": config.model_name,
+            "enabled": config.enabled,
+            "available": ai_endpoint_available(config),
+            "health_status": ai_endpoint_health_status(config),
+            "running": running_by_config.get(config.id, 0),
+            "capacity": max(1, min(4, config.review_concurrency)),
+            "last_error": config.last_error,
+        }
+        for config in configs
+    ]
 
 
 def _skill_catalog() -> list[dict[str, Any]]:
@@ -668,7 +703,18 @@ def dashboard(
         .order_by(desc(PromptVersion.id))
         .limit(1)
     )
-    ai_config = db.get(AiConfig, 1)
+    ai_configs = db.scalars(select(AiConfig).order_by(AiConfig.id)).all()
+    ai_config = next((config for config in ai_configs if config.id == 1), None)
+    active_model_names = list(
+        dict.fromkeys(config.model_name for config in ai_configs if config.enabled)
+    )
+    active_model_name = active_model_names[0] if len(active_model_names) == 1 else None
+    ai_endpoint_statuses = _ai_endpoint_statuses(db, ai_configs)
+    review_concurrency_total = sum(
+        max(1, min(4, config.review_concurrency))
+        for config in ai_configs
+        if config.enabled
+    )
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
     reviews_by_run = current_reviews(db, runs, policy_key)
     all_views = [
@@ -679,7 +725,7 @@ def dashboard(
             users,
             reviews_by_run[run.run_id],
             active_prompt.id if active_prompt else None,
-            ai_config.model_name if ai_config else None,
+            active_model_name,
         )
         for run in runs
     ]
@@ -864,6 +910,8 @@ def dashboard(
             "run_sync_batch": run_sync_batch,
             "sync_display_at": sync_display_at,
             "ai_config": ai_config,
+            "ai_endpoint_statuses": ai_endpoint_statuses,
+            "review_concurrency_total": review_concurrency_total,
             "worker_heartbeat": worker_heartbeat,
             "worker_online": worker_online,
             "review_progress": review_progress,
@@ -907,7 +955,9 @@ def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
             .group_by(ReviewJob.status)
         ).all()
     )
-    ai_config = db.get(AiConfig, 1)
+    ai_configs = db.scalars(select(AiConfig).order_by(AiConfig.id)).all()
+    enabled_ai_configs = [config for config in ai_configs if config.enabled]
+    endpoint_statuses = _ai_endpoint_statuses(db, ai_configs)
     worker_heartbeat = db.scalar(
         select(WorkerHeartbeat).order_by(desc(WorkerHeartbeat.last_seen_at)).limit(1)
     )
@@ -946,9 +996,10 @@ def queue_status(workspace: int | None = None, db: Session = Depends(get_db)):
         "running": counts.get("running", 0),
         "review_paused": current_workspace.review_queue_paused,
         "pending_run_sync": sync_batch["queued"] + sync_batch["running"],
-        "review_concurrency": max(
-            1, min(4, ai_config.review_concurrency if ai_config is not None else 1)
+        "review_concurrency": sum(
+            max(1, min(4, config.review_concurrency)) for config in enabled_ai_configs
         ),
+        "endpoints": endpoint_statuses,
         "worker_online": worker_online,
         "worker_status": (
             "working"
@@ -1452,8 +1503,7 @@ def review_run_now(
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             f"/runs/{run_id}",
             "尚未配置 AI 评审。",
@@ -1614,8 +1664,7 @@ def process_reviews(
 ):
     workspace = resolve_workspace(db, workspace_id)
     redirect_path = f"/?workspace={workspace.id}"
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             redirect_path,
             "AI review is disabled. Configure the local model before processing.",
@@ -1664,8 +1713,7 @@ def retry_failed_reviews(
 ):
     workspace = resolve_workspace(db, workspace_id)
     redirect_path = f"/?workspace={workspace.id}"
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             redirect_path,
             "AI review is disabled. Configure the model before retrying.",
@@ -1686,8 +1734,7 @@ def rereview_runs(
 ):
     workspace = resolve_workspace(db, workspace_id)
     redirect_path = f"/?workspace={workspace.id}"
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             redirect_path,
             "AI review is disabled. Configure the model before re-reviewing.",
@@ -1722,8 +1769,7 @@ def rereview_filtered_runs(
     redirect_path = _dashboard_filter_path(
         workspace.id, status, tester, owner, query, search_steps
     )
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             redirect_path,
             "AI review is disabled. Configure the model before re-reviewing.",
@@ -1765,8 +1811,7 @@ def sync_and_review_filtered_runs(
             "No ALM synchronization scope is configured.",
             "error",
         )
-    ai_config = db.get(AiConfig, 1)
-    if ai_config is None or not ai_config.enabled:
+    if not _has_enabled_ai_endpoint(db):
         return _redirect(
             redirect_path,
             "AI review is disabled. Configure the model before re-reviewing.",
@@ -2050,6 +2095,7 @@ def configuration(
     ).all()
     sync_config = workspace_sync_config(db, current_workspace.id)
     ai_config = db.get(AiConfig, 1)
+    ai_config_secondary = db.get(AiConfig, 2) or AiConfig(id=2, enabled=False)
     evidence_config = workspace_evidence_config(db, current_workspace.id)
     prompt = db.scalar(
         select(PromptVersion)
@@ -2095,6 +2141,11 @@ def configuration(
             "equipment_areas": equipment_areas,
             "project_options": project_options,
             "ai_config": ai_config,
+            "ai_config_secondary": ai_config_secondary,
+            "ai_config_health_status": ai_endpoint_health_status(ai_config),
+            "ai_config_secondary_health_status": ai_endpoint_health_status(
+                ai_config_secondary
+            ),
             "evidence_config": evidence_config,
             "prompt": prompt,
             "skill_catalog": _skill_catalog(),
@@ -2112,6 +2163,12 @@ def test_ai(
     timeout_seconds: int = Form(...),
     ai_api_key: str = Form(""),
     clear_ai_api_key: bool = Form(False),
+    ai_config_id: int = Form(1),
+    ai_base_url_2: str = Form(""),
+    model_name_2: str = Form(""),
+    timeout_seconds_2: int = Form(120),
+    ai_api_key_2: str = Form(""),
+    clear_ai_api_key_2: bool = Form(False),
     workspace_id: int | None = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -2126,18 +2183,26 @@ def test_ai(
             "AI connectivity must be tested on the laptop worker.",
             "error",
         )
-    saved_config = db.get(AiConfig, 1)
-    submitted_api_key = ai_api_key.strip()
+    selected_id = 2 if ai_config_id == 2 else 1
+    selected_base_url = ai_base_url_2 if selected_id == 2 else ai_base_url
+    selected_model_name = model_name_2 if selected_id == 2 else model_name
+    selected_timeout = timeout_seconds_2 if selected_id == 2 else timeout_seconds
+    selected_api_key = ai_api_key_2 if selected_id == 2 else ai_api_key
+    clear_selected_key = (
+        clear_ai_api_key_2 if selected_id == 2 else clear_ai_api_key
+    )
+    saved_config = db.get(AiConfig, selected_id)
+    submitted_api_key = selected_api_key.strip()
     ai_config = AiConfig(
-        id=1,
-        base_url=ai_base_url.strip(),
-        model_name=model_name.strip(),
+        id=selected_id,
+        base_url=selected_base_url.strip(),
+        model_name=selected_model_name.strip(),
         api_key=(
             ""
-            if clear_ai_api_key
+            if clear_selected_key
             else submitted_api_key or (saved_config.api_key if saved_config else "")
         ),
-        timeout_seconds=max(1, timeout_seconds),
+        timeout_seconds=max(1, selected_timeout),
         enabled=False,
     )
     try:
@@ -2171,6 +2236,13 @@ def save_configuration(
     clear_ai_api_key: bool = Form(False),
     review_concurrency: int = Form(1),
     ai_enabled: bool = Form(False),
+    ai_base_url_2: str = Form(""),
+    model_name_2: str = Form(""),
+    timeout_seconds_2: int = Form(120),
+    ai_api_key_2: str = Form(""),
+    clear_ai_api_key_2: bool = Form(False),
+    review_concurrency_2: int = Form(1),
+    ai_enabled_2: bool = Form(False),
     allowed_network_root: str = Form(""),
     local_html_fallback_root: str = Form(""),
     automation_release_project_name: str = Form(""),
@@ -2188,6 +2260,15 @@ def save_configuration(
     if workspace is None or workspace.archived:
         return _redirect("/ops/configuration", "Workspace not found.", "error")
     redirect_path = f"/ops/configuration?workspace={workspace.id}"
+    secondary_base_url = ai_base_url_2 if isinstance(ai_base_url_2, str) else ""
+    secondary_model_name = model_name_2 if isinstance(model_name_2, str) else ""
+    secondary_timeout = timeout_seconds_2 if isinstance(timeout_seconds_2, int) else 120
+    secondary_api_key = ai_api_key_2 if isinstance(ai_api_key_2, str) else ""
+    secondary_clear_key = clear_ai_api_key_2 is True
+    secondary_concurrency = (
+        review_concurrency_2 if isinstance(review_concurrency_2, int) else 1
+    )
+    secondary_enabled = ai_enabled_2 is True
     try:
         schedule_hour_text, schedule_minute_text = schedule_time.split(":", 1)
         schedule_hour = int(schedule_hour_text)
@@ -2298,9 +2379,23 @@ def save_configuration(
     if ai_config is None:
         ai_config = AiConfig(id=1)
         db.add(ai_config)
-    ai_config.base_url = ai_base_url.strip().rstrip("/")
-    ai_config.model_name = model_name.strip()
+    normalized_primary_url = ai_base_url.strip().rstrip("/")
+    normalized_primary_model = model_name.strip()
     submitted_api_key = ai_api_key.strip()
+    primary_api_key = (
+        ""
+        if clear_ai_api_key
+        else submitted_api_key or ai_config.api_key
+    )
+    primary_connection_changed = (
+        ai_config.base_url != normalized_primary_url
+        or ai_config.model_name != normalized_primary_model
+        or ai_config.api_key != primary_api_key
+        or ai_config.timeout_seconds != max(1, timeout_seconds)
+        or ai_config.enabled != ai_enabled
+    )
+    ai_config.base_url = normalized_primary_url
+    ai_config.model_name = normalized_primary_model
     if clear_ai_api_key:
         ai_config.api_key = ""
     elif submitted_api_key:
@@ -2308,6 +2403,47 @@ def save_configuration(
     ai_config.timeout_seconds = max(1, timeout_seconds)
     ai_config.review_concurrency = max(1, min(4, review_concurrency))
     ai_config.enabled = ai_enabled
+    if primary_connection_changed:
+        ai_config.health_status = "healthy"
+        ai_config.consecutive_failures = 0
+        ai_config.cooldown_until = None
+        ai_config.last_error = ""
+
+    ai_config_secondary = db.get(AiConfig, 2)
+    if ai_config_secondary is None:
+        ai_config_secondary = AiConfig(id=2)
+        db.add(ai_config_secondary)
+    normalized_secondary_url = secondary_base_url.strip().rstrip("/")
+    normalized_secondary_model = secondary_model_name.strip()
+    submitted_secondary_api_key = secondary_api_key.strip()
+    secondary_effective_api_key = (
+        ""
+        if secondary_clear_key
+        else submitted_secondary_api_key or ai_config_secondary.api_key
+    )
+    secondary_connection_changed = (
+        ai_config_secondary.base_url != normalized_secondary_url
+        or ai_config_secondary.model_name != normalized_secondary_model
+        or ai_config_secondary.api_key != secondary_effective_api_key
+        or ai_config_secondary.timeout_seconds != max(1, secondary_timeout)
+        or ai_config_secondary.enabled != secondary_enabled
+    )
+    ai_config_secondary.base_url = normalized_secondary_url
+    ai_config_secondary.model_name = normalized_secondary_model
+    if secondary_clear_key:
+        ai_config_secondary.api_key = ""
+    elif submitted_secondary_api_key:
+        ai_config_secondary.api_key = submitted_secondary_api_key
+    ai_config_secondary.timeout_seconds = max(1, secondary_timeout)
+    ai_config_secondary.review_concurrency = max(
+        1, min(4, secondary_concurrency)
+    )
+    ai_config_secondary.enabled = secondary_enabled
+    if secondary_connection_changed:
+        ai_config_secondary.health_status = "healthy"
+        ai_config_secondary.consecutive_failures = 0
+        ai_config_secondary.cooldown_until = None
+        ai_config_secondary.last_error = ""
 
     evidence_config = workspace_evidence_config(db, workspace.id)
     if evidence_config is None:
@@ -2337,7 +2473,10 @@ def save_configuration(
     db.commit()
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
-        configure_scheduler(scheduler)
+        configure_scheduler(
+            scheduler,
+            request.app.state.worker_owner_token,
+        )
     schedule_note = (
         " Restart the laptop Worker to load schedule-time changes."
         if get_settings().app_role == "web"
