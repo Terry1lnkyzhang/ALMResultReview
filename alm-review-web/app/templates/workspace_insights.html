@@ -63,7 +63,7 @@
           <td><span>{{ item.equipment_status or 'Status not recorded' }}</span><small>{% if item.calibration_date or item.calibration_due_date %}Calibration {{ item.calibration_date or '?' }} to {{ item.calibration_due_date or '?' }}{% else %}Calibration dates not recorded{% endif %}</small></td>
           <td><strong>{{ item.run_count }} Run{% if item.run_count != 1 %}s{% endif %} / {{ item.step_count }} Step{% if item.step_count != 1 %}s{% endif %}</strong><small>{% if item.first_used %}{{ item.first_used }}{% if item.last_used != item.first_used %} to {{ item.last_used }}{% endif %}{% else %}Execution date unavailable{% endif %}</small></td>
           <td>
-            <details class="usage-references"><summary>{{ item.references|length }} reference{% if item.references|length != 1 %}s{% endif %}</summary><div>{% for reference in item.references %}<a href="/runs/{{ reference.run_id }}"><strong>Run #{{ reference.alm_run_id }}</strong><span>Step {{ reference.step }} · TC {{ reference.test_id or '-' }}{% if reference.execution_date %} · {{ reference.execution_date }}{% endif %}</span><small>{{ reference.test_name or 'Unnamed test' }}{% if reference.matched_by %} · {{ reference.matched_by|join(', ') }}{% endif %}</small></a>{% endfor %}</div></details>
+            <details class="usage-references"><summary>{{ item.references|length }} reference{% if item.references|length != 1 %}s{% endif %}</summary><div>{% for reference in item.references %}<a href="/workspaces/{{ current_workspace.id }}/runs/{{ reference.alm_run_id }}"><strong>Run #{{ reference.alm_run_id }}</strong><span>Step {{ reference.step }} · TC {{ reference.test_id or '-' }}{% if reference.execution_date %} · {{ reference.execution_date }}{% endif %}</span><small>{{ reference.test_name or 'Unnamed test' }}{% if reference.matched_by %} · {{ reference.matched_by|join(', ') }}{% endif %}</small></a>{% endfor %}</div></details>
           </td>
         </tr>
       {% else %}
@@ -79,8 +79,8 @@
   <p class="section-note">These references are not counted as confirmed devices. Open the Run to inspect the original Step and review finding.</p>
   <div class="table-scroll">
     <table class="insights-table unresolved-table">
-      <thead><tr><th>Reference</th><th>Finding</th><th>Run / Step</th><th>Executed</th></tr></thead>
-      <tbody>{% for item in unresolved %}<tr><td><strong>{{ item.identifiers|join(', ') or 'Identity not recorded' }}</strong><small>{{ item.code|replace('_', ' ') }}</small></td><td>{{ item.summary or 'Equipment identity requires review.' }}</td><td><a href="/runs/{{ item.run_id }}">Run #{{ item.alm_run_id }} · Step {{ item.step }}</a><small>TC {{ item.test_id or '-' }} · {{ item.test_name or 'Unnamed test' }}</small></td><td>{{ item.execution_date or '-' }}</td></tr>{% else %}<tr><td class="empty-table" colspan="4">{% if query %}No unresolved references match this search.{% else %}No unresolved equipment references were found.{% endif %}</td></tr>{% endfor %}</tbody>
+      <thead><tr><th>Reference</th><th>Finding</th><th>Actual tester</th><th>Run / Step</th><th>Executed</th></tr></thead>
+      <tbody>{% for item in unresolved %}<tr><td><strong>{{ item.identifiers|join(', ') or 'Identity not recorded' }}</strong><small>{{ item.code|replace('_', ' ') }}</small></td><td>{{ item.summary or 'Equipment identity requires review.' }}</td><td>{{ item.actual_tester_label }}</td><td><a href="/workspaces/{{ current_workspace.id }}/runs/{{ item.alm_run_id }}">Run #{{ item.alm_run_id }} · Step {{ item.step }}</a><small>TC {{ item.test_id or '-' }} · {{ item.test_name or 'Unnamed test' }}</small></td><td>{{ item.execution_date or '-' }}</td></tr>{% else %}<tr><td class="empty-table" colspan="5">{% if query %}No unresolved references match this search.{% else %}No unresolved equipment references were found.{% endif %}</td></tr>{% endfor %}</tbody>
     </table>
   </div>
 </section>

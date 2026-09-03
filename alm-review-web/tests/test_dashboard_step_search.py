@@ -110,6 +110,27 @@ def test_filtered_run_ids_only_reads_step_text_when_requested() -> None:
         assert with_steps == [102]
 
 
+def test_filtered_run_ids_searches_the_displayed_alm_run_id() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        _seed(db)
+        run = db.get(AlmRun, 101)
+        assert run is not None
+        run.alm_run_id = 154042
+        db.commit()
+
+        assert _filtered_run_ids(
+            db,
+            1,
+            False,
+            "all",
+            "all",
+            "all",
+            "154042",
+        ) == [101]
+
+
 def test_dashboard_exposes_the_step_text_search_toggle() -> None:
     source, _, _ = templates.env.loader.get_source(templates.env, "dashboard.html")
 
