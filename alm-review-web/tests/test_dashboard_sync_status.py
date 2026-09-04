@@ -83,7 +83,7 @@ def test_dashboard_shows_completed_sync_time() -> None:
 
     assert "data-sync-status>COMPLETED<" in rendered
     assert "Completed 2026-08-14 16:25:30" in rendered
-    assert "42 Passed Runs selected" in rendered
+    assert "42 Passed/Failed Runs selected" in rendered
 
 
 def test_dashboard_distinguishes_queued_sync_from_review_jobs() -> None:

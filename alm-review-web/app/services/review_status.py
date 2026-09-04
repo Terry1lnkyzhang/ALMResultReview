@@ -6,10 +6,7 @@ from sqlalchemy import case, desc, func, select, tuple_
 from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
-from app.services.reviews import CurrentReview
-
-# Manual decisions that pin a Run to qualified against, or without, an AI verdict.
-FORCE_QUALIFIED_DECISIONS = frozenset({"override_qualified", "confirmed_qualified"})
+from app.services.reviews import FORCE_QUALIFIED_DECISIONS, CurrentReview
 
 # The dashboard must not load `warnings_json`, so ask the database whether it holds
 # anything beyond the two characters of an empty list.
@@ -26,17 +23,13 @@ def _review_from_result(
     manual: ManualDecision | None,
     has_warning: bool,
 ) -> CurrentReview:
-    if result.verdict == "qualified":
-        final_status = "qualified"
-    elif result.verdict == "unqualified":
-        final_status = (
-            "qualified"
-            if manual and manual.decision == "override_qualified"
-            else "unqualified"
-        )
-    elif manual and manual.decision == "confirmed_qualified":
+    if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
+        final_status = "unqualified"
+    elif result.verdict == "qualified":
+        final_status = "qualified"
+    elif result.verdict == "unqualified":
         final_status = "unqualified"
     else:
         final_status = "needs_manual_review"
@@ -74,7 +67,6 @@ def current_reviews(
     if not active_runs:
         return reviews
 
-    runs_by_id = {run.run_id: run for run in active_runs}
     review_keys = [
         (run.run_id, run.current_revision_id, run.source_hash) for run in active_runs
     ]
@@ -121,7 +113,7 @@ def current_reviews(
         results_by_run[result.run_id] = result
         warning_by_result_id[result.id] = bool(has_warning)
 
-    manuals_by_result: dict[int, ManualDecision] = {}
+    manuals_by_run: dict[int, ManualDecision] = {}
     if results_by_run:
         manuals = db.scalars(
             select(ManualDecision)
@@ -137,27 +129,20 @@ def current_reviews(
                 )
             )
             .where(
-                ManualDecision.review_result_id.in_(
-                    result.id for result in results_by_run.values()
-                )
+                tuple_(
+                    ManualDecision.run_id,
+                    ManualDecision.revision_id,
+                    ManualDecision.source_hash,
+                ).in_(review_keys)
             )
             .order_by(
-                ManualDecision.review_result_id,
+                ManualDecision.run_id,
                 desc(ManualDecision.created_at),
                 desc(ManualDecision.id),
             )
         ).all()
         for manual in manuals:
-            result = results_by_run.get(manual.run_id)
-            run = runs_by_id.get(manual.run_id)
-            if (
-                result is not None
-                and run is not None
-                and manual.review_result_id == result.id
-                and manual.revision_id == run.current_revision_id
-                and manual.source_hash == run.source_hash
-            ):
-                manuals_by_result.setdefault(manual.review_result_id, manual)
+            manuals_by_run.setdefault(manual.run_id, manual)
 
     unresolved_revision_ids = {
         run.current_revision_id
@@ -182,7 +167,7 @@ def current_reviews(
         if result is not None:
             reviews[run.run_id] = _review_from_result(
                 result,
-                manuals_by_result.get(result.id),
+                manuals_by_run.get(run.run_id),
                 warning_by_result_id.get(result.id, False),
             )
         elif run.current_revision_id in failed_revision_ids:

@@ -26,7 +26,11 @@ from app.services.review_status import (
     is_force_qualified,
     review_update_reasons,
 )
-from app.services.reviews import current_review, save_manual_decision
+from app.services.reviews import (
+    current_review,
+    revoke_manual_decision,
+    save_manual_decision,
+)
 from app.web import STATUS_LABELS, _matches_status
 
 
@@ -107,6 +111,72 @@ def test_qualified_result_rejects_manual_decision() -> None:
         run = prepare_run(db, "qualified")
         with pytest.raises(ValueError, match="not allowed"):
             save_manual_decision(db, run, "override_qualified", "operator", "No reason")
+
+
+def test_qualified_warning_allows_manual_acceptance_without_hiding_warning() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(
+            db,
+            "qualified",
+            warnings_json='[{"step": 1, "summary": "Check shared equipment name"}]',
+        )
+
+        manual = save_manual_decision(
+            db,
+            run,
+            "confirmed_warning_qualified",
+            "operator",
+            "Warning reviewed and accepted",
+        )
+        review = current_review(db, run)
+
+        assert manual.decision == "confirmed_warning_qualified"
+        assert review.final_status == "qualified"
+        assert review.has_warning
+        assert is_force_qualified(review)
+
+
+def test_warning_acceptance_can_be_revoked() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(
+            db,
+            "qualified",
+            warnings_json='[{"step": 1, "summary": "Warning"}]',
+        )
+        save_manual_decision(
+            db,
+            run,
+            "confirmed_warning_qualified",
+            "operator",
+            "Warning reviewed",
+        )
+
+        assert revoke_manual_decision(db, run) == 1
+        review = current_review(db, run)
+        assert review.manual_decision is None
+        assert review.final_status == "qualified"
+        assert review.has_warning
+        assert not is_force_qualified(review)
+
+
+def test_qualified_without_warning_rejects_warning_acceptance() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified", warnings_json="[]")
+
+        with pytest.raises(ValueError, match="not allowed"):
+            save_manual_decision(
+                db,
+                run,
+                "confirmed_warning_qualified",
+                "operator",
+                "No warning exists",
+            )
 
 
 def test_manual_decision_requires_a_reason_but_not_an_operator() -> None:

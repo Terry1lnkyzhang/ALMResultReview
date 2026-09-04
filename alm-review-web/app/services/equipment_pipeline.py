@@ -19,6 +19,7 @@ from app.services.equipment_review import (
     equipment_reference,
     merge_pending_names,
     registry_equipment_names,
+    requirement_previous_equipment_ids,
 )
 from app.services.skill_runner import SkillFailure, skill_runner
 
@@ -177,6 +178,14 @@ def apply_first_pass_equipment_decisions(
                 )[:300],
             }
         else:
+            if requirement_previous_equipment_ids(
+                question.description,
+                question.expected,
+                question.previously_matched_equipment_ids,
+                equipment_registry,
+            ):
+                remaining.append(question)
+                continue
             resolved[review_step] = {
                 "role": "dut_or_other",
                 "required": False,

@@ -241,18 +241,18 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 	evidence review is enabled. Attachments use the authenticated ALM API and enter the same
 	bounded visual review as approved network images; they are not treated as UNC paths.
 - `Sync ALM now` recursively refreshes the configured Test Lab scope. Only the latest
-	Passed Run for each Test Instance is imported by the Worker. The same synchronization reads the ALM
+	Passed or Failed Run for each Test Instance is imported by the Worker. The same synchronization reads the ALM
 	project user directory and displays people as `Full Name (CODE1 ID)`.
 - `Queue latest ALM changes` queues only current revisions whose AI review content changed
 	during the latest completed live ALM synchronization. Already reviewed, queued, or running
 	revisions are skipped. Review policy changes alone do not broaden this queue scope.
 - `Queue re-review` creates new review jobs while retaining all previous results. Scopes
-	are available for all Passed Runs, Unqualified only, Manual review only, or the combined
+	are available for all Passed/Failed Runs, Unqualified only, Manual review only, or the combined
 	Unqualified and Manual set.
 - Runs already queued or running are skipped when a re-review scope is submitted again.
 	The Worker processes queued reviews in the background; queue counts are shown on the
 	Dashboard.
-- `Current Workspace Review` counts each Passed Run once using its current revision. It
+- `Current Workspace Review` counts each Passed/Failed Run once using its current revision. It
 	shows current outcomes together with waiting and running jobs, regardless of which action
 	created those jobs.
 - Workspace queue controls on the Dashboard can pause new Review claims, resume them,
@@ -360,7 +360,7 @@ the current registry snapshot:
 - Ambiguous DUT/controlled-equipment roles use a separate constrained AI request. The model may
 	only select candidate Equipment IDs supplied from the registry and cannot invent an ID.
 - Equipment results and the registry fields used for the decision are stored in each Step result.
-	Registry changes update the review policy key and queue affected Passed Runs for re-review.
+	Registry changes update the review policy key and queue affected Passed/Failed Runs for re-review.
 
 ALM is currently configured with an HTTP URL. Credentials and ALM content therefore
 travel without TLS unless the server is moved behind HTTPS or a trusted encrypted tunnel.

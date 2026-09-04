@@ -40,7 +40,7 @@
       </div>
       <strong class="sync-progress-status" data-sync-status>{% if active_sync_job %}{{ active_sync_job.status|upper }}{% elif latest_sync_job %}{{ latest_sync_job.status|upper }}{% else %}NOT STARTED{% endif %}</strong>
     </div>
-    <p class="sync-progress-message" data-sync-message>{% if active_sync_job %}{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}{% elif latest_sync_job %}{% if sync_display_at %}{% if latest_sync_job.completed_at %}Completed{% else %}Started{% endif %} {{ sync_display_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}{% if latest_sync_job.status == 'completed' %} &middot; {{ latest_sync_job.runs_discovered }} Passed Runs selected{% elif latest_sync_job.status == 'failed' and latest_sync_job.error_message %} &middot; {{ latest_sync_job.error_message }}{% endif %}{% else %}No synchronization has run yet. Use Sync from ALM to import Passed Runs.{% endif %}</p>
+    <p class="sync-progress-message" data-sync-message>{% if active_sync_job %}{% if active_sync_job.status == 'running' and active_sync_job.progress_stage == 'queued' and not active_sync_job.progress_message %}This synchronization started before live progress tracking; detailed counts will be available from the next synchronization.{% else %}{{ active_sync_job.progress_message or 'Waiting for progress data from the worker' }}{% endif %}{% elif latest_sync_job %}{% if sync_display_at %}{% if latest_sync_job.completed_at %}Completed{% else %}Started{% endif %} {{ sync_display_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}{% if latest_sync_job.status == 'completed' %} &middot; {{ latest_sync_job.runs_discovered }} Passed/Failed Runs selected{% elif latest_sync_job.status == 'failed' and latest_sync_job.error_message %} &middot; {{ latest_sync_job.error_message }}{% endif %}{% else %}No synchronization has run yet. Use Sync from ALM to import Passed/Failed Runs.{% endif %}</p>
     {% if run_sync_batch.active %}
     <div class="sync-batch" data-sync-batch>
       <div class="sync-batch-heading">
@@ -138,7 +138,7 @@
         <option value="unqualified_manual">Unqualified + Manual</option>
         <option value="unqualified">Unqualified only</option>
         <option value="manual">Manual only</option>
-        <option value="all">All Passed Runs</option>
+        <option value="all">All Passed/Failed Runs</option>
       </select></label>
       <button class="button secondary" type="submit">Re-run review</button>
     </form>
@@ -262,7 +262,7 @@
 <section class="metric-grid" aria-label="Review totals">
   <a class="metric metric-total" href="/?workspace={{ current_workspace.id }}&amp;status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
   <a class="metric metric-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
-  <a class="metric metric-force-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified"><span>Force qualified</span><strong>{{ status_counts.get('force_qualified', 0) }}</strong></a>
+  <a class="metric metric-force-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified"><span>Manually confirmed qualified</span><strong>{{ status_counts.get('force_qualified', 0) }}</strong></a>
   <a class="metric metric-unqualified" href="/?workspace={{ current_workspace.id }}&amp;status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
   <a class="metric metric-manual" href="/?workspace={{ current_workspace.id }}&amp;status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
   <a class="metric metric-pending" href="/?workspace={{ current_workspace.id }}&amp;status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>

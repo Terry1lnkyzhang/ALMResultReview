@@ -73,6 +73,7 @@ def process_review_queue(
     failed = 0
     claimed_count = 0
     claims_allowed = True
+    poll_timeout = min(5.0, max(0.01, float(get_settings().worker_poll_seconds)))
     pending: dict[Future[tuple[int, int]], int] = {}
     with ThreadPoolExecutor(
         max_workers=worker_count,
@@ -103,8 +104,12 @@ def process_review_queue(
                     pending[executor.submit(process_claimed, job.id)] = config_id
             if not pending:
                 break
-            # Refill a slot as soon as one job ends instead of waiting for the batch.
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            # Also wake periodically so work queued after the last claim can use idle slots.
+            done, _ = wait(
+                pending,
+                timeout=poll_timeout,
+                return_when=FIRST_COMPLETED,
+            )
             for future in done:
                 config_id = pending.pop(future)
                 job_completed, job_failed = future.result()

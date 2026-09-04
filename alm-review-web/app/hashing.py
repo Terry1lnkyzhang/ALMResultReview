@@ -148,7 +148,7 @@ def review_content(record: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": normalize_text(run.get("duration")),
         "assigned_tester": normalize_text(test_instance.get("owner")),
         "actual_tester": normalize_text(
-            run.get("owner") or test_instance.get("actual-tester")
+            test_instance.get("actual-tester") or run.get("owner")
         ),
         "comments": normalize_text(run.get("comments")),
         "steps": [

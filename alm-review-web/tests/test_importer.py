@@ -194,12 +194,18 @@ def test_import_does_not_queue_unchanged_run_when_review_policy_changed() -> Non
     assert [item.status for item in jobs] == ["completed"]
 
 
-def test_latest_run_only_considers_passed_results() -> None:
+def test_latest_run_considers_passed_and_failed_results() -> None:
     runs = [
         {
             "id": "10",
             "status": "Passed",
             "execution-date": "2026-07-29",
+            "execution-time": "10:00:00",
+        },
+        {
+            "id": "12",
+            "status": "Failed",
+            "execution-date": "2026-07-31",
             "execution-time": "10:00:00",
         },
         {
@@ -210,15 +216,19 @@ def test_latest_run_only_considers_passed_results() -> None:
         },
     ]
 
-    assert _latest_run(runs) == runs[0]
-    assert _latest_run(runs[1:]) is None
+    assert _latest_run(runs) == runs[1]
+    assert _latest_run(runs[2:]) is None
 
 
-def test_import_ignores_results_that_are_not_passed() -> None:
+def test_import_accepts_failed_and_ignores_other_results() -> None:
     data = sample_data()
+    failed = deepcopy(data["records"][0])
+    failed["run"]["id"] = "152712"
+    failed["run"]["status"] = " failed "
     not_completed = deepcopy(data["records"][0])
-    not_completed["run"]["id"] = "152712"
+    not_completed["run"]["id"] = "152713"
     not_completed["run"]["status"] = "Not Completed"
+    data["records"].append(failed)
     data["records"].append(not_completed)
 
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -227,9 +237,10 @@ def test_import_ignores_results_that_are_not_passed() -> None:
     with Session(engine) as db:
         result = import_data(data, db)
 
-        assert result.discovered_runs == 1
+        assert result.discovered_runs == 2
         assert db.get(AlmRun, 152711) is not None
-        assert db.get(AlmRun, 152712) is None
+        assert db.get(AlmRun, 152712).run_status == "Failed"
+        assert db.get(AlmRun, 152713) is None
         assert db.scalar(select(func.count()).select_from(ReviewJob)) == 0
 
 
@@ -319,6 +330,30 @@ def test_queue_latest_alm_changes_only_queues_unreviewed_latest_sync_revisions()
         assert (second.changed, second.queued, second.already_reviewed) == (1, 1, 0)
         assert (duplicate.changed, duplicate.queued, duplicate.already_active) == (1, 0, 1)
         assert db.scalar(select(func.count()).select_from(ReviewJob)) == 2
+
+
+def test_queue_latest_alm_changes_queues_failed_run() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        data = sample_data()
+        data["records"][0]["run"]["status"] = "Failed"
+        import_data(
+            data,
+            db,
+            source="alm:folder:42",
+            workspace_id=workspace.id,
+        )
+
+        result = queue_latest_alm_changes(db, workspace.id)
+        job = db.scalar(select(ReviewJob))
+
+        assert (result.changed, result.queued) == (1, 1)
+        assert job is not None
+        assert db.get(AlmRun, job.run_id).run_status == "Failed"
 
 
 def test_queue_latest_alm_changes_does_not_queue_unchanged_current_revisions() -> None:

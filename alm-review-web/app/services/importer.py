@@ -22,6 +22,11 @@ from app.models import (
     utcnow,
 )
 from app.services.rich_text import source_rich_text
+from app.services.run_status import (
+    REVIEWABLE_RUN_STATUSES,
+    is_reviewable_run_status,
+    normalize_reviewable_run_status,
+)
 from app.services.workspaces import next_internal_run_id, resolve_workspace
 
 
@@ -138,7 +143,7 @@ def queue_latest_alm_changes(
         .where(
             AlmRun.workspace_id == workspace.id,
             AlmRun.current_revision_id == RunRevision.id,
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             RunRevision.created_at >= latest_sync.started_at,
             RunRevision.created_at <= latest_sync.completed_at,
         )
@@ -248,8 +253,7 @@ def import_batch(
     records = [
         record
         for record in data.get("records") or []
-        if normalize_text((record.get("run") or {}).get("status")).casefold()
-        == "passed"
+        if is_reviewable_run_status((record.get("run") or {}).get("status"))
     ]
     result.discovered_runs += len(records)
     for record in records:
@@ -306,11 +310,11 @@ def import_batch(
             folder.get("path") or test_set.get("folderPath")
         )
         run_row.execution_location = normalize_text(run.get("location"))
-        run_row.run_status = normalize_text(run.get("status"))
+        run_row.run_status = normalize_reviewable_run_status(run.get("status"))
         run_row.test_owner = normalize_text(record.get("testOwner"))
         run_row.assigned_tester = normalize_text(test_instance.get("owner"))
         run_row.actual_tester = normalize_text(
-            run.get("owner") or test_instance.get("actual-tester")
+            test_instance.get("actual-tester") or run.get("owner")
         )
         run_row.execution_at = _date_time(
             run.get("execution-date"), run.get("execution-time")

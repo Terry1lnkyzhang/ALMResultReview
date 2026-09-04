@@ -20,6 +20,7 @@ from app.models import (
 from app.services.review_policy import current_review_policy_key
 from app.services.review_status import current_reviews, is_force_qualified
 from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
+from app.services.run_status import REVIEWABLE_RUN_STATUSES
 from app.services.workspaces import resolve_workspace
 
 REREVIEW_SCOPES = {
@@ -79,7 +80,7 @@ def workspace_review_progress(
     runs = db.scalars(
         select(AlmRun).where(
             AlmRun.workspace_id == workspace.id,
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             AlmRun.current_revision_id.is_not(None),
         )
     ).all()
@@ -263,7 +264,7 @@ def queue_rereviews(
                 AlmRun.workspace_id == workspace.id,
                 include_legacy and AlmRun.workspace_id.is_(None),
             ),
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             AlmRun.current_revision_id.is_not(None),
         )
         .order_by(AlmRun.run_id)
@@ -298,7 +299,7 @@ def queue_recommended_review_updates(
                 AlmRun.workspace_id == workspace.id,
                 include_legacy and AlmRun.workspace_id.is_(None),
             ),
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             AlmRun.current_revision_id.is_not(None),
         )
         .order_by(AlmRun.run_id)
@@ -336,7 +337,7 @@ def queue_rereviews_for_run_ids(
                 AlmRun.workspace_id == workspace.id,
                 include_legacy and AlmRun.workspace_id.is_(None),
             ),
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             AlmRun.current_revision_id.is_not(None),
         )
         .order_by(AlmRun.run_id)
@@ -398,7 +399,7 @@ def queue_failed_reviews(db: Session, workspace_id: int | None = None) -> int:
     runs = db.scalars(
         select(AlmRun).where(
             AlmRun.workspace_id == workspace.id,
-            AlmRun.run_status == "Passed",
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
             AlmRun.current_revision_id.is_not(None),
         )
     ).all()

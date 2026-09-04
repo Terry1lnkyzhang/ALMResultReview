@@ -15,6 +15,7 @@ import httpx
 
 from app.config import get_settings
 from app.models import SyncConfig
+from app.services.run_status import is_reviewable_run_status
 
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -249,15 +250,13 @@ def _query(field: str, value: int | str) -> str:
 
 
 def _latest_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
-    passed_runs = [
-        run
-        for run in runs
-        if str(run.get("status") or "").strip().casefold() == "passed"
+    reviewable_runs = [
+        run for run in runs if is_reviewable_run_status(run.get("status"))
     ]
-    if not passed_runs:
+    if not reviewable_runs:
         return None
     return max(
-        passed_runs,
+        reviewable_runs,
         key=lambda run: (
             str(run.get("execution-date") or ""),
             str(run.get("execution-time") or ""),

@@ -65,8 +65,9 @@ from app.services.review_status import (
     review_update_reasons,
 )
 from app.services.reviews import (
+    allowed_manual_decisions,
     current_review,
-    manual_decision_locks_run,
+    revoke_manual_decision,
     save_manual_decision,
     test_ai_connection,
 )
@@ -211,8 +212,7 @@ templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
     "qualified": "合格",
-    "not_qualified": "除合格外全部 + 警告",
-    "force_qualified": "人工判定合格",
+    "force_qualified": "人工确认合格",
     "unqualified": "不合格",
     "needs_manual_review": "需人工复核",
     "pending_review": "待评审",
@@ -289,8 +289,6 @@ def _run_view(
 
 def _matches_status(item: dict, status: str) -> bool:
     # Force qualified and warning are lenses over the final statuses, not statuses.
-    if status == "not_qualified":
-        return item["final_status"] != "qualified" or item["has_warning"]
     if status == "force_qualified":
         return item["force_qualified"]
     if status == "warning":
@@ -360,7 +358,6 @@ def _matches_dashboard_filters(
         and (
             not normalized_query
             or normalized_query in str(item["run"].run_id)
-            or normalized_query in str(item["run"].alm_run_id or "")
             or normalized_query in str(item["run"].test_id or "")
             or normalized_query in item["run"].test_name.casefold()
             or normalized_query in item["run"].test_set_name.casefold()
@@ -1066,9 +1063,6 @@ def equipment_usage_insights(
     ).all()
     policy_key = current_review_policy_key(db, current_workspace.id)
     insights = workspace_equipment_insights(db, current_workspace.id, policy_key)
-    users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
-    for item in insights["unresolved"]:
-        item["actual_tester_label"] = _person_label(item["actual_tester"], users)
     normalized_query = query.strip().casefold()
     devices = insights["devices"]
     unresolved = insights["unresolved"]
@@ -1389,13 +1383,24 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         revision.id: _to_app_timezone(revision.created_at)
         for revision in revisions
     }
-    allowed_decisions = {
-        "needs_manual_review": [
-            ("confirmed_qualified", "确认合格"),
-            ("confirmed_unqualified", "确认不合格"),
-        ],
-        "unqualified": [("override_qualified", "人工判定合格")],
-    }.get(review.result.verdict if review.result else "", [])
+    decision_labels = {
+        "confirmed_qualified": "人工确认合格",
+        "confirmed_unqualified": "确认不合格",
+        "override_qualified": "人工确认合格",
+        "confirmed_warning_qualified": "人工确认合格（已审阅警告）",
+    }
+    decision_order = (
+        "confirmed_qualified",
+        "confirmed_unqualified",
+        "override_qualified",
+        "confirmed_warning_qualified",
+    )
+    allowed = allowed_manual_decisions(review)
+    allowed_decisions = [
+        (decision, decision_labels[decision])
+        for decision in decision_order
+        if decision in allowed
+    ]
     review_criteria = {}
     review_step_results = []
     review_warnings = []
@@ -1481,32 +1486,6 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/workspaces/{workspace_id}/runs/{alm_run_id}")
-def workspace_alm_run_detail(
-    request: Request,
-    workspace_id: int,
-    alm_run_id: int,
-    db: Session = Depends(get_db),
-):
-    run_id = _workspace_run_id(db, workspace_id, alm_run_id)
-    if run_id is None:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return run_detail(request, run_id, db)
-
-
-def _workspace_run_id(
-    db: Session,
-    workspace_id: int,
-    displayed_run_id: int,
-) -> int | None:
-    return db.scalar(
-        select(AlmRun.run_id).where(
-            AlmRun.workspace_id == workspace_id,
-            func.coalesce(AlmRun.alm_run_id, AlmRun.run_id) == displayed_run_id,
-        )
-    )
-
-
 @router.post("/runs/{run_id}/manual-decision")
 def decide_run(
     request: Request,
@@ -1527,6 +1506,17 @@ def decide_run(
     return _redirect(f"/runs/{run_id}", "人工裁决已记录。")
 
 
+@router.post("/runs/{run_id}/manual-decision/revoke")
+def revoke_run_decision(run_id: int, db: Session = Depends(get_db)):
+    run = db.get(AlmRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    count = revoke_manual_decision(db, run)
+    if count:
+        return _redirect(f"/runs/{run_id}", "人工裁决已撤销，恢复显示 AI 评审结果。")
+    return _redirect(f"/runs/{run_id}", "当前没有可撤销的人工裁决。", "error")
+
+
 @router.post("/runs/{run_id}/review-now")
 def review_run_now(
     run_id: int,
@@ -1544,14 +1534,6 @@ def review_run_now(
         )
     if run.current_revision_id is None:
         return _redirect(f"/runs/{run_id}", "该运行没有当前版本。", "error")
-    manual = manual_decision_locks_run(db, run)
-    if manual is not None:
-        return _redirect(
-            f"/runs/{run_id}",
-            f"{manual.operator} 已人工处理此版本。"
-            "如果内容已变化，请先从 ALM 刷新。",
-            "error",
-        )
     queue_run_review(db, run)
     return _redirect(
         f"/runs/{run_id}",
@@ -1664,7 +1646,7 @@ async def import_docx(
         return _redirect(redirect_path, f"Word import failed: {exc}", "error")
     return _redirect(
         redirect_path,
-        f"Word import completed: {result.discovered_runs} Passed Runs; "
+        f"Word import completed: {result.discovered_runs} Passed/Failed Runs; "
         f"{result.new_runs} added, {result.changed_runs} changed, "
         f"{result.unchanged_runs} unchanged. Reviews were not queued.",
     )

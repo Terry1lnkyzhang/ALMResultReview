@@ -359,25 +359,51 @@ def test_reported_calibration_range_must_match_registry() -> None:
     assert "不一致" in checks[0]["summary"]
 
 
-def test_current_non_use_status_is_warning_not_historical_failure() -> None:
-    registry = [
-        equipment(
-            "PCCSY-RD-CT-1-0076",
-            "PCCSY-RD-CT-1-0076",
-            description="Stop watch",
-            equipment_status="校验中In Calibration",
-        )
-    ]
-    content = review_content(
-        "Stop Watch SN: PCCSY-RD-CT-1-0076",
-        description="Record the SN and Calibration Date of the Stop Watch",
-        expected="Stop Watch SN:__; Calibration Date:__",
-    )
+def test_available_current_equipment_status_does_not_warn() -> None:
+    for status in ("Active", "Ready", "使用中 In Use"):
+        registry = [equipment("PCCSY-RD-CT-1-0175", "00850540007089", equipment_status=status)]
 
-    checks, _ = analyze_equipment_steps(content, registry)
+        checks, _ = analyze_equipment_steps(
+            review_content("ECG simulator SN: PCCSY-RD-CT-1-0175"),
+            registry,
+        )
+
+        assert checks[0]["status"] == "pass"
+        assert checks[0]["warnings"] == []
+
+
+def test_current_non_use_status_is_warning_not_historical_failure() -> None:
+    for status in (
+        "校验中In Calibration",
+        "Inactive",
+        "Out of Service",
+        "Under Repair",
+        "Retired",
+        "Scrapped",
+    ):
+        registry = [equipment("PCCSY-RD-CT-1-0175", "00850540007089", equipment_status=status)]
+
+        checks, _ = analyze_equipment_steps(
+            review_content("ECG simulator SN: PCCSY-RD-CT-1-0175"),
+            registry,
+        )
+
+        assert checks[0]["status"] == "pass"
+        assert checks[0]["warnings"][0]["type"] == "equipment_status"
+        assert status in checks[0]["warnings"][0]["summary"]
+
+
+def test_missing_current_equipment_status_warns_without_failing() -> None:
+    registry = [equipment("PCCSY-RD-CT-1-0175", "00850540007089", equipment_status="")]
+
+    checks, _ = analyze_equipment_steps(
+        review_content("ECG simulator SN: PCCSY-RD-CT-1-0175"),
+        registry,
+    )
 
     assert checks[0]["status"] == "pass"
     assert checks[0]["warnings"][0]["type"] == "equipment_status"
+    assert "未记录当前状态" in checks[0]["warnings"][0]["summary"]
 
 
 def test_equipment_id_and_other_equipment_serial_is_conflict() -> None:
@@ -398,6 +424,52 @@ def test_equipment_id_and_other_equipment_serial_is_conflict() -> None:
 
     assert checks[0]["status"] == "fail"
     assert checks[0]["code"] == "equipment_identifier_conflict"
+
+
+def test_separately_labelled_equipment_id_and_serial_are_two_devices() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-1-0076",
+            "PCCSY-RD-CT-1-0076",
+            description="Stop watch",
+            calibration_date=date(2026, 7, 6),
+            calibration_due_date=date(2027, 7, 5),
+            equipment_pk=1,
+        ),
+        equipment(
+            "454110621681",
+            "20-02-30, 20-02-19, 1709C02",
+            description="CCT Footpanel Assy",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=2,
+        ),
+    ]
+    content = review_content(
+        "Intake evidence:\n"
+        "1.CCT Pedal series number:__20-02-30___\n"
+        "2.Stop Watch equipment number:__PCCSY-RD-CT-1-0076__\n"
+        "Calibration Data:__7/6/2026_to__7/5/2027__",
+        description="Capture the HW tools details.",
+        expected=(
+            "Intake evidence:\n"
+            "1.CCT Pedal series number:_____\n"
+            "2.Stop Watch equipment number:____\n"
+            "Calibration Data:___to____"
+        ),
+        execution_date="2026-08-19",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
+    assert {item["equipment_id"] for item in checks[0]["matches"]} == {
+        "PCCSY-RD-CT-1-0076",
+        "454110621681",
+    }
 
 
 def test_dut_disambiguation_makes_step_not_applicable() -> None:
@@ -1547,6 +1619,95 @@ def test_first_pass_candidate_can_reuse_equipment_verified_in_a_prior_step() -> 
     assert remaining == []
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
+
+
+def test_first_pass_cannot_reject_prior_device_named_by_current_requirement() -> None:
+    from app.services.equipment_pipeline import absorb_first_pass
+
+    registry = [
+        equipment(
+            f"PCCSY-RD-CT-0-{index:04d}",
+            f"OTHER-{index:04d}",
+            description="System Phantom",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=index,
+        )
+        for index in range(1, 11)
+    ] + [
+        equipment(
+            None,
+            "FPP32856-0002",
+            description="System Phantom",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=11,
+        )
+    ]
+    content = review_content(
+        "The scan completed successfully.",
+        description="Scan the system phantom (Physics layer).",
+        expected="The scan succeeds.",
+    )
+    content["steps"][0]["reference_candidates"] = [
+        {
+            "candidate_id": "step-1-ref-1",
+            "type": "equipment",
+            "value": "SN:FPP32856-0002",
+            "source_field": "description",
+            "detection_source": "equipment_registry_match",
+        }
+    ]
+    content["steps"][0]["reference_decisions"] = [
+        {
+            "candidate_id": "step-1-ref-1",
+            "role": "unrelated",
+            "requires_check": False,
+            "reason": "The equipment identifier is not repeated in this Step.",
+        }
+    ]
+    checks, questions = analyze_equipment_steps(content, registry)
+    checks[0]["previously_matched_equipment_ids"] = ["SN:FPP32856-0002"]
+    assert "SN:FPP32856-0002" not in checks[0][
+        "requirement_candidate_equipment_ids"
+    ]
+    questions = [
+        OpenQuestion(
+            review_step=1,
+            kind="role",
+            description="Scan the system phantom (Physics layer).",
+            expected="The scan succeeds.",
+            actual="The scan completed successfully.",
+            previously_matched_equipment_ids=("SN:FPP32856-0002",),
+            candidates=questions[0].candidates,
+        )
+    ]
+
+    remaining = absorb_first_pass(content, checks, questions, registry)
+
+    assert remaining == questions
+    assert checks[0]["status"] == "manual"
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": ["SN:FPP32856-0002"],
+                "selected_equipment_names": [],
+                "reason": "The Step continues scanning the prior system phantom.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["matches"][0]["serial_number"] == "FPP32856-0002"
+    assert checks[0]["matches"][0]["matched_by"] == ["ai_disambiguation"]
 
 
 def test_first_pass_keeps_unresolved_previous_equipment_for_second_pass() -> None:

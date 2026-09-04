@@ -357,7 +357,7 @@ def test_terminal_review_failure_is_not_retried(monkeypatch) -> None:
         assert claim_next_review_job(db, "worker-one", lease_seconds=60) is None
 
 
-def test_worker_drops_a_review_job_for_a_manually_resolved_revision() -> None:
+def test_new_review_result_keeps_manual_decision_for_same_revision() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -407,24 +407,32 @@ def test_worker_drops_a_review_job_for_a_manually_resolved_revision() -> None:
         )
         db.commit()
         save_manual_decision(db, run, "override_qualified", "10.0.0.1", "Known tool defect")
-        # A stale Web deployment can still enqueue this, so the Worker must refuse it.
-        bypassed = ReviewJob(
+        re_review_job = ReviewJob(
             workspace_id=workspace.id,
             run_id=run.run_id,
             revision_id=revision.id,
-            status="running",
-            attempt_count=1,
+            status="completed",
         )
-        db.add(bypassed)
+        db.add(re_review_job)
+        db.flush()
+        new_result = ReviewResult(
+            workspace_id=workspace.id,
+            job_id=re_review_job.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            prompt_version_id=1,
+            source_hash=run.source_hash,
+            review_policy_key=current_review_policy_key(db, workspace.id),
+            model_name="new-model",
+            verdict="unqualified",
+        )
+        db.add(new_result)
         db.commit()
 
-        assert reviews.process_claimed_review_job(db, bypassed.id) == (0, 0)
-
-        db.refresh(bypassed)
-        assert bypassed.status == "cancelled"
-        assert "already resolved this revision" in bypassed.error_message
-        assert current_review(db, run).final_status == "qualified"
-        assert claim_next_review_job(db, "worker-one", lease_seconds=60) is None
+        review = current_review(db, run)
+        assert review.result is new_result
+        assert review.manual_decision is not None
+        assert review.final_status == "qualified"
 
 
 def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch) -> None:

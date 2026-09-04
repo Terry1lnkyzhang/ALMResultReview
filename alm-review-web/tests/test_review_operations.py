@@ -25,10 +25,15 @@ from app.services.review_status import is_force_qualified
 from app.services.reviews import current_review, save_manual_decision
 
 
-def add_reviewed_run(db: Session, run_id: int, verdict: str) -> AlmRun:
+def add_reviewed_run(
+    db: Session,
+    run_id: int,
+    verdict: str,
+    run_status: str = "Passed",
+) -> AlmRun:
     run = AlmRun(
         run_id=run_id,
-        run_status="Passed",
+        run_status=run_status,
         source_hash=str(run_id).zfill(64),
         review_hash=str(run_id + 1).zfill(64),
         raw_json="{}",
@@ -145,12 +150,12 @@ def test_queue_rereviews_skips_run_with_active_job() -> None:
         assert (result.matched, result.queued, result.already_active) == (1, 0, 1)
 
 
-def test_queue_all_rereviews_every_passed_run() -> None:
+def test_queue_all_rereviews_every_passed_and_failed_run() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         add_reviewed_run(db, 1, "qualified")
-        add_reviewed_run(db, 2, "unqualified")
+        add_reviewed_run(db, 2, "unqualified", run_status="Failed")
 
         result = queue_rereviews(db, "all")
 
@@ -296,7 +301,7 @@ def test_workspace_review_progress_counts_current_runs_once() -> None:
             run = AlmRun(
                 workspace_id=workspace.id,
                 run_id=run_id,
-                run_status="Passed",
+                run_status="Passed" if run_id == 1 else "Failed",
                 source_hash=str(run_id).zfill(64),
                 review_hash=str(run_id + 1).zfill(64),
                 raw_json="{}",

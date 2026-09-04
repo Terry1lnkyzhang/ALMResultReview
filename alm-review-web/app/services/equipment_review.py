@@ -31,6 +31,11 @@ _PART_FIELD_RE = re.compile(
     r"(?i)(?:\bP/?N\b|part\s*(?:number|no\.?)|型号|部件号)\s*[:=]\s*"
     r"_*(?P<value>[^;,\r\n]+?)_*(?=$|[;,\r\n])"
 )
+_IDENTITY_FIELD_SUFFIX_RE = re.compile(
+    r"(?i)\s*(?:(?:equipment\s*)?(?:id|code|number|no\.?)|"
+    r"(?:series|serial)\s*(?:number|no\.?)?|s/?n)\s*[:=]?\s*_*$"
+)
+_NUMBERED_FIELD_PREFIX_RE = re.compile(r"^\s*\d+\s*[.)]?\s*")
 _DUE_DATE_LABEL_RE = re.compile(
     r"(?i)(?:calibration\s*)?due\s*date|(?:校准|校验)?(?:到期日?期?|有效期至?)"
 )
@@ -50,6 +55,13 @@ _PLACEHOLDER_RE = re.compile(r"^(?:_*|\.*|-*|n/?a|none|unknown|待填)$", re.IGN
 _NAME_NOISE_RE = re.compile(r"[\s\-_/.,;:()\[\]{}'\"，。、（）]+")
 _INVALID_SERIALS = {"", "na", "n/a", "none", "unknown", "待填"}
 _NO_CALIBRATION_INTERVALS = {"no calibration required", "no need calibration"}
+_AVAILABLE_EQUIPMENT_STATUSES = {
+    "active",
+    "ready",
+    "in use",
+    "使用中",
+    "使用中 in use",
+}
 
 
 def equipment_reference(item: EquipmentRegistry) -> str:
@@ -124,6 +136,18 @@ def _calibration_not_required(equipment: EquipmentRegistry) -> bool:
     return equipment.calibration_interval.strip().casefold() in _NO_CALIBRATION_INTERVALS
 
 
+def _equipment_status_warning(item_label: str, status: str) -> str | None:
+    normalized = _normalized(status)
+    if not normalized:
+        return f"{item_label} 台账未记录当前状态；无法确认设备当前是否可用。"
+    if normalized.casefold() in _AVAILABLE_EQUIPMENT_STATUSES:
+        return None
+    return (
+        f"{item_label} 当前状态为 {normalized}；"
+        "该当前状态不代表执行当天的状态。"
+    )
+
+
 def _contains_identifier(text: str, identifier: str | None) -> bool:
     if not identifier:
         return False
@@ -132,6 +156,52 @@ def _contains_identifier(text: str, identifier: str | None) -> bool:
         text,
         re.IGNORECASE,
     ) is not None
+
+
+def _identifier_context_labels(
+    actual: str,
+    identifiers: Iterable[str],
+) -> set[str] | None:
+    labels: set[str] = set()
+    found = False
+    for identifier in dict.fromkeys(identifiers):
+        if not identifier:
+            continue
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(identifier)}(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(actual):
+            found = True
+            boundary = max(
+                actual.rfind(separator, 0, match.start())
+                for separator in (";", ",", "\r", "\n")
+            )
+            prefix = actual[boundary + 1 : match.start()]
+            prefix = _NUMBERED_FIELD_PREFIX_RE.sub("", prefix)
+            field = _IDENTITY_FIELD_SUFFIX_RE.search(prefix)
+            if field is None:
+                return None
+            label = prefix[: field.start()]
+            label_key = _NAME_NOISE_RE.sub("", label.casefold())
+            if not label_key:
+                return None
+            labels.add(label_key)
+    return labels if found else None
+
+
+def _identifiers_are_separately_labelled(
+    actual: str,
+    explicit_identifiers: Iterable[str],
+    serial_identifiers: Iterable[str],
+) -> bool:
+    explicit_labels = _identifier_context_labels(actual, explicit_identifiers)
+    serial_labels = _identifier_context_labels(actual, serial_identifiers)
+    return bool(
+        explicit_labels
+        and serial_labels
+        and explicit_labels.isdisjoint(serial_labels)
+    )
 
 
 def _parse_date(value: str) -> date | None:
@@ -317,6 +387,8 @@ def _verdict_signature(equipment: EquipmentRegistry) -> tuple[Any, ...]:
 def _candidate_equipment(
     combined_text: str,
     equipment: Iterable[EquipmentRegistry],
+    *,
+    limit: int | None = 10,
 ) -> list[EquipmentRegistry]:
     candidates: list[EquipmentRegistry] = []
     folded = combined_text.casefold()
@@ -338,7 +410,28 @@ def _candidate_equipment(
         )
         if name_matches or model_matches:
             candidates.append(item)
-    return candidates[:10]
+    return candidates if limit is None else candidates[:limit]
+
+
+def requirement_previous_equipment_ids(
+    description: str,
+    expected: str,
+    previous_equipment_ids: Iterable[str],
+    equipment: Iterable[EquipmentRegistry],
+) -> set[str]:
+    previous = set(previous_equipment_ids)
+    prior_rows = [
+        item for item in equipment if equipment_reference(item) in previous
+    ]
+    requirement_text = f"{description}\n{expected}"
+    return {
+        equipment_reference(item)
+        for item in _candidate_equipment(
+            requirement_text,
+            prior_rows,
+            limit=None,
+        )
+    }
 
 
 def analyze_equipment_steps(
@@ -433,7 +526,25 @@ def analyze_equipment_steps(
             for equipment_id, methods in matched_by.items()
             if "serial_number" in methods and "equipment_id" not in methods
         }
-        identifier_conflict = bool(explicit_id_matches and serial_only_matches)
+        explicit_identifiers = [
+            matched[item_id].equipment_id or ""
+            for item_id in explicit_id_matches
+        ]
+        serial_identifiers = [
+            alias
+            for item_id in serial_only_matches
+            for alias in _serial_aliases(matched[item_id].serial_number)
+            if _contains_identifier(actual, alias)
+        ]
+        identifier_conflict = bool(
+            explicit_id_matches
+            and serial_only_matches
+            and not _identifiers_are_separately_labelled(
+                raw_actual,
+                explicit_identifiers,
+                serial_identifiers,
+            )
+        )
         unrecognized_reported_identifiers = [
             identifier
             for identifier in reported_identifiers
@@ -622,19 +733,15 @@ def _evaluate_matches(
                 f"{item.calibration_date.isoformat()} 至 "
                 f"{item.calibration_due_date.isoformat()}"
             )
-        status_is_not_in_use = (
-            item.equipment_status
-            and "in use" not in item.equipment_status.casefold()
-            and "使用中" not in item.equipment_status
+        status_warning = _equipment_status_warning(
+            item_label,
+            item.equipment_status,
         )
-        if status_is_not_in_use:
+        if status_warning:
             check["warnings"].append(
                 {
                     "type": "equipment_status",
-                    "summary": (
-                        f"{item_label} 当前状态为 {item.equipment_status}；"
-                        "该当前状态不代表执行当天的状态。"
-                    ),
+                    "summary": status_warning,
                 }
             )
 
@@ -1124,8 +1231,9 @@ def apply_equipment_disambiguation(
     decisions: dict[int, dict[str, Any]],
     equipment: Iterable[EquipmentRegistry],
 ) -> list[dict[str, Any]]:
-    by_id = {equipment_reference(item): item for item in equipment}
-    _, _, name_index = _extraction_indexes(list(by_id.values()))
+    registry = list(equipment)
+    by_id = {equipment_reference(item): item for item in registry}
+    _, _, name_index = _extraction_indexes(registry)
     step_by_number = {int(step["review_step"]): step for step in content.get("steps", [])}
     for check in checks:
         decision = decisions.get(check["review_step"])
@@ -1175,6 +1283,14 @@ def apply_equipment_disambiguation(
             grounded_ids.update(
                 previous_ids
                 & set(check.get("requirement_candidate_equipment_ids", []))
+            )
+            grounded_ids.update(
+                requirement_previous_equipment_ids(
+                    str(step_by_number[check["review_step"]].get("description") or ""),
+                    str(step_by_number[check["review_step"]].get("expected") or ""),
+                    previous_ids,
+                    registry,
+                )
             )
         grounded_ids.update(previous_ids & selected_name_equipment_ids)
         selected = {

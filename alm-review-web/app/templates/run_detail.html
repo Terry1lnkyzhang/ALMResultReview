@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
-{% set decision_labels = {'confirmed_qualified': '确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工判定合格'} %}
+{% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '人工确认合格（已审阅警告）'} %}
 {% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
 {% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
 {% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
@@ -96,7 +96,7 @@
 {% if review.result %}
 <section class="review-band">
   <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
-  {% if review.manual_decision %}<div class="manual-record"><span>人工裁决</span><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
+  {% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示 AI 评审判定结果。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
 </section>
 {% if review_pipeline %}
 <section class="pipeline-section">

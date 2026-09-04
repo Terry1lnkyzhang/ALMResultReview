@@ -101,6 +101,10 @@ VALID_MANUAL_DECISIONS = {
     "needs_manual_review": {"confirmed_qualified", "confirmed_unqualified"},
     "unqualified": {"override_qualified"},
 }
+WARNING_QUALIFIED_DECISION = "confirmed_warning_qualified"
+FORCE_QUALIFIED_DECISIONS = frozenset(
+    {"override_qualified", "confirmed_qualified", WARNING_QUALIFIED_DECISION}
+)
 
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 MAX_REVIEW_JOB_ATTEMPTS = 3
@@ -113,6 +117,15 @@ class CurrentReview:
     manual_decision: ManualDecision | None
     final_status: str
     has_warning: bool = False
+
+
+def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
+    if review.result is None or review.manual_decision is not None:
+        return frozenset()
+    allowed = set(VALID_MANUAL_DECISIONS.get(review.result.verdict, set()))
+    if review.result.verdict == "qualified" and review.has_warning:
+        allowed.add(WARNING_QUALIFIED_DECISION)
+    return frozenset(allowed)
 
 
 def has_review_warning(warnings_json: str | None) -> bool:
@@ -256,20 +269,18 @@ def current_review(
         .where(
             ManualDecision.run_id == run.run_id,
             ManualDecision.revision_id == run.current_revision_id,
-            ManualDecision.review_result_id == result.id,
             ManualDecision.source_hash == run.source_hash,
         )
         .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
         .limit(1)
     )
-    if result.verdict == "qualified":
-        final_status = "qualified"
-    elif result.verdict == "unqualified":
-        is_overridden = manual and manual.decision == "override_qualified"
-        final_status = "qualified" if is_overridden else "unqualified"
-    elif manual and manual.decision == "confirmed_qualified":
+    if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
+        final_status = "unqualified"
+    elif result.verdict == "qualified":
+        final_status = "qualified"
+    elif result.verdict == "unqualified":
         final_status = "unqualified"
     else:
         final_status = "needs_manual_review"
@@ -279,6 +290,23 @@ def current_review(
         final_status,
         has_review_warning(result.warnings_json),
     )
+
+
+def revoke_manual_decision(db: Session, run: AlmRun) -> int:
+    if run.current_revision_id is None:
+        return 0
+    decisions = db.scalars(
+        select(ManualDecision).where(
+            ManualDecision.run_id == run.run_id,
+            ManualDecision.revision_id == run.current_revision_id,
+            ManualDecision.source_hash == run.source_hash,
+        )
+    ).all()
+    for decision in decisions:
+        db.delete(decision)
+    if decisions:
+        db.commit()
+    return len(decisions)
 
 
 def save_manual_decision(
@@ -291,7 +319,7 @@ def save_manual_decision(
     review = current_review(db, run)
     if review.result is None:
         raise ValueError("The current run revision has no completed AI review.")
-    allowed = VALID_MANUAL_DECISIONS.get(review.result.verdict, set())
+    allowed = allowed_manual_decisions(review)
     if decision not in allowed:
         raise ValueError(
             f"Decision {decision!r} is not allowed for AI verdict {review.result.verdict!r}."
@@ -2648,25 +2676,6 @@ def test_ai_connection(config: AiConfig) -> str:
     return content
 
 
-class ManualDecisionLock(Exception):
-    """Raised when a Run was already resolved by an operator, so re-reviewing it would
-    orphan that decision. Enforced at execution time because a stale Web deployment can
-    still enqueue jobs that bypass the queueing-side guard."""
-
-
-def manual_decision_locks_run(db: Session, run: AlmRun) -> ManualDecision | None:
-    return db.scalar(
-        select(ManualDecision)
-        .where(
-            ManualDecision.run_id == run.run_id,
-            ManualDecision.revision_id == run.current_revision_id,
-            ManualDecision.source_hash == run.source_hash,
-        )
-        .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
-        .limit(1)
-    )
-
-
 def process_job(
     db: Session,
     job: ReviewJob,
@@ -2691,16 +2700,6 @@ def process_job(
         job.completed_at = utcnow()
         db.commit()
         raise ValueError("Review job is outdated because the ALM run changed.")
-
-    manual = manual_decision_locks_run(db, run)
-    if manual is not None:
-        job.status = "cancelled"
-        job.completed_at = utcnow()
-        job.error_message = (
-            f"Skipped: {manual.operator} already resolved this revision as {manual.decision}."
-        )
-        db.commit()
-        raise ManualDecisionLock(job.error_message)
 
     prompt = db.scalar(
         select(PromptVersion).where(PromptVersion.is_active.is_(True)).order_by(desc(PromptVersion.id))
@@ -2979,8 +2978,6 @@ def process_claimed_review_job(
             process_job(db, job, worker_owner_token=worker_owner_token)
         record_ai_endpoint_success(db, job.ai_config_id)
         return 1, 0
-    except ManualDecisionLock:
-        return 0, 0
     except WorkerLeaseLost:
         return 0, 0
     except Exception as exc:
