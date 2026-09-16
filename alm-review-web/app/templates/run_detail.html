@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
-{% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '人工确认合格（已审阅警告）'} %}
+{% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '确认警告已处理'} %}
 {% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
 {% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
 {% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
@@ -67,6 +67,36 @@
 <dl class="fact-strip">
   <div><dt>测试用例</dt><dd>{{ run.test_id or '-' }}</dd></div><div><dt>执行位置</dt><dd>{{ run.execution_location or '-' }}</dd></div><div><dt>测试负责人</dt><dd>{{ test_owner_label }}</dd></div><div><dt>指定测试人员</dt><dd>{{ assigned_tester_label }}</dd></div><div><dt>实际测试人员</dt><dd>{{ actual_tester_label }}</dd></div><div><dt>ALM 结果</dt><dd>{{ run.run_status }}</dd></div><div><dt>执行时间</dt><dd>{{ run.execution_at.strftime('%Y-%m-%d %H:%M') if run.execution_at else '-' }}</dd></div>
 </dl>
+
+{% set location_version = test_location_resolution.version %}
+<section class="run-location-history run-location-{{ test_location_resolution.status }}" aria-label="执行时位置配置">
+  <div>
+    <p class="eyebrow">执行时位置配置</p>
+    {% if test_location_resolution.status == 'matched' %}
+      <h2>{{ location_version.item }} / {{ location_version.version or '无版本号' }}</h2>
+      <p>该配置自 {{ location_version.valid_from.strftime('%Y-%m-%d %H:%M:%S') }} 生效{% if location_version.valid_to %}，至 {{ location_version.valid_to.strftime('%Y-%m-%d %H:%M:%S') }} 结束{% endif %}。</p>
+    {% elif test_location_resolution.status == 'history_unknown' %}
+      <h2>执行时配置未知</h2><p>该运行早于历史基线，不能用当前配置替代当时信息。</p>
+    {% elif test_location_resolution.status == 'retired' %}
+      <h2>执行时位置已退役</h2><p>此执行时间不在任何有效配置区间内。</p>
+    {% elif test_location_resolution.status == 'missing_execution_time' %}
+      <h2>缺少执行时间</h2><p>无法选择对应的历史位置配置。</p>
+    {% elif test_location_resolution.status == 'unavailable' %}
+      <h2>位置历史暂不可用</h2><p>读取 AT Framework 位置历史失败，不影响本页其他数据。</p>
+    {% else %}
+      <h2>未匹配位置历史</h2><p>执行位置 {{ run.execution_location or '-' }} 尚未登记。</p>
+    {% endif %}
+  </div>
+  {% if location_version %}
+  <dl>
+    <div><dt>Product</dt><dd>{{ location_version.product or '-' }}</dd></div>
+    <div><dt>Couch</dt><dd>{{ location_version.platform or '-' }}</dd></div>
+    <div><dt>DMS Coverage</dt><dd>{{ location_version.collimation or '-' }}</dd></div>
+    <div><dt>Computer</dt><dd>{{ location_version.system_config or '-' }}</dd></div>
+  </dl>
+  <a href="/ops/test-locations/history?location_id={{ location_version.location_id }}">查看完整历史</a>
+  {% endif %}
+</section>
 
 {% if review_update_reasons %}
 <section class="review-advisory review-advisory-detail" aria-label="Review update recommendation">
@@ -161,10 +191,10 @@
   </div>
 </section>
 {% endif %}
-{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>{% if active_review_job %}此版本已加入评审队列。{% elif latest_review_job and latest_review_job.status == 'failed' %}最近一次评审失败，可查看上方错误并重新加入队列。{% else %}此版本尚未执行 AI 评审。{% endif %}</p></div><form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入评审队列' }}</button></form></section>{% endif %}
+{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>{% if active_review_job %}此版本已加入评审队列。{% elif latest_review_job and latest_review_job.status == 'failed' %}最近一次评审失败，可查看上方错误并重新加入队列。{% else %}此版本尚未执行 AI 评审。{% endif %}</p></div>{% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示评审失败状态。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% else %}<form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入评审队列' }}</button></form>{% endif %}</section>{% endif %}
 
 {% if allowed_decisions %}
-<section class="decision-panel"><div><p class="eyebrow">人工裁决</p><h2>处理此评审结果</h2><p>原因将与当前源数据哈希一起保留，已处理的运行不会自动重新评审。</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>裁决</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入人工处理此结果的原因"></textarea></label><button class="button primary" type="submit">记录裁决</button></form></section>
+<section class="decision-panel"><div><p class="eyebrow">人工裁决</p><h2>{{ '处理此评审结果' if review.result else '人工处理评审失败' }}</h2><p>{% if review.result %}确认后不再计入待处理警告；原始警告、原因和源数据哈希仍会保留，可随时撤销裁决。{% else %}AI 未生成评审结果。人工核验证据后可确认合格；失败任务、错误详情和裁决原因仍会保留，可随时撤销裁决。{% endif %}</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>裁决</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入人工处理此结果的原因"></textarea></label><button class="button primary" type="submit">记录裁决</button></form></section>
 {% endif %}
 <script>
   (() => {

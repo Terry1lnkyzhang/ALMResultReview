@@ -120,7 +120,11 @@ class CurrentReview:
 
 
 def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
-    if review.result is None or review.manual_decision is not None:
+    if review.manual_decision is not None:
+        return frozenset()
+    if review.result is None:
+        if review.final_status == "review_failed":
+            return frozenset({"override_qualified"})
         return frozenset()
     allowed = set(VALID_MANUAL_DECISIONS.get(review.result.verdict, set()))
     if review.result.verdict == "qualified" and review.has_warning:
@@ -131,6 +135,16 @@ def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
 def has_review_warning(warnings_json: str | None) -> bool:
     """An empty warning list is stored as '[]', so a non-empty string is not enough."""
     return bool(warnings_json) and warnings_json.strip() not in ("", "[]")
+
+
+def has_unresolved_review_warning(
+    has_warning: bool,
+    manual_decision: ManualDecision | None,
+) -> bool:
+    return has_warning and not (
+        manual_decision
+        and manual_decision.decision in FORCE_QUALIFIED_DECISIONS
+    )
 
 
 @dataclass
@@ -253,17 +267,6 @@ def current_review(
         )
         .limit(1)
     )
-    if result is None:
-        failed_job = db.scalar(
-            select(ReviewJob.id)
-            .where(
-                ReviewJob.revision_id == run.current_revision_id,
-                ReviewJob.status == "failed",
-            )
-            .limit(1)
-        )
-        return CurrentReview(None, None, "review_failed" if failed_job else "pending_review")
-
     manual = db.scalar(
         select(ManualDecision)
         .where(
@@ -274,6 +277,22 @@ def current_review(
         .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
         .limit(1)
     )
+    if result is None:
+        if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
+            return CurrentReview(None, manual, "qualified")
+        failed_job = db.scalar(
+            select(ReviewJob.id)
+            .where(
+                ReviewJob.revision_id == run.current_revision_id,
+                ReviewJob.status == "failed",
+            )
+            .limit(1)
+        )
+        return CurrentReview(
+            None,
+            manual,
+            "review_failed" if failed_job else "pending_review",
+        )
     if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
@@ -288,9 +307,11 @@ def current_review(
         result,
         manual,
         final_status,
-        has_review_warning(result.warnings_json),
+        has_unresolved_review_warning(
+            has_review_warning(result.warnings_json),
+            manual,
+        ),
     )
-
 
 def revoke_manual_decision(db: Session, run: AlmRun) -> int:
     if run.current_revision_id is None:
@@ -317,12 +338,15 @@ def save_manual_decision(
     reason: str,
 ) -> ManualDecision:
     review = current_review(db, run)
-    if review.result is None:
-        raise ValueError("The current run revision has no completed AI review.")
     allowed = allowed_manual_decisions(review)
     if decision not in allowed:
+        basis = (
+            f"AI verdict {review.result.verdict!r}"
+            if review.result is not None
+            else f"review status {review.final_status!r}"
+        )
         raise ValueError(
-            f"Decision {decision!r} is not allowed for AI verdict {review.result.verdict!r}."
+            f"Decision {decision!r} is not allowed for {basis}."
         )
     if not reason.strip():
         raise ValueError("A reason is required.")
@@ -331,12 +355,14 @@ def save_manual_decision(
         workspace_id=run.workspace_id,
         run_id=run.run_id,
         revision_id=run.current_revision_id,
-        review_result_id=review.result.id,
+        review_result_id=review.result.id if review.result else None,
         decision=decision,
         operator=operator.strip() or "unknown",
         reason=reason.strip(),
         source_hash=run.source_hash,
-        original_ai_verdict=review.result.verdict,
+        original_ai_verdict=(
+            review.result.verdict if review.result else review.final_status
+        ),
     )
     db.add(manual)
     db.commit()

@@ -5,7 +5,7 @@ from sqlalchemy import Engine, MetaData, Table, inspect, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 
-from app.models import WorkerLease
+from app.models import TestLocationIdentity, TestLocationVersion, WorkerLease
 
 _MYSQL_SCHEMA_LOCK_WAIT_SECONDS = 5
 
@@ -77,6 +77,8 @@ def _make_sqlite_column_nullable(
 def ensure_compatible_schema(engine: Engine) -> None:
     with _schema_migration_connection(engine) as connection:
         WorkerLease.__table__.create(connection, checkfirst=True)
+        TestLocationIdentity.__table__.create(connection, checkfirst=True)
+        TestLocationVersion.__table__.create(connection, checkfirst=True)
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         boolean_type = "BOOLEAN" if engine.dialect.name != "mysql" else "TINYINT(1)"
@@ -223,6 +225,34 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 connection.execute(
                     text(f"CREATE INDEX {index_name} ON {table_name} (workspace_id)")
                 )
+
+        if "manual_decisions" in table_names:
+            columns = {
+                column["name"]: column
+                for column in inspect(connection).get_columns("manual_decisions")
+            }
+            review_result_id_column = columns.get("review_result_id")
+            if review_result_id_column and not review_result_id_column.get(
+                "nullable", True
+            ):
+                if engine.dialect.name == "mysql":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE manual_decisions MODIFY COLUMN "
+                            "review_result_id INTEGER NULL"
+                        )
+                    )
+                elif engine.dialect.name == "sqlite":
+                    _make_sqlite_column_nullable(
+                        connection, "manual_decisions", "review_result_id"
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "ALTER TABLE manual_decisions ALTER COLUMN "
+                            "review_result_id DROP NOT NULL"
+                        )
+                    )
 
         if "sync_configs" in table_names:
             columns = {

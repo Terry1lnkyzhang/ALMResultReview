@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Retire Test Location{% endblock %}
+{% block content %}
+<a class="back-link" href="/ops/test-locations">&larr; Test Location Registry</a>
+<section class="page-heading">
+  <div><p class="eyebrow">AT FRAMEWORK / CONTROLLED RETIREMENT</p><h1>Retire {{ location.item }}</h1><p class="subtle">Retirement removes the current AT Framework record while preserving every historical version.</p></div>
+</section>
+<form class="equipment-editor test-location-editor retire-location-editor" method="post" action="/ops/test-locations/retire">
+  <input type="hidden" name="item" value="{{ location.item }}">
+  <section>
+    <div class="section-intro"><span>!</span><div><h2>Retirement details</h2><p>Runs executed before this time can still resolve the version that was valid then.</p></div></div>
+    <div class="field-grid">
+      <label><span>Effective time</span><input type="datetime-local" step="1" name="effective_at" value="{{ effective_at }}" required></label>
+      <label class="wide"><span>Retirement reason</span><textarea name="change_reason" maxlength="2000" rows="4" required></textarea></label>
+    </div>
+  </section>
+  <div class="form-actions"><a class="button secondary button-link" href="/ops/test-locations">Cancel</a><button class="button danger" type="submit">Retire test location</button></div>
+</form>
+{% endblock %}

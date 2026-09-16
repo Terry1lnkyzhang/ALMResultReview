@@ -104,6 +104,62 @@ def test_manual_rules_allow_review_confirmation_and_unqualified_override() -> No
             assert current_review(db, run).final_status == expected
 
 
+def test_failed_review_can_be_force_qualified_and_revoked() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = AlmRun(
+            run_id=42,
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        revision = RunRevision(
+            run_id=run.run_id,
+            revision_number=1,
+            source_hash=run.source_hash,
+            review_hash=run.review_hash,
+            snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        run.current_revision_id = revision.id
+        db.add(
+            ReviewJob(
+                run_id=run.run_id,
+                revision_id=revision.id,
+                status="failed",
+            )
+        )
+        db.commit()
+
+        manual = save_manual_decision(
+            db,
+            run,
+            "override_qualified",
+            "operator",
+            "AI review failed; evidence checked manually",
+        )
+
+        assert manual.review_result_id is None
+        assert manual.original_ai_verdict == "review_failed"
+        review = current_review(db, run)
+        batched = current_reviews(
+            db,
+            [run],
+            current_review_policy_key(db),
+        )[run.run_id]
+        assert review.final_status == "qualified"
+        assert batched.final_status == "qualified"
+        assert is_force_qualified(review)
+        assert is_force_qualified(batched)
+
+        assert revoke_manual_decision(db, run) == 1
+        assert current_review(db, run).final_status == "review_failed"
+
+
 def test_qualified_result_rejects_manual_decision() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -113,7 +169,7 @@ def test_qualified_result_rejects_manual_decision() -> None:
             save_manual_decision(db, run, "override_qualified", "operator", "No reason")
 
 
-def test_qualified_warning_allows_manual_acceptance_without_hiding_warning() -> None:
+def test_qualified_warning_allows_manual_acceptance_and_resolves_warning() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -131,11 +187,44 @@ def test_qualified_warning_allows_manual_acceptance_without_hiding_warning() -> 
             "Warning reviewed and accepted",
         )
         review = current_review(db, run)
+        policy_key = current_review_policy_key(db)
+        batched = current_reviews(db, [run], policy_key)[run.run_id]
 
         assert manual.decision == "confirmed_warning_qualified"
         assert review.final_status == "qualified"
-        assert review.has_warning
+        assert not review.has_warning
+        assert not batched.has_warning
+        assert not _matches_status(
+            {
+                "final_status": batched.final_status,
+                "force_qualified": True,
+                "has_warning": batched.has_warning,
+            },
+            "warning",
+        )
         assert is_force_qualified(review)
+
+
+@pytest.mark.parametrize("verdict,decision", [
+    ("needs_manual_review", "confirmed_qualified"),
+    ("unqualified", "override_qualified"),
+])
+def test_manual_qualified_decision_also_resolves_attached_warnings(
+    verdict: str,
+    decision: str,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(
+            db,
+            verdict,
+            warnings_json='[{"step": 1, "summary": "Warning"}]',
+        )
+
+        save_manual_decision(db, run, decision, "operator", "Reviewed by hand")
+
+        assert not current_review(db, run).has_warning
 
 
 def test_warning_acceptance_can_be_revoked() -> None:

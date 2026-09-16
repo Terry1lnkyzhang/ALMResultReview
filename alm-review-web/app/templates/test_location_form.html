@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ form_title }}{% endblock %}
+{% block content %}
+<a class="back-link" href="/ops/test-locations">&larr; Test Location Registry</a>
+<section class="page-heading">
+  <div><p class="eyebrow">AT FRAMEWORK</p><h1>{{ form_title }}</h1><p class="subtle">Maintain the location and system details used by load test cases.</p></div>
+</section>
+<form class="equipment-editor test-location-editor" method="post" action="{{ '/ops/test-locations/edit' if location else '/ops/test-locations/new' }}">
+  {% if location %}<input type="hidden" name="original_item" value="{{ location.item }}">{% endif %}
+  <section>
+    <div class="section-intro"><span>01</span><div><h2>Location identity</h2><p>Item is the unique key in AT Framework.</p></div></div>
+    <div class="field-grid">
+      <label class="wide"><span>Item</span><input name="item" maxlength="250" value="{{ location.item if location else '' }}" required autofocus></label>
+      <label><span>Product</span><input name="product" maxlength="255" value="{{ location.product if location else '' }}"></label>
+      <label><span>DMS Version</span><input name="version" maxlength="255" value="{{ location.version if location else '' }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>02</span><div><h2>System details</h2><p>Describe the scanner setup represented by this location.</p></div></div>
+    <div class="field-grid">
+      <label><span>DMS Coverage</span><input name="collimation" maxlength="255" value="{{ location.collimation if location else '' }}"></label>
+      <label><span>Couch</span><input name="platform" maxlength="255" value="{{ location.platform if location else '' }}"></label>
+      <label class="wide"><span>Computer</span><input name="system_config" maxlength="255" value="{{ location.system_config if location else '' }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>03</span><div><h2>Change control</h2><p>The effective time determines which configuration applies to an ALM Run.</p></div></div>
+    <div class="field-grid">
+      <label><span>Effective time</span><input type="datetime-local" step="1" name="effective_at" value="{{ effective_at }}" required></label>
+      <label class="wide"><span>Change reason</span><textarea name="change_reason" maxlength="2000" rows="4" required placeholder="Why is this configuration being {{ 'changed' if location else 'created' }}?"></textarea></label>
+    </div>
+  </section>
+  <div class="form-actions"><a class="button secondary button-link" href="/ops/test-locations">Cancel</a><button class="button primary" type="submit">Save test location</button></div>
+</form>
+{% endblock %}

@@ -204,6 +204,59 @@ class EquipmentRegistry(Base):
     )
 
 
+class TestLocationIdentity(Base):
+    __tablename__ = "test_location_identities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    current_item: Mapped[str] = mapped_column(
+        String(250), unique=True, nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    retirement_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    retirement_recorded_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retirement_recorded_by: Mapped[str] = mapped_column(
+        String(255), default="", nullable=False
+    )
+
+
+class TestLocationVersion(Base):
+    __tablename__ = "test_location_versions"
+    __table_args__ = (
+        Index(
+            "ix_test_location_version_lookup",
+            "item",
+            "valid_from",
+            "valid_to",
+        ),
+        UniqueConstraint(
+            "location_id",
+            "valid_from",
+            name="uq_test_location_version_start",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    location_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("test_location_identities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    item: Mapped[str] = mapped_column(String(250), nullable=False)
+    product: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    version: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    collimation: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    platform: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    system_config: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    recorded_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    change_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class ReviewJob(Base):
     __tablename__ = "review_jobs"
     __table_args__ = (Index("ix_review_jobs_status_created", "status", "created_at"),)
@@ -315,7 +368,7 @@ class ManualDecision(Base):
     workspace_id: Mapped[int | None] = mapped_column(Integer, index=True)
     run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     revision_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    review_result_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    review_result_id: Mapped[int | None] = mapped_column(Integer)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     operator: Mapped[str] = mapped_column(String(128), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)

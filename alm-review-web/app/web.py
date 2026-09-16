@@ -18,6 +18,7 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, load_only
 
 from app.config import PROJECT_DIR, get_settings
@@ -77,6 +78,19 @@ from app.services.skill_runner import (
     discover_skills,
     load_skill,
     skill_manifest_metadata,
+)
+from app.services.test_locations import (
+    TestLocationNotFoundError,
+    TestLocationValidationError,
+    add_earlier_test_location_version,
+    current_business_time,
+    create_test_location,
+    delete_test_location,
+    get_test_location,
+    get_test_location_history,
+    list_test_locations,
+    resolve_test_location_at,
+    update_test_location,
 )
 from app.services.worker_tasks import queue_run_sync_jobs, queue_sync_job
 from app.services.workspace_insights import workspace_equipment_insights
@@ -211,6 +225,7 @@ templates = Jinja2Templates(directory=PROJECT_DIR / "app" / "templates")
 templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
+    "not_qualified": "除合格外全部 + 警告",
     "qualified": "合格",
     "force_qualified": "人工确认合格",
     "unqualified": "不合格",
@@ -289,6 +304,8 @@ def _run_view(
 
 def _matches_status(item: dict, status: str) -> bool:
     # Force qualified and warning are lenses over the final statuses, not statuses.
+    if status == "not_qualified":
+        return item["final_status"] != "qualified" or item["has_warning"]
     if status == "force_qualified":
         return item["force_qualified"]
     if status == "warning":
@@ -634,6 +651,59 @@ def _equipment_form(
         calibration_location,
         instruction_number,
     )
+
+
+def _test_location_form(
+    item: str = Form(...),
+    product: str = Form(""),
+    version: str = Form(""),
+    collimation: str = Form(""),
+    platform: str = Form(""),
+    system_config: str = Form(""),
+) -> dict[str, str]:
+    return {
+        "item": item,
+        "product": product,
+        "version": version,
+        "collimation": collimation,
+        "platform": platform,
+        "system_config": system_config,
+    }
+
+
+def _test_location_change_form(
+    effective_at: str = Form(...),
+    change_reason: str = Form(...),
+) -> dict[str, str]:
+    return {
+        "effective_at": effective_at,
+        "change_reason": change_reason,
+    }
+
+
+def _test_location_effective_at(value: str) -> datetime:
+    try:
+        effective_at = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise TestLocationValidationError("Effective time is invalid.") from exc
+    if effective_at.tzinfo is not None:
+        raise TestLocationValidationError(
+            "Effective time must use the application's local time."
+        )
+    return effective_at
+
+
+def _next_test_location_effective_at(valid_from: datetime | None = None) -> str:
+    effective_at = current_business_time()
+    if valid_from is not None and effective_at <= valid_from:
+        effective_at = valid_from + timedelta(seconds=1)
+    return effective_at.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _web_actor() -> str:
+    settings = get_settings()
+    auth_required = settings.app_role == "web" or settings.web_auth_enabled
+    return settings.web_auth_username if auth_required else "local"
 
 
 @router.get("/")
@@ -1314,6 +1384,15 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    try:
+        test_location_resolution = resolve_test_location_at(
+            db,
+            run.execution_location,
+            run.execution_at,
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        test_location_resolution = SimpleNamespace(status="unavailable", version=None)
     policy_key = current_review_policy_key(db, run.workspace_id)
     review = current_review(db, run, policy_key)
     active_prompt = db.scalar(
@@ -1387,7 +1466,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         "confirmed_qualified": "人工确认合格",
         "confirmed_unqualified": "确认不合格",
         "override_qualified": "人工确认合格",
-        "confirmed_warning_qualified": "人工确认合格（已审阅警告）",
+        "confirmed_warning_qualified": "确认警告已处理",
     }
     decision_order = (
         "confirmed_qualified",
@@ -1455,6 +1534,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         name="run_detail.html",
         context={
             "run": run,
+            "test_location_resolution": test_location_resolution,
             "test_owner_label": _person_label(run.test_owner, users),
             "assigned_tester_label": _person_label(run.assigned_tester, users),
             "actual_tester_label": _person_label(run.actual_tester, users),
@@ -2094,6 +2174,274 @@ def delete_equipment(equipment_pk: int, db: Session = Depends(get_db)):
     db.delete(equipment)
     db.commit()
     return _redirect("/ops/equipment", f"Equipment {equipment_identifier} deleted.")
+
+
+@router.get("/ops/test-locations")
+def test_location_registry(
+    request: Request,
+    query: str = Query(default=""),
+    db: Session = Depends(get_db),
+):
+    database_error = ""
+    try:
+        locations = list_test_locations(db, query)
+    except SQLAlchemyError:
+        db.rollback()
+        locations = []
+        database_error = "AT Framework test location data is currently unavailable."
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_registry.html",
+        context={
+            "locations": locations,
+            "query": query,
+            "database_error": database_error,
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.get("/ops/test-locations/new")
+def new_test_location(request: Request):
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_form.html",
+        context={
+            "location": None,
+            "form_title": "Add test location",
+            "effective_at": _next_test_location_effective_at(),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.post("/ops/test-locations/new")
+def create_test_location_record(
+    values: dict[str, str] = Depends(_test_location_form),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    try:
+        location = create_test_location(
+            db,
+            values,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            recorded_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect("/ops/test-locations/new", str(exc), "error")
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations/new",
+            "AT Framework database operation failed.",
+            "error",
+        )
+    return _redirect(
+        "/ops/test-locations",
+        f"Test location {location.item} added.",
+    )
+
+
+@router.get("/ops/test-locations/edit")
+def edit_test_location(
+    request: Request,
+    item: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        location = get_test_location(db, item)
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations",
+            "AT Framework test location data is currently unavailable.",
+            "error",
+        )
+    if location is None:
+        raise HTTPException(status_code=404, detail="Test location not found")
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_form.html",
+        context={
+            "location": location,
+            "form_title": "Edit test location",
+            "effective_at": _next_test_location_effective_at(location.valid_from),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.post("/ops/test-locations/edit")
+def update_test_location_record(
+    original_item: str = Form(...),
+    values: dict[str, str] = Depends(_test_location_form),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    edit_path = f"/ops/test-locations/edit?item={quote(original_item)}"
+    try:
+        location = update_test_location(
+            db,
+            original_item,
+            values,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            recorded_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(edit_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(status_code=404, detail="Test location not found") from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            edit_path,
+            "AT Framework database operation failed.",
+            "error",
+        )
+    return _redirect(
+        "/ops/test-locations",
+        f"Test location {location.item} updated.",
+    )
+
+
+@router.get("/ops/test-locations/history")
+def test_location_history(
+    request: Request,
+    location_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        history = get_test_location_history(db, location_id=location_id)
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations",
+            "AT Framework test location history is currently unavailable.",
+            "error",
+        )
+    if history is None:
+        raise HTTPException(status_code=404, detail="Test location not found") from None
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_history.html",
+        context={
+            "history": history,
+            "to_app_timezone": _to_app_timezone,
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.get("/ops/test-locations/retire")
+def retire_test_location_form(
+    request: Request,
+    item: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    location = get_test_location(db, item)
+    if location is None:
+        raise HTTPException(status_code=404, detail="Test location not found")
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_retire.html",
+        context={
+            "location": location,
+            "effective_at": _next_test_location_effective_at(location.valid_from),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.get("/ops/test-locations/history/backfill")
+def backfill_test_location_form(
+    request: Request,
+    location_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    history = get_test_location_history(db, location_id=location_id)
+    if history is None or not history.versions:
+        raise HTTPException(status_code=404, detail="Test location not found")
+    earliest = history.versions[-1]
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_backfill.html",
+        context={
+            "history": history,
+            "earliest": earliest,
+            "latest_start": earliest.valid_from - timedelta(seconds=1),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.post("/ops/test-locations/history/backfill")
+def backfill_test_location(
+    location_id: int = Form(...),
+    values: dict[str, str] = Depends(_test_location_form),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    history_path = f"/ops/test-locations/history?location_id={location_id}"
+    backfill_path = f"/ops/test-locations/history/backfill?location_id={location_id}"
+    try:
+        add_earlier_test_location_version(
+            db,
+            location_id,
+            values,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            recorded_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(backfill_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(status_code=404, detail="Test location not found") from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            backfill_path,
+            "Test location history operation failed.",
+            "error",
+        )
+    return _redirect(history_path, "Earlier test location version added.")
+
+
+@router.post("/ops/test-locations/retire")
+def retire_test_location(
+    item: str = Form(...),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    retire_path = f"/ops/test-locations/retire?item={quote(item)}"
+    try:
+        delete_test_location(
+            db,
+            item,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            recorded_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(retire_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(status_code=404, detail="Test location not found") from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            retire_path,
+            "AT Framework database operation failed.",
+            "error",
+        )
+    return _redirect("/ops/test-locations", f"Test location {item} retired.")
 
 
 @router.get("/ops/configuration")

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Test Location Registry{% endblock %}
+{% block content %}
+<a class="back-link" href="/">&larr; Dashboard</a>
+<section class="page-heading equipment-heading">
+  <div>
+    <p class="eyebrow">AT FRAMEWORK</p>
+    <h1>Test Location Registry</h1>
+    <p class="subtle">Maintain the test locations available to AT Framework load test cases.</p>
+  </div>
+  <a class="button primary button-link" href="/ops/test-locations/new">Add test location</a>
+</section>
+
+{% if database_error %}<div class="notice notice-error">{{ database_error }}</div>{% endif %}
+
+<section class="equipment-list-section">
+  <form class="equipment-filterbar test-location-filterbar" method="get">
+    <label class="search-field"><span>Search</span><input name="query" value="{{ query }}" placeholder="Item, product, DMS version, DMS coverage, couch or computer"></label>
+    <button class="button secondary" type="submit">Search</button>
+    {% if query %}<a class="button secondary button-link" href="/ops/test-locations">Clear</a>{% endif %}
+  </form>
+  <div class="registry-result-count">{{ locations|length }} test location{% if locations|length != 1 %}s{% endif %}</div>
+  <div class="table-scroll">
+    <table class="equipment-table test-location-table">
+      <thead><tr><th>Item</th><th>Product</th><th>DMS Version</th><th>DMS Coverage</th><th>Couch</th><th>Computer</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody>
+      {% for location in locations %}
+        <tr>
+          <td><strong>{{ location.item }}</strong><small>{{ location.version_count }} version{% if location.version_count != 1 %}s{% endif %}{% if location.valid_from %} · current since {{ location.valid_from.strftime('%Y-%m-%d %H:%M') }}{% endif %}</small></td>
+          <td>{{ location.product or '-' }}</td>
+          <td>{{ location.version or '-' }}</td>
+          <td>{{ location.collimation or '-' }}</td>
+          <td>{{ location.platform or '-' }}</td>
+          <td>{{ location.system_config or '-' }}</td>
+          <td class="row-actions"><a href="/ops/test-locations/history?location_id={{ location.location_id }}">History</a><a href="/ops/test-locations/edit?item={{ location.item|urlencode }}">Edit</a><a class="retire-link" href="/ops/test-locations/retire?item={{ location.item|urlencode }}">Retire</a></td>
+        </tr>
+      {% else %}
+        <tr><td class="empty-table" colspan="7">{% if database_error %}Test locations could not be loaded.{% elif query %}No test locations match the current search.{% else %}No test locations have been added yet.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

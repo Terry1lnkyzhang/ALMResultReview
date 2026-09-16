@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -15,9 +16,12 @@ from app.services.review_policy import (
     backfill_legacy_review_policy,
 )
 from app.services.scheduler import create_scheduler
+from app.services.test_locations import synchronize_test_location_baselines
 from app.services.worker_lease import acquire_worker_lease, release_worker_lease
 from app.services.worker_tasks import current_worker_id
 from app.web import router
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -28,6 +32,11 @@ async def lifespan(application: FastAPI):
     owns_lease = False
     with SessionLocal() as db:
         ensure_defaults(db)
+        try:
+            synchronize_test_location_baselines(db)
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Test-location baseline capture unavailable: %s", exc)
         backfill_legacy_review_policy(db)
         adopt_legacy_workspace_policies(db)
         settings = get_settings()

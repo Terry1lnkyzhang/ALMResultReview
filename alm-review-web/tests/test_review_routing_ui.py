@@ -72,7 +72,7 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "SHA-256" in source
     assert "'confirmed_qualified': '人工确认合格'" in source
     assert "'override_qualified': '人工确认合格'" in source
-    assert "'confirmed_warning_qualified': '人工确认合格（已审阅警告）'" in source
+    assert "'confirmed_warning_qualified': '确认警告已处理'" in source
     assert 'action="/runs/{{ run.run_id }}/manual-decision/revoke"' in source
 
     web_source = Path(web.__file__).read_text(encoding="utf-8")
@@ -109,6 +109,9 @@ def test_run_detail_keeps_review_job_status_and_errors_visible() -> None:
     assert "正在排队" in source
     assert "离开页面不会取消任务" in source
     assert "已加入评审队列" in source
+    assert "人工处理评审失败" in source
+    assert "AI 未生成评审结果。人工核验证据后可确认合格" in source
+    assert "撤销后将恢复显示评审失败状态" in source
 
 
 def test_public_job_error_redacts_api_key_identifiers() -> None:

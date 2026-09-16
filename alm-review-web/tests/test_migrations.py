@@ -89,6 +89,22 @@ def test_workspace_queue_controls_are_added_to_existing_schema() -> None:
     assert tuple(row) == (0, 0, 0)
 
 
+def test_test_location_history_tables_are_created() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    ensure_compatible_schema(engine)
+
+    inspector = inspect(engine)
+    assert {
+        "test_location_identities",
+        "test_location_versions",
+    } <= set(inspector.get_table_names())
+    indexes = {
+        index["name"] for index in inspector.get_indexes("test_location_versions")
+    }
+    assert "ix_test_location_version_lookup" in indexes
+
+
 def test_evidence_capability_flags_are_added_to_existing_schema() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     with engine.begin() as connection:
@@ -249,6 +265,27 @@ def test_pipeline_trace_column_is_added_to_existing_review_results() -> None:
 
     columns = {column["name"] for column in inspect(engine).get_columns("review_results")}
     assert "pipeline_json" in columns
+
+
+def test_manual_decision_review_result_becomes_optional() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE manual_decisions ("
+                "id INTEGER PRIMARY KEY, "
+                "review_result_id INTEGER NOT NULL"
+                ")"
+            )
+        )
+
+    ensure_compatible_schema(engine)
+
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns("manual_decisions")
+    }
+    assert columns["review_result_id"]["nullable"]
 
 
 def test_ai_review_settings_are_added_to_existing_config() -> None:

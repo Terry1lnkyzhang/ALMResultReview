@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Test Location History{% endblock %}
+{% block content %}
+<a class="back-link" href="/ops/test-locations">&larr; Test Location Registry</a>
+<section class="page-heading test-location-history-heading">
+  <div>
+    <p class="eyebrow">AT FRAMEWORK / CONTROLLED HISTORY</p>
+    <h1>{{ history.current_item }}</h1>
+    <p class="subtle">Configuration versions are selected by the ALM Run execution time.</p>
+  </div>
+  <div class="actions">
+    <a class="button secondary button-link" href="/ops/test-locations/history/backfill?location_id={{ history.location_id }}">Add earlier version</a>
+    {% if not history.retired_at %}<a class="button primary button-link" href="/ops/test-locations/edit?item={{ history.current_item|urlencode }}">Edit current version</a>{% endif %}
+  </div>
+</section>
+
+{% if history.retired_at %}
+<section class="retired-location-banner">
+  <strong>Retired {{ history.retired_at.strftime('%Y-%m-%d %H:%M:%S') }}</strong>
+  <span>{{ history.retirement_reason }}</span>
+  <small>Recorded by {{ history.retirement_recorded_by or 'unknown' }}{% if history.retirement_recorded_at %} at {{ to_app_timezone(history.retirement_recorded_at).strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}</small>
+</section>
+{% endif %}
+
+<section class="location-history" aria-label="Test location versions">
+  {% for version in history.versions %}
+  <article class="location-version{% if not version.valid_to %} current{% endif %}">
+    <header>
+      <div><span class="version-operation">{{ version.operation }}</span><h2>{{ version.item }}</h2></div>
+      <div class="version-validity"><strong>{{ version.valid_from.strftime('%Y-%m-%d %H:%M:%S') }}</strong><span>to {{ version.valid_to.strftime('%Y-%m-%d %H:%M:%S') if version.valid_to else 'present' }}</span></div>
+    </header>
+    <dl class="location-version-fields">
+      <div><dt>Product</dt><dd>{{ version.product or '-' }}</dd></div>
+      <div><dt>DMS Version</dt><dd>{{ version.version or '-' }}</dd></div>
+      <div><dt>DMS Coverage</dt><dd>{{ version.collimation or '-' }}</dd></div>
+      <div><dt>Couch</dt><dd>{{ version.platform or '-' }}</dd></div>
+      <div><dt>Computer</dt><dd>{{ version.system_config or '-' }}</dd></div>
+    </dl>
+    <footer><strong>{{ version.change_reason }}</strong><span>Recorded by {{ version.recorded_by or 'unknown' }} at {{ to_app_timezone(version.recorded_at).strftime('%Y-%m-%d %H:%M:%S') }}</span></footer>
+  </article>
+  {% else %}
+  <div class="empty-table">No history is available for this test location.</div>
+  {% endfor %}
+</section>
+{% endblock %}

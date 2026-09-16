@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Add Earlier Test Location Version{% endblock %}
+{% block content %}
+<a class="back-link" href="/ops/test-locations/history?location_id={{ history.location_id }}">&larr; {{ history.current_item }} History</a>
+<section class="page-heading">
+  <div><p class="eyebrow">AT FRAMEWORK / HISTORY BACKFILL</p><h1>Add earlier version</h1><p class="subtle">This version ends automatically when the current earliest known version begins: {{ earliest.valid_from.strftime('%Y-%m-%d %H:%M:%S') }}.</p></div>
+</section>
+<form class="equipment-editor test-location-editor" method="post" action="/ops/test-locations/history/backfill">
+  <input type="hidden" name="location_id" value="{{ history.location_id }}">
+  <section>
+    <div class="section-intro"><span>01</span><div><h2>Historical identity</h2><p>Use the Item and configuration that existed during the earlier period.</p></div></div>
+    <div class="field-grid">
+      <label class="wide"><span>Item</span><input name="item" maxlength="250" value="{{ earliest.item }}" required autofocus></label>
+      <label><span>Product</span><input name="product" maxlength="255" value="{{ earliest.product }}"></label>
+      <label><span>DMS Version</span><input name="version" maxlength="255" value="{{ earliest.version }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>02</span><div><h2>Historical system details</h2><p>These values are used only for Runs inside this historical period.</p></div></div>
+    <div class="field-grid">
+      <label><span>DMS Coverage</span><input name="collimation" maxlength="255" value="{{ earliest.collimation }}"></label>
+      <label><span>Couch</span><input name="platform" maxlength="255" value="{{ earliest.platform }}"></label>
+      <label class="wide"><span>Computer</span><input name="system_config" maxlength="255" value="{{ earliest.system_config }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>03</span><div><h2>Historical source</h2><p>Record when this earlier version began and where the information came from.</p></div></div>
+    <div class="field-grid">
+      <label><span>Effective from</span><input type="datetime-local" step="1" name="effective_at" max="{{ latest_start.strftime('%Y-%m-%dT%H:%M:%S') }}" required></label>
+      <label><span>Effective to</span><input value="{{ earliest.valid_from.strftime('%Y-%m-%d %H:%M:%S') }}" disabled></label>
+      <label class="wide"><span>Source / change reason</span><textarea name="change_reason" maxlength="2000" rows="4" required placeholder="For example: recovered from the 2025 configuration workbook"></textarea></label>
+    </div>
+  </section>
+  <div class="form-actions"><a class="button secondary button-link" href="/ops/test-locations/history?location_id={{ history.location_id }}">Cancel</a><button class="button primary" type="submit">Add earlier version</button></div>
+</form>
+{% endblock %}

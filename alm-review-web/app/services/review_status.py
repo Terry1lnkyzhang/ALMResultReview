@@ -6,7 +6,11 @@ from sqlalchemy import case, desc, func, select, tuple_
 from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
-from app.services.reviews import FORCE_QUALIFIED_DECISIONS, CurrentReview
+from app.services.reviews import (
+    FORCE_QUALIFIED_DECISIONS,
+    CurrentReview,
+    has_unresolved_review_warning,
+)
 
 # The dashboard must not load `warnings_json`, so ask the database whether it holds
 # anything beyond the two characters of an empty list.
@@ -33,7 +37,12 @@ def _review_from_result(
         final_status = "unqualified"
     else:
         final_status = "needs_manual_review"
-    return CurrentReview(result, manual, final_status, has_warning)
+    return CurrentReview(
+        result,
+        manual,
+        final_status,
+        has_unresolved_review_warning(has_warning, manual),
+    )
 
 
 def review_update_reasons(
@@ -113,36 +122,35 @@ def current_reviews(
         results_by_run[result.run_id] = result
         warning_by_result_id[result.id] = bool(has_warning)
 
-    manuals_by_run: dict[int, ManualDecision] = {}
-    if results_by_run:
-        manuals = db.scalars(
-            select(ManualDecision)
-            .options(
-                load_only(
-                    ManualDecision.id,
-                    ManualDecision.run_id,
-                    ManualDecision.revision_id,
-                    ManualDecision.review_result_id,
-                    ManualDecision.decision,
-                    ManualDecision.source_hash,
-                    ManualDecision.created_at,
-                )
-            )
-            .where(
-                tuple_(
-                    ManualDecision.run_id,
-                    ManualDecision.revision_id,
-                    ManualDecision.source_hash,
-                ).in_(review_keys)
-            )
-            .order_by(
+    manuals = db.scalars(
+        select(ManualDecision)
+        .options(
+            load_only(
+                ManualDecision.id,
                 ManualDecision.run_id,
-                desc(ManualDecision.created_at),
-                desc(ManualDecision.id),
+                ManualDecision.revision_id,
+                ManualDecision.review_result_id,
+                ManualDecision.decision,
+                ManualDecision.source_hash,
+                ManualDecision.created_at,
             )
-        ).all()
-        for manual in manuals:
-            manuals_by_run.setdefault(manual.run_id, manual)
+        )
+        .where(
+            tuple_(
+                ManualDecision.run_id,
+                ManualDecision.revision_id,
+                ManualDecision.source_hash,
+            ).in_(review_keys)
+        )
+        .order_by(
+            ManualDecision.run_id,
+            desc(ManualDecision.created_at),
+            desc(ManualDecision.id),
+        )
+    ).all()
+    manuals_by_run: dict[int, ManualDecision] = {}
+    for manual in manuals:
+        manuals_by_run.setdefault(manual.run_id, manual)
 
     unresolved_revision_ids = {
         run.current_revision_id
@@ -164,12 +172,15 @@ def current_reviews(
 
     for run in active_runs:
         result = results_by_run.get(run.run_id)
+        manual = manuals_by_run.get(run.run_id)
         if result is not None:
             reviews[run.run_id] = _review_from_result(
                 result,
-                manuals_by_run.get(run.run_id),
+                manual,
                 warning_by_result_id.get(result.id, False),
             )
+        elif manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
+            reviews[run.run_id] = CurrentReview(None, manual, "qualified")
         elif run.current_revision_id in failed_revision_ids:
             reviews[run.run_id] = CurrentReview(None, None, "review_failed")
     return reviews
