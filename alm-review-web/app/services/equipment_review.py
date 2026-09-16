@@ -29,7 +29,8 @@ _SERIAL_FIELD_RE = re.compile(
 )
 _PART_FIELD_RE = re.compile(
     r"(?i)(?:\bP/?N\b|part\s*(?:number|no\.?)|型号|部件号)\s*[:=]\s*"
-    r"_*(?P<value>[^;,\r\n]+?)_*(?=$|[;,\r\n])"
+    r"_*(?P<value>[^;,\r\n]+?)_*"
+    r"(?=$|[;,\r\n]|[._\s]+(?:\bS/?N\b|serial\s*(?:number|no\.?)?)\s*[:=])"
 )
 _IDENTITY_FIELD_SUFFIX_RE = re.compile(
     r"(?i)\s*(?:(?:equipment\s*)?(?:id|code|number|no\.?)|"
@@ -54,7 +55,11 @@ _DEVICE_HINT_RE = re.compile(
 _PLACEHOLDER_RE = re.compile(r"^(?:_*|\.*|-*|n/?a|none|unknown|待填)$", re.IGNORECASE)
 _NAME_NOISE_RE = re.compile(r"[\s\-_/.,;:()\[\]{}'\"，。、（）]+")
 _INVALID_SERIALS = {"", "na", "n/a", "none", "unknown", "待填"}
-_NO_CALIBRATION_INTERVALS = {"no calibration required", "no need calibration"}
+_NO_CALIBRATION_INTERVALS = {
+    "no calibration required",
+    "no cailibration required",
+    "no need calibration",
+}
 _AVAILABLE_EQUIPMENT_STATUSES = {
     "active",
     "ready",
@@ -156,6 +161,23 @@ def _contains_identifier(text: str, identifier: str | None) -> bool:
         text,
         re.IGNORECASE,
     ) is not None
+
+
+def _identifier_only_in_part_number_fields(actual: str, identifier: str | None) -> bool:
+    if not identifier:
+        return False
+    occurrences = list(
+        re.finditer(
+            rf"(?<![A-Za-z0-9]){re.escape(identifier)}(?![A-Za-z0-9])",
+            actual,
+            re.IGNORECASE,
+        )
+    )
+    part_number_spans = [match.span("value") for match in _PART_FIELD_RE.finditer(actual)]
+    return bool(occurrences) and all(
+        any(start <= match.start() and match.end() <= end for start, end in part_number_spans)
+        for match in occurrences
+    )
 
 
 def _identifier_context_labels(
@@ -337,6 +359,8 @@ def _equipment_snapshot(equipment: EquipmentRegistry) -> dict[str, Any]:
             if equipment.calibration_due_date
             else None
         ),
+        "calibration_interval": equipment.calibration_interval,
+        "calibration_not_required": _calibration_not_required(equipment),
         "received_date": equipment.received_date.isoformat() if equipment.received_date else None,
         "equipment_status": equipment.equipment_status,
         "source_filename": equipment.source_filename,
@@ -469,7 +493,6 @@ def analyze_equipment_steps(
         device_hint = bool(_DEVICE_HINT_RE.search(combined_text))
         reported_identifiers = _reported_identifiers(raw_actual)
         reported_part_numbers = _reported_part_numbers(raw_actual)
-        part_number_keys = {value.casefold() for value in reported_part_numbers}
         mentioned_asset_ids = [
             identifier
             for identifier in dict.fromkeys(
@@ -477,7 +500,7 @@ def analyze_equipment_steps(
             )
             # A code the Step labels P/N stays a part number even when it is
             # shaped like an asset ID.
-            if identifier.casefold() not in part_number_keys
+            if not _identifier_only_in_part_number_fields(raw_actual, identifier)
         ]
         matched: dict[int, EquipmentRegistry] = {}
         matched_by: dict[int, set[str]] = {}
@@ -521,6 +544,14 @@ def analyze_equipment_steps(
             for equipment_id, methods in matched_by.items()
             if "equipment_id" in methods
         }
+        asserted_id_matches = {
+            item_id
+            for item_id in explicit_id_matches
+            if not _identifier_only_in_part_number_fields(
+                raw_actual,
+                matched[item_id].equipment_id,
+            )
+        }
         serial_only_matches = {
             equipment_id
             for equipment_id, methods in matched_by.items()
@@ -528,7 +559,7 @@ def analyze_equipment_steps(
         }
         explicit_identifiers = [
             matched[item_id].equipment_id or ""
-            for item_id in explicit_id_matches
+            for item_id in asserted_id_matches
         ]
         serial_identifiers = [
             alias
@@ -537,7 +568,7 @@ def analyze_equipment_steps(
             if _contains_identifier(actual, alias)
         ]
         identifier_conflict = bool(
-            explicit_id_matches
+            asserted_id_matches
             and serial_only_matches
             and not _identifiers_are_separately_labelled(
                 raw_actual,
@@ -607,7 +638,7 @@ def analyze_equipment_steps(
             if identifier_conflict:
                 explicit_ids = [
                     _equipment_label(matched[item_id])
-                    for item_id in explicit_id_matches
+                    for item_id in asserted_id_matches
                 ]
                 serial_ids = [
                     _equipment_label(matched[item_id])
@@ -733,17 +764,18 @@ def _evaluate_matches(
                 f"{item.calibration_date.isoformat()} 至 "
                 f"{item.calibration_due_date.isoformat()}"
             )
-        status_warning = _equipment_status_warning(
-            item_label,
-            item.equipment_status,
-        )
-        if status_warning:
-            check["warnings"].append(
-                {
-                    "type": "equipment_status",
-                    "summary": status_warning,
-                }
+        if not _calibration_not_required(item):
+            status_warning = _equipment_status_warning(
+                item_label,
+                item.equipment_status,
             )
+            if status_warning:
+                check["warnings"].append(
+                    {
+                        "type": "equipment_status",
+                        "summary": status_warning,
+                    }
+                )
 
     for item in matched:
         item_label = _equipment_label(item)
@@ -922,6 +954,12 @@ def apply_extracted_equipment(
         previous_references = set(
             check.get("previously_matched_equipment_ids", [])
         )
+        requirement_previous_references = requirement_previous_equipment_ids(
+            str(step.get("description") or ""),
+            str(step.get("expected") or ""),
+            previous_references,
+            registry,
+        )
         due_dates: list[date] = []
         has_grounded_extraction = False
         haystack_key = _name_key(haystack)
@@ -980,12 +1018,21 @@ def apply_extracted_equipment(
                     for item in name_index.get(_name_key(name), [])
                     if equipment_reference(item) in previous_references
                 ]
+                requirement_previous_name_rows = [
+                    item
+                    for item in previous_name_rows
+                    if equipment_reference(item) in requirement_previous_references
+                ]
                 if (
-                    previous_references
-                    and not name_in_actual
-                    and len(previous_name_rows) == 1
+                    len(requirement_previous_name_rows) == 1
+                    or (
+                        previous_references
+                        and not name_in_actual
+                        and len(previous_name_rows) == 1
+                    )
                 ):
-                    rows, ambiguous = previous_name_rows, False
+                    rows = requirement_previous_name_rows or previous_name_rows
+                    ambiguous = False
                     method = "previous_step_equipment"
                 else:
                     rows, ambiguous = _rows_for_name(name, name_index, check)

@@ -2,8 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["review_mode", "batch_index", "batch_count", "steps"],
+  "required": ["alm_run_status", "review_mode", "batch_index", "batch_count", "steps"],
   "properties": {
+    "alm_run_status": {
+      "enum": ["Passed", "Failed"],
+      "description": "Trusted final ALM Run status."
+    },
     "review_mode": {"enum": ["evidence_batch", "final"]},
     "batch_index": {"type": "integer", "minimum": 1},
     "batch_count": {"type": "integer", "minimum": 1},
@@ -13,9 +17,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["review_step", "description", "expected", "actual", "automation_release", "batch_observations", "reports"],
+        "required": ["review_step", "alm_step_status", "description", "expected", "actual", "automation_release", "batch_observations", "reports"],
         "properties": {
           "review_step": {"type": "integer", "minimum": 1},
+          "alm_step_status": {"type": "string", "minLength": 1},
           "description": {"type": "string"},
           "expected": {"type": "string"},
           "actual": {"type": "string"},

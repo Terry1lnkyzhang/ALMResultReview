@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def process_review_queue(
     *,
-    limit: int,
+    limit: int | None,
     worker_id: str,
     lease_seconds: int,
     concurrency: int | None = None,
@@ -57,7 +57,11 @@ def process_review_queue(
         for config_id, capacity in capacities
         for _ in range(capacity)
     )
-    worker_count = min(limit, len(available_slots))
+    worker_count = (
+        len(available_slots)
+        if limit is None
+        else min(limit, len(available_slots))
+    )
     if worker_count == 0:
         return 0, 0
 
@@ -81,7 +85,9 @@ def process_review_queue(
     ) as executor:
         while True:
             with SessionLocal() as db:
-                while available_slots and claimed_count < limit:
+                while available_slots and (
+                    limit is None or claimed_count < limit
+                ):
                     if lease_guard is not None and not lease_guard():
                         claims_allowed = False
                         available_slots.clear()
@@ -232,7 +238,7 @@ def run_worker_cycle(owner_token: str) -> None:
             )
             review_completed, review_failed = (
                 process_review_queue(
-                    limit=max(10, sum(capacity for _, capacity in endpoint_concurrency)),
+                    limit=None,
                     endpoint_concurrency=endpoint_concurrency,
                     owner_token=owner_token,
                     lease_guard=still_owns_lease,

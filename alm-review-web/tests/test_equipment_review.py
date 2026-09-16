@@ -87,23 +87,35 @@ def test_exact_equipment_id_and_calibration_range_pass() -> None:
     assert checks[0]["execution_date"] == "2026-08-01"
 
 
-def test_equipment_marked_no_calibration_required_passes_without_dates() -> None:
-    registry = [
-        equipment(
-            "PCCSY-RD-CT-0-0001",
-            "80508-2927",
-            calibration_date=None,
-            calibration_due_date=None,
-            calibration_interval="No calibration required",
-        )
-    ]
-    content = review_content("Equipment ID: PCCSY-RD-CT-0-0001")
+def test_equipment_marked_no_calibration_required_ignores_status() -> None:
+    for calibration_interval in (
+        "No calibration required",
+        "No cailibration required",
+        "No need calibration",
+    ):
+        for equipment_status in ("", "校准中 In Calibration"):
+            registry = [
+                equipment(
+                    "PCCSY-RD-CT-0-0001",
+                    "80508-2927",
+                    calibration_date=None,
+                    calibration_due_date=None,
+                    calibration_interval=calibration_interval,
+                    equipment_status=equipment_status,
+                )
+            ]
+            content = review_content("Equipment ID: PCCSY-RD-CT-0-0001")
 
-    checks, ambiguous = analyze_equipment_steps(content, registry)
+            checks, ambiguous = analyze_equipment_steps(content, registry)
 
-    assert ambiguous == []
-    assert checks[0]["status"] == "pass"
-    assert checks[0]["code"] == "equipment_valid"
+            assert ambiguous == []
+            assert checks[0]["status"] == "pass"
+            assert checks[0]["code"] == "equipment_valid"
+            assert checks[0]["warnings"] == []
+            assert checks[0]["matches"][0]["calibration_interval"] == (
+                calibration_interval
+            )
+            assert checks[0]["matches"][0]["calibration_not_required"] is True
 
 
 def test_equipment_without_id_matches_by_serial_number() -> None:
@@ -468,6 +480,64 @@ def test_separately_labelled_equipment_id_and_serial_are_two_devices() -> None:
     assert checks[0]["code"] == "equipment_valid"
     assert {item["equipment_id"] for item in checks[0]["matches"]} == {
         "PCCSY-RD-CT-1-0076",
+        "454110621681",
+    }
+
+
+def test_part_number_does_not_create_conflict_between_labelled_devices() -> None:
+    registry = [
+        equipment(
+            "PHSZ-RD-VV-1-0064",
+            "746356",
+            description="Stop watch",
+            calibration_date=date(2026, 4, 5),
+            calibration_due_date=date(2027, 4, 5),
+            equipment_pk=1,
+        ),
+        equipment(
+            "300007839701",
+            "R375.AD.000.004, S491.AD.000.043",
+            description="Interventional Controller",
+            model_number="300007839701",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=2,
+        ),
+        equipment(
+            "454110621681",
+            "20-02-30, 20-02-19, 1709C02",
+            description="CCT Footpanel Assy",
+            model_number="454110621681",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=3,
+        ),
+    ]
+    content = review_content(
+        "IVC PN:_300007839701 Rev.G_.Serial Number:__S491.AD.000.043__\n"
+        "CCT Pedal series number:__20-02-30__\n"
+        "Stop watch equipment ID:__PHSZ-RD-VV-1-0064__."
+        "calibration due date:__4/5/2027__",
+        description="Record detailed of IVC hardware and CCT pedal and stop watch.",
+        expected=(
+            "IVC PN:__.Serial Number:___\n"
+            "CCT Pedal series number:_____\n"
+            "Stop watch equipment ID:___.calibration due date:__"
+        ),
+        execution_date="2026-08-16",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
+    assert checks[0]["reported_part_numbers"] == ["300007839701 Rev.G"]
+    assert {item["equipment_id"] for item in checks[0]["matches"]} == {
+        "PHSZ-RD-VV-1-0064",
+        "300007839701",
         "454110621681",
     }
 
@@ -859,7 +929,7 @@ def test_shared_name_reuses_unique_equipment_verified_in_prior_step() -> None:
         ),
     ]
     content = review_content(
-        "The scan completed successfully.",
+        "The system phantom scan completed successfully.",
         description="Scan the system phantom (Physics layer).",
         expected="The scan succeeds.",
     )
@@ -885,6 +955,49 @@ def test_shared_name_reuses_unique_equipment_verified_in_prior_step() -> None:
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["serial_number"] == "FPP32856-0002"
     assert checks[0]["matches"][0]["matched_by"] == ["previous_step_equipment"]
+
+
+def test_actual_only_shared_name_does_not_reuse_prior_equipment() -> None:
+    registry = [
+        equipment(
+            None,
+            "FPP32856-0002",
+            description="System Phantom",
+            calibration_interval="No calibration required",
+            equipment_pk=1,
+        ),
+        equipment(
+            None,
+            "OTHER-0002",
+            description="System Phantom",
+            calibration_due_date=date(2027, 4, 2),
+            equipment_pk=2,
+        ),
+    ]
+    content = review_content(
+        "The system phantom scan completed successfully.",
+        description="Review the scan output.",
+        expected="The scan succeeds.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["previously_matched_equipment_ids"] = ["SN:FPP32856-0002"]
+
+    apply_extracted_equipment(
+        content,
+        checks,
+        {
+            1: [
+                _extracted(
+                    device_name="system phantom",
+                    source_text="The system phantom scan completed successfully.",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "fail"
+    assert checks[0]["code"] == "equipment_ambiguous_name"
 
 
 def test_shared_name_with_identical_calibration_data_still_decides() -> None:

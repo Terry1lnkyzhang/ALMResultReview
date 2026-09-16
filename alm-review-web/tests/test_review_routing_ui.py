@@ -70,6 +70,9 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "图像证据审计" in source
     assert "ALM 附件" in source
     assert "SHA-256" in source
+    assert "台账：无需校准" in source
+    assert "无需记录校准有效期" in source
+    assert "无需检查当前状态" in source
     assert "'confirmed_qualified': '人工确认合格'" in source
     assert "'override_qualified': '人工确认合格'" in source
     assert "'confirmed_warning_qualified': '人工确认合格（已审阅警告）'" in source

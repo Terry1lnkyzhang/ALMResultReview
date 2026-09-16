@@ -38,9 +38,11 @@ class FailingResponse:
 
 def skill_input() -> dict:
     return {
+        "alm_run_status": "Passed",
         "steps": [
             {
                 "review_step": 1,
+                "alm_step_status": "Passed",
                 "description": "Archive review evidence.",
                 "expected": "Evidence is available.",
                 "actual": r"Screenshots saved under \\server\share\case-1",
@@ -64,7 +66,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.6.0"
+    assert definition.version == "1.7.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -72,17 +74,17 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.6.0",
+        "version": "1.7.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.6.0",
+        "alm-text-review": "1.7.0",
         "equipment-role": "1.4.1",
-        "html-evidence-review": "1.6.0",
-        "image-evidence-review": "1.2.0",
+        "html-evidence-review": "1.7.0",
+        "image-evidence-review": "1.3.0",
     }
 
     assert set(discover_skills()) == set(active)
@@ -100,8 +102,48 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.6.0"
+    assert html["version"] == "1.7.0"
     assert load_skill("html-evidence-review").max_tokens == 32768
+
+
+def test_review_skill_examples_cover_failed_run_record_consistency() -> None:
+    text_examples = load_skill("alm-text-review").examples
+    failed_text = next(
+        example
+        for example in text_examples
+        if example["input"].get("alm_step_status") == "Failed"
+        and "14.2 seconds" in example["input"]["actual"]
+    )
+    no_run_text = next(
+        example
+        for example in text_examples
+        if example["input"].get("alm_step_status") == "No Run"
+    )
+    contradictory_text = next(
+        example
+        for example in text_examples
+        if example["input"].get("alm_step_status") == "Failed"
+        and "8.1 seconds" in example["input"]["actual"]
+    )
+    image_failed = next(
+        example
+        for example in load_skill("image-evidence-review").examples
+        if example["input"].get("alm_step_status") == "Failed"
+    )
+    html_failed = next(
+        example
+        for example in load_skill("html-evidence-review").examples
+        if example["input"].get("alm_step_status") == "Failed"
+    )
+
+    assert failed_text["output"]["findings"] == []
+    assert no_run_text["input"]["actual"] == ""
+    assert no_run_text["output"]["findings"] == []
+    assert contradictory_text["output"]["findings"][0]["code"] == (
+        "expected_actual_mismatch"
+    )
+    assert image_failed["output"]["status"] == "pass"
+    assert html_failed["output"]["status"] == "pass"
 
 
 def test_skill_runner_validates_input_output_and_separates_untrusted_data(
@@ -153,7 +195,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.6.0"
+    assert trace["skill_version"] == "1.7.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64

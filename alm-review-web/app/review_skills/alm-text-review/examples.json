@@ -205,5 +205,70 @@
       "extracted_equipment": [],
       "summary": "Actual 正文明示的角度与要求直接冲突，因此不能由报告引用自动消除。"
     }
+  },
+  {
+    "input": {
+      "alm_run_status": "Failed",
+      "review_step": 10,
+      "alm_step_status": "Failed",
+      "description": "Measure the startup time.",
+      "expected": "Startup time shall be no more than 10 seconds.",
+      "actual": "Startup took 14.2 seconds, exceeding the 10 second limit.",
+      "actual_format": {"layout_text": "Startup took 14.2 seconds.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 10,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "Actual 清楚记录了未满足 Expected 的测量结果，与 Failed 状态一致，因此该失败记录合格。"
+    }
+  },
+  {
+    "input": {
+      "alm_run_status": "Failed",
+      "review_step": 11,
+      "alm_step_status": "No Run",
+      "description": "Execute the remaining regression test.",
+      "expected": "The regression test passes.",
+      "actual": "",
+      "actual_format": {"layout_text": "", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 11,
+      "applicability": "applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "Run 已失败且该步骤状态为 No Run，空白 Actual 与未执行状态一致。"
+    }
+  },
+  {
+    "input": {
+      "alm_run_status": "Failed",
+      "review_step": 12,
+      "alm_step_status": "Failed",
+      "description": "Measure the startup time.",
+      "expected": "Startup time shall be no more than 10 seconds.",
+      "actual": "Startup completed successfully in 8.1 seconds.",
+      "actual_format": {"layout_text": "Startup completed successfully in 8.1 seconds.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 12,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 记录了满足 Expected 的成功结果，与可信的 Failed 状态矛盾。"}
+      ],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "Actual 描述成功结果，但 ALM 步骤状态为 Failed，记录不一致。"
+    }
   }
 ]

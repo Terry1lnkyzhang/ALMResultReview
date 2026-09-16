@@ -25,6 +25,7 @@ from app.services.reviews import (
     _compact_html_quote,
     _equipment_source_field,
     _html_skill_batch_inputs,
+    _reuse_verified_html_citations,
     _run_html_review_batches,
     _validate_html_assessment,
     process_job,
@@ -311,8 +312,13 @@ def test_html_ai_citations_must_match_supplied_report_content() -> None:
         ],
     }
 
-    with pytest.raises(SkillFailure, match="cited text outside"):
+    with pytest.raises(SkillFailure, match="cited text outside") as exc_info:
         _validate_html_assessment(skill_input, assessment)
+
+    message = str(exc_info.value)
+    assert "report-1" in message
+    assert "block-1" in message
+    assert "Observed result: Failed" in message
 
 
 def test_html_ai_citation_may_select_exact_lines_in_original_order() -> None:
@@ -358,6 +364,94 @@ def test_html_ai_citation_may_select_exact_lines_in_original_order() -> None:
     _validate_html_assessment(skill_input, assessment)
 
 
+def test_html_ai_citation_lines_are_restored_to_source_order() -> None:
+    skill_input = {
+        "steps": [
+            {
+                "review_step": 1,
+                "automation_release": {"status": "disabled"},
+                "reports": [
+                    {
+                        "report_id": "report-1",
+                        "content_truncated": False,
+                        "blocks": [
+                            {
+                                "block_id": "result-1",
+                                "text": (
+                                    "expect: The cycle time:_\n"
+                                    "actual: The cycle time:2.3\n"
+                                    "status: Pass"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    assessment = {
+        "status": "pass",
+        "description_coverage": "supported",
+        "expected_coverage": "supported",
+        "actual_coverage": "supported",
+        "result_consistency": "consistent",
+        "release_consistency": "not_checked",
+        "reviewed_report_ids": ["report-1"],
+        "evidence": [
+            {
+                "report_id": "report-1",
+                "block_id": "result-1",
+                "quote": "status: Pass\nactual: The cycle time:2.3",
+            }
+        ],
+    }
+
+    _validate_html_assessment(skill_input, assessment)
+
+    assert assessment["evidence"][0]["quote"] == (
+        "actual: The cycle time:2.3\nstatus: Pass"
+    )
+
+
+def test_html_ai_citation_cannot_repeat_one_source_line() -> None:
+    skill_input = {
+        "steps": [
+            {
+                "review_step": 1,
+                "automation_release": {"status": "disabled"},
+                "reports": [
+                    {
+                        "report_id": "report-1",
+                        "content_truncated": False,
+                        "blocks": [
+                            {"block_id": "result-1", "text": "status: Pass"}
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    assessment = {
+        "status": "pass",
+        "description_coverage": "supported",
+        "expected_coverage": "supported",
+        "actual_coverage": "supported",
+        "result_consistency": "consistent",
+        "release_consistency": "not_checked",
+        "reviewed_report_ids": ["report-1"],
+        "evidence": [
+            {
+                "report_id": "report-1",
+                "block_id": "result-1",
+                "quote": "status: Pass\nstatus: Pass",
+            }
+        ],
+    }
+
+    with pytest.raises(SkillFailure, match="cited text outside"):
+        _validate_html_assessment(skill_input, assessment)
+
+
 def test_html_ai_citation_may_quote_an_exact_excerpt_of_a_long_line() -> None:
     skill_input = {
         "steps": [
@@ -400,6 +494,36 @@ def test_html_ai_citation_may_quote_an_exact_excerpt_of_a_long_line() -> None:
     }
 
     _validate_html_assessment(skill_input, assessment)
+
+
+def test_html_final_synthesis_reuses_verified_batch_citation_text() -> None:
+    observations = [
+        {
+            "evidence": [
+                {
+                    "report_id": "report-1",
+                    "block_id": "block-1",
+                    "quote": "Observed result: Passed",
+                    "supports": ["actual", "result"],
+                }
+            ]
+        }
+    ]
+    assessment = {
+        "evidence": [
+            {
+                "report_id": "report-1",
+                "block_id": "block-1",
+                "quote": "The observed result passed.",
+                "supports": ["description", "expected", "actual", "result"],
+            }
+        ]
+    }
+
+    _reuse_verified_html_citations(observations, assessment)
+
+    assert assessment["evidence"][0]["quote"] == "Observed result: Passed"
+    assert assessment["evidence"][0]["supports"] == ["actual", "result"]
 
 
 def test_html_quote_compaction_keeps_ordered_exact_line_excerpts() -> None:
@@ -524,12 +648,14 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
         for report_index in range(1, 3)
     ]
     skill_input = {
+        "alm_run_status": "Failed",
         "review_mode": "final",
         "batch_index": 1,
         "batch_count": 1,
         "steps": [
             {
                 "review_step": 1,
+                "alm_step_status": "Failed",
                 "description": "Review both reports.",
                 "expected": "All results pass.",
                 "actual": "Both reports passed.",
@@ -544,8 +670,27 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
     def run_skill(_ctx, request, *, assessment_validator):
         calls.append((request, assessment_validator))
         step = request["steps"][0]
-        report = step["reports"][0]
-        block = report["blocks"][0] if report["blocks"] else None
+        observations = step["batch_observations"]
+        evidence = []
+        if observations:
+            evidence = [
+                {
+                    **citation,
+                    "quote": "Paraphrased final synthesis quote.",
+                }
+                for observation in observations
+                for citation in observation["evidence"]
+            ]
+        else:
+            evidence = [
+                {
+                    "report_id": report["report_id"],
+                    "block_id": report["blocks"][0]["block_id"],
+                    "quote": report["blocks"][0]["text"][:100],
+                    "supports": ["result"],
+                }
+                for report in step["reports"]
+            ]
         assessment = {
             "review_step": 1,
             "status": "pass",
@@ -557,20 +702,10 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
             "reviewed_report_ids": [
                 item["report_id"] for item in step["reports"]
             ],
-            "evidence": (
-                [
-                    {
-                        "report_id": report["report_id"],
-                        "block_id": block["block_id"],
-                        "quote": block["text"][:100],
-                        "supports": ["result"],
-                    }
-                ]
-                if block
-                else []
-            ),
+            "evidence": evidence,
             "reason": "All supplied observations support the result.",
         }
+        assessment_validator(request, assessment)
         return {"status": "completed", "ai_calls": 1}, assessment
 
     monkeypatch.setattr("app.services.reviews._run_html_review_skill", run_skill)
@@ -581,12 +716,20 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
     assert [call[0]["review_mode"] for call in calls[:-1]] == [
         "evidence_batch"
     ] * (len(calls) - 1)
+    assert all(call[0]["alm_run_status"] == "Failed" for call in calls)
+    assert all(
+        call[0]["steps"][0]["alm_step_status"] == "Failed" for call in calls
+    )
     final_input = calls[-1][0]
     assert final_input["review_mode"] == "final"
     assert len(final_input["steps"][0]["batch_observations"]) == len(calls) - 1
     assert all(not report["blocks"] for report in final_input["steps"][0]["reports"])
     assert len(traces) == len(calls)
     assert assessment["status"] == "pass"
+    assert all(
+        citation["quote"].startswith("Result ")
+        for citation in assessment["evidence"]
+    )
 
 
 def test_html_ai_verdict_must_cite_every_supplied_report() -> None:

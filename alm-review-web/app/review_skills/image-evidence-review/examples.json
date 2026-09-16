@@ -6,5 +6,21 @@
   {
     "input": {"review_step": 2, "expected": "The value is visible.", "images": [{"media_id": "step-2-image-1", "relative_name": "Step2.png"}]},
     "output": {"review_step": 2, "status": "manual", "reason": "提供的图像中无法清楚读取相关数值。", "observed_media_ids": ["step-2-image-1"]}
+  },
+  {
+    "input": {
+      "alm_run_status": "Failed",
+      "review_step": 3,
+      "alm_step_status": "Failed",
+      "expected": "Startup time shall be no more than 10 seconds.",
+      "actual": "Startup took 14.2 seconds.",
+      "images": [{"media_id": "step-3-image-1", "relative_name": "Step3.png"}]
+    },
+    "output": {
+      "review_step": 3,
+      "status": "pass",
+      "reason": "图像显示启动时间为 14.2 秒，支持 Actual 记录的超限结果以及可信的 Failed 状态。",
+      "observed_media_ids": ["step-3-image-1"]
+    }
   }
 ]

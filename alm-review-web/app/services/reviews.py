@@ -1137,12 +1137,14 @@ def _html_skill_input(
             }
         )
     return {
+        "alm_run_status": str(ctx.content.get("run_status") or "Passed"),
         "review_mode": "final",
         "batch_index": 1,
         "batch_count": 1,
         "steps": [
             {
                 "review_step": request.review_step,
+                "alm_step_status": str(step.get("status") or "Passed"),
                 "description": _clip_step_text(step.get("description"))[0],
                 "expected": _clip_step_text(step.get("expected"))[0],
                 "actual": _clip_step_text(step.get("actual"))[0],
@@ -1224,6 +1226,7 @@ def _html_skill_batch_inputs(
     batch_count = len(report_batches)
     return [
         {
+            "alm_run_status": str(skill_input.get("alm_run_status") or "Passed"),
             "review_mode": "evidence_batch",
             "batch_index": batch_index,
             "batch_count": batch_count,
@@ -1245,6 +1248,7 @@ def _html_final_input(
 ) -> dict[str, Any]:
     step = skill_input["steps"][0]
     return {
+        "alm_run_status": str(skill_input.get("alm_run_status") or "Passed"),
         "review_mode": "final",
         "batch_index": max(1, len(observations)),
         "batch_count": max(1, len(observations)),
@@ -1284,18 +1288,23 @@ def _validate_html_citations(
     }
     for citation in assessment["evidence"]:
         block_text = blocks.get((citation["report_id"], citation["block_id"]))
-        quote_lines = [
-            " ".join(line.split()).casefold()
+        raw_quote_lines = [
+            line.strip()
             for line in citation["quote"].splitlines()
             if line.strip()
         ]
+        quote_lines = [" ".join(line.split()).casefold() for line in raw_quote_lines]
+        raw_block_lines = [
+            line.strip() for line in (block_text or "").splitlines() if line.strip()
+        ]
         block_lines = [
-            " ".join(line.split()).casefold()
-            for line in (block_text or "").splitlines()
-            if line.strip()
+            " ".join(line.split()).casefold() for line in raw_block_lines
         ]
         next_index = 0
-        for quote_line in quote_lines:
+        unmatched_line = ""
+        for raw_quote_line, quote_line in zip(
+            raw_quote_lines, quote_lines, strict=True
+        ):
             matching_index = next(
                 (
                     index
@@ -1306,11 +1315,42 @@ def _validate_html_citations(
             )
             if matching_index is None:
                 next_index = -1
+                unmatched_line = raw_quote_line
                 break
             next_index = matching_index + 1
+        if quote_lines and next_index < 0:
+            source_matches: list[tuple[int, str]] = []
+            used_indexes: set[int] = set()
+            for raw_quote_line, quote_line in zip(
+                raw_quote_lines, quote_lines, strict=True
+            ):
+                matching_index = next(
+                    (
+                        index
+                        for index, block_line in enumerate(block_lines)
+                        if index not in used_indexes and quote_line in block_line
+                    ),
+                    None,
+                )
+                if matching_index is None:
+                    break
+                used_indexes.add(matching_index)
+                source_matches.append((matching_index, raw_quote_line))
+            if len(source_matches) == len(quote_lines):
+                citation["quote"] = "\n".join(
+                    quote_line for _, quote_line in sorted(source_matches)
+                )
+                continue
         if not quote_lines or next_index < 0:
+            detail = (
+                "empty quote"
+                if not quote_lines
+                else f"unmatched line {unmatched_line[:200]!r}"
+            )
             raise SkillFailure(
-                "HTML evidence Skill cited text outside the supplied report block.",
+                "HTML evidence Skill cited text outside the supplied report block: "
+                f"report_id={citation['report_id']!r}, "
+                f"block_id={citation['block_id']!r}, {detail}.",
                 retryable=False,
             )
 
@@ -1331,6 +1371,31 @@ def _compact_html_quote(quote: str, max_chars: int = 400) -> str:
         line_budget = base_chars + (1 if index < remainder else 0)
         excerpts.append(line[:line_budget].rstrip())
     return "\n".join(excerpts)
+
+
+def _reuse_verified_html_citations(
+    observations: list[dict[str, Any]],
+    assessment: dict[str, Any],
+) -> None:
+    verified_citations: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    for observation in observations:
+        for citation in observation.get("evidence", []):
+            key = (citation.get("report_id", ""), citation.get("block_id", ""))
+            quote = citation.get("quote", "")
+            if all(key) and quote:
+                verified_citations.setdefault(
+                    key,
+                    (
+                        _compact_html_quote(quote),
+                        list(citation.get("supports", [])),
+                    ),
+                )
+    for citation in assessment.get("evidence", []):
+        key = (citation.get("report_id", ""), citation.get("block_id", ""))
+        if key in verified_citations:
+            quote, supports = verified_citations[key]
+            citation["quote"] = quote
+            citation["supports"] = list(supports)
 
 
 def _validate_html_assessment(
@@ -1495,6 +1560,7 @@ def _run_html_review_batches(
         _validated_input: dict[str, Any],
         assessment: dict[str, Any],
     ) -> None:
+        _reuse_verified_html_citations(observations, assessment)
         _validate_html_assessment(skill_input, assessment)
 
     final_trace, assessment = _run_html_review_skill(
@@ -1673,9 +1739,13 @@ def _run_image_review_skill(
             ]
         )
     skill_input = {
+        "alm_run_status": str(content.get("run_status") or "Passed"),
         "steps": [
             {
                 "review_step": review_step,
+                "alm_step_status": str(
+                    step_by_number[review_step].get("status") or "Passed"
+                ),
                 "description": _clip_step_text(
                     step_by_number[review_step].get("description")
                 )[0],
@@ -2198,6 +2268,7 @@ def _run_text_semantic_skills(
         payloads.append(
             {
                 "review_step": int(step["review_step"]),
+                "alm_step_status": str(step.get("status") or "Passed"),
                 "description": description,
                 "expected": expected,
                 "actual": actual,
@@ -2212,7 +2283,11 @@ def _run_text_semantic_skills(
     for batch in _text_skill_batches(payloads):
         trace = skill_runner.run(
             "alm-text-review",
-            {"project": project, "steps": batch},
+            {
+                "project": project,
+                "alm_run_status": str(content.get("run_status") or "Passed"),
+                "steps": batch,
+            },
             endpoint=_completion_url(ai_config.base_url),
             model_name=ai_config.model_name,
             headers=_ai_headers(ai_config),

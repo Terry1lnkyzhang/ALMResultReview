@@ -546,12 +546,14 @@ def test_not_applicable_step_drops_text_findings(monkeypatch) -> None:
     ]
 
 
-def test_text_review_sends_workspace_project_context(monkeypatch) -> None:
+def test_text_review_sends_workspace_project_and_alm_status_context(monkeypatch) -> None:
     content = {
+        "run_status": "Failed",
         "review_plan": {"text_steps": [1]},
         "steps": [
             {
                 "review_step": 1,
+                "status": "Failed",
                 "description": "This step not for Earth.",
                 "expected": "Timing shall be no more than 1s.",
                 "actual": "This step not for Earth.",
@@ -591,6 +593,8 @@ def test_text_review_sends_workspace_project_context(monkeypatch) -> None:
 
     assert len(supplied_inputs) == 1
     assert supplied_inputs[0]["project"] == "earth_kylin"
+    assert supplied_inputs[0]["alm_run_status"] == "Failed"
+    assert supplied_inputs[0]["steps"][0]["alm_step_status"] == "Failed"
     assert supplied_inputs[0]["steps"][0]["description"] == (
         "This step not for Earth."
     )
@@ -1082,10 +1086,12 @@ def test_text_and_image_reviews_use_separate_bounded_requests(monkeypatch) -> No
         results={1: {source: ImageEvidenceResult(status="ready", images=images)}},
     )
     content = {
+        "run_status": "Failed",
         "review_plan": {"text_steps": [1]},
         "steps": [
             {
                 "review_step": 1,
+                "status": "Failed",
                 "order": "1",
                 "description": "Check the report image.",
                 "expected": "The report is correct.",
@@ -1179,6 +1185,9 @@ def test_text_and_image_reviews_use_separate_bounded_requests(monkeypatch) -> No
         assert request["messages"][0]["role"] == "system"
         assert "Image Evidence Review" in request["messages"][0]["content"]
         message = request["messages"][1]["content"]
+        skill_input = json.loads(message[0]["text"])
+        assert skill_input["alm_run_status"] == "Failed"
+        assert skill_input["steps"][0]["alm_step_status"] == "Failed"
         assert sum(part["type"] == "image_url" for part in message) <= 4
     assert len(prepared.image_skill_traces) == 3
     assert all(

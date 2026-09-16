@@ -271,6 +271,49 @@ def test_review_queue_gives_refills_to_the_endpoint_that_finishes_first(
     assert endpoint_by_job == {1: 1, 2: 2, 3: 2, 4: 2}
 
 
+def test_review_queue_drain_mode_keeps_refilling_until_queue_is_empty(
+    monkeypatch,
+) -> None:
+    claimed_job_ids = iter((1, 2, 3))
+    endpoint_by_job = {}
+    later_job_started = Event()
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def claim_job(_db, _worker_id, _lease_seconds, ai_config_id=None):
+        job_id = next(claimed_job_ids, None)
+        if job_id is None:
+            return None
+        endpoint_by_job[job_id] = ai_config_id
+        return SimpleNamespace(id=job_id)
+
+    def process_claimed(_db, job_id):
+        if job_id == 1:
+            assert later_job_started.wait(timeout=5)
+        elif job_id == 3:
+            later_job_started.set()
+        return 1, 0
+
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(scheduler, "claim_next_review_job", claim_job)
+    monkeypatch.setattr(scheduler, "process_claimed_review_job", process_claimed)
+
+    completed, failed = scheduler.process_review_queue(
+        limit=None,
+        endpoint_concurrency=((1, 1), (2, 1)),
+        worker_id="worker-one",
+        lease_seconds=60,
+    )
+
+    assert (completed, failed) == (3, 0)
+    assert endpoint_by_job == {1: 1, 2: 2, 3: 2}
+
+
 def test_review_queue_stops_claiming_when_singleton_lease_is_lost(
     monkeypatch,
 ) -> None:
