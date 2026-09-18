@@ -6,9 +6,9 @@
 {% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
 {% set action_labels = {'validate_path': '校验路径', 'load_images': '读取图像', 'send_to_visual_ai': '发送给视觉 AI', 'parse_html_report': '解析 HTML 报告', 'manual_review': '人工复核', 'review_attachment': '评审附件'} %}
 {% set match_labels = {'equipment_id': '设备 ID', 'serial_number': '序列号', 'model_number': '型号', 'extracted_equipment_id': 'AI 抽取的设备 ID', 'extracted_serial_number': 'AI 抽取的序列号', 'extracted_device_name': 'AI 抽取的设备名称', 'previous_step_equipment': '前序步骤已验证设备', 'ai_disambiguation': 'AI 消歧', 'ai_registry_name': 'AI 台账名称匹配', 'html_report_equipment_id': 'HTML 报告设备 ID'} %}
-{% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
+{% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'location-consistency': '测试位置一致性评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
 {% set queue_status_labels = {'queued': '排队中', 'running': '执行中', 'completed': '已完成', 'failed': '失败'} %}
-{% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
+{% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'location_review': '测试位置校验', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
 {% block title %}运行 {{ run.alm_run_id or run.run_id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; 返回仪表板</a>
@@ -102,11 +102,13 @@
 <section class="pipeline-section">
   <div class="table-heading"><h2>评审流程</h2><span>{{ review_pipeline.get('total_ai_calls', 0) }} 次 AI 调用</span></div>
   <div class="pipeline-stages">
-    {% for key, label in [('routing', '证据路由'), ('text_review', '文本评审'), ('image_review', '图像评审'), ('report_review', '报告评审'), ('equipment_review', '设备评审'), ('aggregation', '结果汇总')] %}
+    {% for key, label in [('routing', '证据路由'), ('text_review', '文本评审'), ('location_review', '测试位置校验'), ('image_review', '图像评审'), ('report_review', '报告评审'), ('equipment_review', '设备评审'), ('aggregation', '结果汇总')] %}
+      {% if key in review_pipeline.get('stages', {}) %}
       {% set stage = review_pipeline.get('stages', {}).get(key, {}) %}
       <article class="pipeline-stage pipeline-stage-{{ stage.get('status', 'not_applicable') }}">
         <span>{{ loop.index|string }}</span><div><strong>{{ label }}</strong><small>{{ review_status_labels.get(stage.get('status', 'not_applicable'), stage.get('status', 'not_applicable')) }}{% if stage.get('ai_calls') %} &middot; {{ stage.get('ai_calls') }} 次 AI 调用{% endif %}{% if stage.get('steps') %} &middot; {% if key == 'routing' %}{{ stage.get('steps')|length }}{% else %}{{ stage.get('steps') }}{% endif %} 个步骤{% endif %}{% if stage.get('reports') %} &middot; {{ stage.get('reports') }} 份报告{% endif %}</small></div>
       </article>
+      {% endif %}
     {% endfor %}
   </div>
   {% set routing_steps = review_pipeline.get('stages', {}).get('routing', {}).get('steps', []) %}
@@ -124,6 +126,28 @@
       </div>
     </details>
     {% endfor %}
+  </div>
+  {% endif %}
+  {% set location_review = review_pipeline.get('stages', {}).get('location_review', {}).get('assessment', {}) %}
+  {% if location_review %}
+  <div class="routing-trace">
+    <div class="routing-trace-heading"><strong>测试位置校验</strong><span>Location 配置与父层级名称</span></div>
+    <details class="routing-step" open>
+      <summary><span>{{ location_review.get('alm_location') or '无 Location' }}</span><strong>{{ review_status_labels.get(location_review.get('status', 'fail'), location_review.get('status', 'fail')) }}</strong><i>{{ location_review.get('failure_code') or 'AI 语义校验' }}</i></summary>
+      <div class="routing-step-body">
+        <p>{{ location_review.get('reason') or '未记录校验原因。' }}</p>
+        <dl><dt>父层级</dt><dd><code>{{ location_review.get('parent_name') or '-' }}</code><small>{{ location_review.get('folder_path') or '-' }}</small></dd></dl>
+        {% if location_review.get('selected_config') %}
+        {% set config = location_review.get('selected_config') %}
+        <dl><dt>配置记录</dt><dd><strong>{{ config.get('item') }}</strong><small>Product: {{ config.get('product') or '-' }} · DMS: {{ config.get('dms_version') or '-' }} / {{ config.get('dms_coverage') or '-' }} · Couch: {{ config.get('couch') or '-' }} · Computer: {{ config.get('computer') or '-' }}</small></dd></dl>
+        {% elif location_review.get('candidate_items') %}
+        <dl><dt>候选记录</dt><dd>{% for item in location_review.get('candidate_items') %}<code>{{ item }}</code>{% endfor %}</dd></dl>
+        {% endif %}
+        {% for comparison in location_review.get('semantic_review', {}).get('comparisons', []) %}
+        <dl><dt>{{ comparison.get('field') }}</dt><dd><strong>{{ comparison.get('parent_text') }}</strong><small>{{ review_status_labels.get(comparison.get('status'), comparison.get('status')) }} · {{ comparison.get('reason') }}</small></dd></dl>
+        {% endfor %}
+      </div>
+    </details>
   </div>
   {% endif %}
   {% if review_skill_traces %}
@@ -148,15 +172,17 @@
 {% endif %}
 {% if review_criteria %}
 <section class="criteria-section">
-  <div class="table-heading"><h2>评审准则</h2><span>9 项检查</span></div>
+  <div class="table-heading"><h2>评审准则</h2><span>{{ review_criteria|length }} 项检查</span></div>
   <div class="criteria-grid">
-  {% for key, label in [('language_quality', '语言质量'), ('expected_vs_actual', 'Expected 与 Actual'), ('screenshot_evidence', '截图证据'), ('path_validation', '路径校验'), ('html_report_sequence', 'HTML 报告序列'), ('automation_results', '自动化结果'), ('automation_timing', '日期校验'), ('phantom_information', '参考数据校验'), ('equipment_traceability', '设备可追溯性')] %}
+  {% for key, label in [('location_consistency', '测试位置一致性'), ('language_quality', '语言质量'), ('expected_vs_actual', 'Expected 与 Actual'), ('screenshot_evidence', '截图证据'), ('path_validation', '路径校验'), ('html_report_sequence', 'HTML 报告序列'), ('automation_results', '自动化结果'), ('automation_timing', '日期校验'), ('phantom_information', '参考数据校验'), ('equipment_traceability', '设备可追溯性')] %}
+    {% if key in review_criteria %}
     {% set criterion = review_criteria.get(key, {}) %}
     <article class="criterion criterion-{{ criterion.get('status', 'manual') }}">
       <header><h3>{{ label }}</h3><span>{{ review_status_labels.get(criterion.get('status', 'manual'), criterion.get('status', 'manual')) }}</span></header>
       <p>{{ criterion.get('summary') or '-' }}</p>
       {% if criterion.get('evidence') %}<small>{{ criterion.get('evidence') }}</small>{% endif %}
     </article>
+    {% endif %}
   {% endfor %}
   </div>
 </section>

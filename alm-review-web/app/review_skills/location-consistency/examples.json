@@ -1,0 +1,51 @@
+[
+  {
+    "input": {
+      "alm_location": "CHESS-CAST-20140",
+      "folder_path": "Testing / Zhao Yize / 0. Common Config",
+      "parent_name": "0. Common Config",
+      "location_config": {"item": "SZ Bay03(CHESS-CAST-20140)", "product": "CT5300 V7.0", "dms_version": "V6", "dms_coverage": "4cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara G5 Prem"}
+    },
+    "output": {
+      "has_configuration_claim": false,
+      "status": "not_applicable",
+      "comparisons": [],
+      "reason": "父层级只是通用配置目录名称，没有声明具体产品、DMS、床或计算机配置。"
+    }
+  },
+  {
+    "input": {
+      "alm_location": "CHESS-CAST-20006",
+      "folder_path": "Automation Testing Phase2 / Li Xianjin / 4.6 DMS-4cm V2 or V6",
+      "parent_name": "4.6 DMS-4cm V2 or V6",
+      "location_config": {"item": "SY Bay10(CHESS-CAST-20006)", "product": "Tenara", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara/CT 5300 G5 STD"}
+    },
+    "output": {
+      "has_configuration_claim": true,
+      "status": "fail",
+      "comparisons": [
+        {"field": "dms_version", "parent_text": "V2 or V6", "status": "matched", "reason": "数据库配置 V6 属于父层级允许的 V2 或 V6。"},
+        {"field": "dms_coverage", "parent_text": "4cm", "status": "mismatched", "reason": "父层级要求 4cm，但数据库配置为 2cm。"}
+      ],
+      "reason": "DMS 版本匹配，但覆盖范围不一致。"
+    }
+  },
+  {
+    "input": {
+      "alm_location": "CHESS-CAST-20006",
+      "folder_path": "Testing / Zhao Yize / 6.5 Product-CT Tenara+V6 2cm",
+      "parent_name": "6.5 Product-CT Tenara+V6 2cm",
+      "location_config": {"item": "SY Bay10(CHESS-CAST-20006)", "product": "Tenara", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara/CT 5300 G5 STD"}
+    },
+    "output": {
+      "has_configuration_claim": true,
+      "status": "pass",
+      "comparisons": [
+        {"field": "product", "parent_text": "CT Tenara", "status": "matched", "reason": "CT Tenara 与数据库产品 Tenara 语义一致。"},
+        {"field": "dms_version", "parent_text": "V6", "status": "matched", "reason": "DMS 版本均为 V6。"},
+        {"field": "dms_coverage", "parent_text": "2cm", "status": "matched", "reason": "DMS 覆盖范围均为 2cm。"}
+      ],
+      "reason": "父层级声明的产品和 DMS 配置均与数据库一致。"
+    }
+  }
+]

@@ -15,6 +15,12 @@ gate = ""
 writes = ["applicability", "step_issues", "step_warnings"]
 
 [[stage]]
+id = "location_review"
+skill = "location-consistency"
+gate = ""
+writes = ["location_review", "criteria.location_consistency", "verdict"]
+
+[[stage]]
 id = "image_review"
 skill = "image-evidence-review"
 gate = "external_evidence_review_enabled"

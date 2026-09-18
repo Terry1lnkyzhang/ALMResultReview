@@ -171,6 +171,9 @@ def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(text, dict):
         for trace in text.get("skills", []):
             add("text_review", trace)
+    location = stages.get("location_review", {})
+    if isinstance(location, dict):
+        add("location_review", location.get("skill"))
     image = stages.get("image_review", {})
     if isinstance(image, dict):
         for trace in image.get("skills", []):

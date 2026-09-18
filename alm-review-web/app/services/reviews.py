@@ -65,6 +65,11 @@ from app.services.image_evidence import (
     ResolvedImage,
     embedded_image,
 )
+from app.services.location_review import (
+    fallback_location_skill_output,
+    load_location_assessment,
+    validate_location_skill_output,
+)
 from app.services.review_pipeline import build_pipeline_trace
 from app.services.review_policy import current_review_policy_key
 from app.services.skill_runner import SkillFailure, skill_runner
@@ -77,6 +82,7 @@ from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 VALID_VERDICTS = {"qualified", "unqualified", "needs_manual_review"}
 CRITERIA_NAMES = (
+    "location_consistency",
     "language_quality",
     "expected_vs_actual",
     "screenshot_evidence",
@@ -176,6 +182,7 @@ class ReviewContext:
     automation_release_assessments: dict[int, dict[str, Any]] = field(
         default_factory=dict
     )
+    location_assessment: dict[str, Any] = field(default_factory=dict)
     equipment_checks: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[OpenQuestion] = field(default_factory=list)
     text_result: dict[str, Any] = field(default_factory=dict)
@@ -368,6 +375,9 @@ def _append_step_issue(
 
 def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
     criteria = {
+        "location_consistency": _criterion(
+            "not_applicable", "Test location configuration review is not available."
+        ),
         "language_quality": _criterion(
             "pass", "未发现影响结论的语言问题。"
         ),
@@ -433,6 +443,32 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
                 if issue["summary"] not in criterion["summary"]:
                     criterion["summary"] += "; " + issue["summary"]
 
+    location_review = parsed.get("location_review")
+    location_failure = ""
+    if isinstance(location_review, dict):
+        location_status = str(location_review.get("status") or "uncertain")
+        criterion_status = {
+            "disabled": "not_applicable",
+            "not_applicable": "not_applicable",
+            "pass": "pass",
+            "fail": "fail",
+            "uncertain": "fail",
+            "ready": "fail",
+        }.get(location_status, "fail")
+        location_reason = str(
+            location_review.get("reason") or "Test location review is incomplete."
+        )
+        criteria["location_consistency"] = _criterion(
+            criterion_status,
+            location_reason,
+            (
+                f"Location: {location_review.get('alm_location') or '-'}; "
+                f"parent: {location_review.get('parent_name') or '-'}"
+            ),
+        )
+        if criterion_status == "fail":
+            location_failure = location_reason
+
     equipment_results = [
         item["equipment"]
         for item in parsed["step_results"]
@@ -458,13 +494,21 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         )
 
     step_statuses = {item["status"] for item in parsed["step_results"]}
-    if "fail" in step_statuses:
+    if location_failure or "fail" in step_statuses:
         verdict = "unqualified"
     elif "manual" in step_statuses:
         verdict = "needs_manual_review"
     else:
         verdict = "qualified"
-    if all_issues:
+    if location_failure:
+        displayed = [f"测试位置：{location_failure}"]
+        displayed.extend(
+            f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:5]
+        )
+        if len(all_issues) > 5:
+            displayed.append(f"另有 {len(all_issues) - 5} 个问题")
+        issue_summary = "；".join(displayed)
+    elif all_issues:
         displayed = [
             f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:6]
         ]
@@ -2501,6 +2545,60 @@ def _routing_stage(ctx: ReviewContext) -> dict[str, Any]:
     }
 
 
+def _location_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    assessment = dict(ctx.location_assessment)
+    trace: dict[str, Any] | None = None
+    if assessment.get("status") == "ready":
+        skill_input = {
+            "alm_location": assessment["alm_location"],
+            "folder_path": assessment["folder_path"],
+            "parent_name": assessment["parent_name"],
+            "location_config": assessment["selected_config"],
+        }
+        trace = skill_runner.run(
+            "location-consistency",
+            skill_input,
+            endpoint=_completion_url(ctx.ai_config.base_url),
+            model_name=ctx.ai_config.model_name,
+            headers=_ai_headers(ctx.ai_config),
+            timeout_seconds=ctx.ai_config.timeout_seconds,
+            granted_capabilities={
+                "review.location.parent_name",
+                "location.configuration.metadata",
+            },
+            request_post=httpx.post,
+            output_validator=validate_location_skill_output,
+            output_fallback=fallback_location_skill_output,
+        )
+        if trace.get("status") != "completed":
+            raise _skill_failure(trace, "Location consistency Skill failed.")
+        semantic_review = trace["output"]
+        assessment.update(
+            status=semantic_review["status"],
+            reason=semantic_review["reason"],
+            semantic_review=semantic_review,
+        )
+        raw_outputs = json.loads(ctx.raw_response) if ctx.raw_response else {}
+        raw_outputs["location-consistency"] = semantic_review
+        ctx.raw_response = json.dumps(
+            raw_outputs,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    ctx.location_assessment = assessment
+    ctx.text_result["location_review"] = assessment
+    ctx.text_result = _recalculate_result(ctx.text_result)
+    return {
+        "status": (
+            "disabled" if assessment.get("status") == "disabled" else "completed"
+        ),
+        "ai_calls": int(trace.get("ai_calls", 0)) if trace else 0,
+        "assessment": assessment,
+        "skill": trace,
+    }
+
+
 def _plan_specialist_passes(ctx: ReviewContext) -> None:
     """Turn the first pass answer into the work list for the specialist stages."""
     if ctx.equipment_enabled:
@@ -2698,6 +2796,7 @@ def execute_review(ctx: ReviewContext) -> PipelineOutcome:
     _prepare_stage(ctx)
     text_trace = _text_review_stage(ctx)
     routing_trace = _routing_stage(ctx)
+    location_trace = _location_review_stage(ctx)
     _plan_specialist_passes(ctx)
     image_trace = _image_review_stage(ctx)
     report_trace = _report_review_stage(ctx)
@@ -2714,6 +2813,7 @@ def execute_review(ctx: ReviewContext) -> PipelineOutcome:
         stages={
             "routing": routing_trace,
             "text_review": text_trace,
+            "location_review": location_trace,
             "image_review": image_trace,
             "report_review": report_trace,
             "equipment_review": equipment_trace,
@@ -2803,6 +2903,11 @@ def process_job(
             )
         equipment_registry = list(db.scalars(equipment_statement).all())
     content = review_payload(snapshot)
+    location_assessment = load_location_assessment(
+        db,
+        str(content.get("execution_location") or ""),
+        str(content.get("folder_path") or ""),
+    )
     evidence_config = workspace_evidence_config(db, workspace.id)
     release_assessments: dict[int, dict[str, Any]] = {}
     release_project = (
@@ -2852,6 +2957,7 @@ def process_job(
         equipment_enabled=workspace.equipment_review_enabled,
         equipment_registry=equipment_registry,
         automation_release_assessments=release_assessments,
+        location_assessment=location_assessment,
     )
     started = time.perf_counter()
     try:

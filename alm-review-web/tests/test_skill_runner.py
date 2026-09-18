@@ -85,6 +85,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
         "equipment-role": "1.4.1",
         "html-evidence-review": "1.7.0",
         "image-evidence-review": "1.3.0",
+        "location-consistency": "1.0.0",
     }
 
     assert set(discover_skills()) == set(active)

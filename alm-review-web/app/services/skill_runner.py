@@ -363,11 +363,50 @@ class EquipmentRoleOutput(BaseModel):
     decisions: list[EquipmentRoleDecision]
 
 
+class TestLocationConfigInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item: str = Field(min_length=1)
+    product: str
+    dms_version: str
+    dms_coverage: str
+    couch: str
+    computer: str
+
+
+class LocationConsistencyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    alm_location: str = Field(min_length=1)
+    folder_path: str = Field(min_length=1)
+    parent_name: str = Field(min_length=1)
+    location_config: TestLocationConfigInput
+
+
+class LocationComparison(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    field: Literal["product", "dms_version", "dms_coverage", "couch", "computer"]
+    parent_text: str = Field(min_length=1, max_length=512)
+    status: Literal["matched", "mismatched", "uncertain"]
+    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
+
+
+class LocationConsistencyOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    has_configuration_claim: bool
+    status: Literal["pass", "not_applicable", "fail", "uncertain"]
+    comparisons: list[LocationComparison] = Field(max_length=5)
+    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
+
+
 _SKILL_MODELS: dict[str, tuple[type[BaseModel], type[BaseModel]]] = {
     "alm-text-review": (AlmTextReviewInput, AlmTextReviewOutput),
     "image-evidence-review": (ImageReviewInput, ImageReviewOutput),
     "html-evidence-review": (HtmlReviewInput, HtmlReviewOutput),
     "equipment-role": (EquipmentRoleInput, EquipmentRoleOutput),
+    "location-consistency": (LocationConsistencyInput, LocationConsistencyOutput),
 }
 
 

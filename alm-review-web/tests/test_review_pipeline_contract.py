@@ -27,6 +27,7 @@ from app.services.skill_runner import discover_skills, load_skill
 EXPECTED_STAGE_ORDER = [
     "routing",
     "text_review",
+    "location_review",
     "image_review",
     "report_review",
     "equipment_review",
@@ -38,7 +39,12 @@ IMAGE_PATH = ALLOWED_ROOT + r"\case\Step1.png"
 # Skill titles are read from the packages so renaming a Skill cannot silently pass.
 SKILL_TITLES = {
     skill_id: load_skill(skill_id).instructions.splitlines()[0].lstrip("# ").strip()
-    for skill_id in ("alm-text-review", "image-evidence-review", "equipment-role")
+    for skill_id in (
+        "alm-text-review",
+        "location-consistency",
+        "image-evidence-review",
+        "equipment-role",
+    )
 }
 
 
@@ -94,7 +100,39 @@ def skill_response(request: dict[str, Any]) -> StubResponse:
     user_content = request["messages"][1]["content"]
     skill_id = identify_skill(system_content)
     raw_input = user_content if isinstance(user_content, str) else user_content[0]["text"]
-    steps = json.loads(raw_input)["steps"]
+    payload = json.loads(raw_input)
+    if skill_id == "location-consistency":
+        if payload["parent_name"] == "0. Common Config":
+            return StubResponse(
+                {
+                    "has_configuration_claim": False,
+                    "status": "not_applicable",
+                    "comparisons": [],
+                    "reason": "父层级没有声明具体配置。",
+                }
+            )
+        return StubResponse(
+            {
+                "has_configuration_claim": True,
+                "status": "fail",
+                "comparisons": [
+                    {
+                        "field": "dms_version",
+                        "parent_text": "V2 or V6",
+                        "status": "matched",
+                        "reason": "数据库中的 V6 属于允许范围。",
+                    },
+                    {
+                        "field": "dms_coverage",
+                        "parent_text": "4cm",
+                        "status": "mismatched",
+                        "reason": "数据库配置为 2cm。",
+                    },
+                ],
+                "reason": "DMS coverage 与测试位置配置不一致。",
+            }
+        )
+    steps = payload["steps"]
     if skill_id == "alm-text-review":
         return StubResponse(
             {
@@ -221,7 +259,8 @@ def run_pipeline(
     *,
     actual: str,
     external_evidence: bool | None = None,
-) -> tuple[dict[str, Any], list[str]]:
+    location_assessment: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[str], str, dict[str, Any]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -246,13 +285,44 @@ def run_pipeline(
         monkeypatch.setattr(
             "app.services.reviews.NetworkImageResolver", StubImageResolver
         )
+        if location_assessment is not None:
+            monkeypatch.setattr(
+                "app.services.reviews.load_location_assessment",
+                lambda *_args: location_assessment,
+            )
 
         result = process_job(db, job)
-        return json.loads(result.pipeline_json), called_skills
+        return (
+            json.loads(result.pipeline_json),
+            called_skills,
+            result.verdict,
+            json.loads(result.criteria_json),
+        )
+
+
+def ready_location_assessment(parent_name: str) -> dict[str, Any]:
+    return {
+        "status": "ready",
+        "failure_code": "",
+        "reason": "The location has one effective configuration row.",
+        "alm_location": "CHESS-CAST-20006",
+        "folder_path": f"Testing / Li Xianjin / {parent_name}",
+        "parent_name": parent_name,
+        "candidate_count": 1,
+        "candidate_items": ["SY Bay10(CHESS-CAST-20006)"],
+        "selected_config": {
+            "item": "SY Bay10(CHESS-CAST-20006)",
+            "product": "Tenara",
+            "dms_version": "V6",
+            "dms_coverage": "2cm",
+            "couch": "Enhance Incisive STD",
+            "computer": "CT Tenara/CT 5300 G5 STD",
+        },
+    }
 
 
 def test_pipeline_stages_keep_their_declared_order(monkeypatch) -> None:
-    pipeline, called_skills = run_pipeline(
+    pipeline, called_skills, _verdict, _criteria = run_pipeline(
         monkeypatch,
         actual="The result was recorded in the test report.",
     )
@@ -297,7 +367,7 @@ def test_undeclared_or_missing_stages_are_rejected() -> None:
 
 
 def test_pipeline_ai_call_counts_match_the_stage_totals(monkeypatch) -> None:
-    pipeline, called_skills = run_pipeline(
+    pipeline, called_skills, _verdict, _criteria = run_pipeline(
         monkeypatch,
         actual="The result was recorded in the test report.",
     )
@@ -307,7 +377,7 @@ def test_pipeline_ai_call_counts_match_the_stage_totals(monkeypatch) -> None:
 
 
 def test_image_stage_runs_after_the_text_stage(monkeypatch) -> None:
-    pipeline, called_skills = run_pipeline(
+    pipeline, called_skills, _verdict, _criteria = run_pipeline(
         monkeypatch,
         actual=f"The screenshot was archived at {IMAGE_PATH}",
         external_evidence=True,
@@ -321,7 +391,7 @@ def test_image_stage_runs_after_the_text_stage(monkeypatch) -> None:
 
 
 def test_external_stages_are_disabled_without_evidence_review(monkeypatch) -> None:
-    pipeline, called_skills = run_pipeline(
+    pipeline, called_skills, _verdict, _criteria = run_pipeline(
         monkeypatch,
         actual=f"The screenshot was archived at {IMAGE_PATH}",
         external_evidence=False,
@@ -331,3 +401,59 @@ def test_external_stages_are_disabled_without_evidence_review(monkeypatch) -> No
     assert pipeline["stages"]["image_review"]["status"] == "disabled"
     assert pipeline["stages"]["report_review"]["status"] == "disabled"
     assert pipeline["stages"]["image_review"]["ai_calls"] == 0
+
+
+def test_missing_location_configuration_fails_without_location_ai(monkeypatch) -> None:
+    assessment = {
+        **ready_location_assessment("0. Common Config"),
+        "status": "fail",
+        "failure_code": "location_config_not_found",
+        "reason": "No test-location configuration matches the ALM Location.",
+        "candidate_count": 0,
+        "candidate_items": [],
+        "selected_config": None,
+    }
+
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_assessment=assessment,
+    )
+
+    assert called_skills == ["alm-text-review"]
+    assert pipeline["stages"]["location_review"]["ai_calls"] == 0
+    assert pipeline["stages"]["location_review"]["assessment"]["status"] == "fail"
+    assert verdict == "unqualified"
+    assert criteria["location_consistency"]["status"] == "fail"
+
+
+def test_generic_parent_name_is_not_a_configuration_claim(monkeypatch) -> None:
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_assessment=ready_location_assessment("0. Common Config"),
+    )
+
+    assert called_skills == ["alm-text-review", "location-consistency"]
+    assessment = pipeline["stages"]["location_review"]["assessment"]
+    assert assessment["status"] == "not_applicable"
+    assert assessment["semantic_review"]["has_configuration_claim"] is False
+    assert verdict == "qualified"
+    assert criteria["location_consistency"]["status"] == "not_applicable"
+
+
+def test_parent_configuration_mismatch_fails_the_run(monkeypatch) -> None:
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_assessment=ready_location_assessment("4.6 DMS-4cm V2 or V6"),
+    )
+
+    assert called_skills == ["alm-text-review", "location-consistency"]
+    assessment = pipeline["stages"]["location_review"]["assessment"]
+    assert assessment["status"] == "fail"
+    assert assessment["semantic_review"]["comparisons"][1]["field"] == (
+        "dms_coverage"
+    )
+    assert verdict == "unqualified"
+    assert criteria["location_consistency"]["status"] == "fail"

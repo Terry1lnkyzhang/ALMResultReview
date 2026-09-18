@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["alm_location", "folder_path", "parent_name", "location_config"],
+  "properties": {
+    "alm_location": {"type": "string", "minLength": 1},
+    "folder_path": {"type": "string", "minLength": 1},
+    "parent_name": {"type": "string", "minLength": 1},
+    "location_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item", "product", "dms_version", "dms_coverage", "couch", "computer"],
+      "properties": {
+        "item": {"type": "string", "minLength": 1},
+        "product": {"type": "string"},
+        "dms_version": {"type": "string"},
+        "dms_coverage": {"type": "string"},
+        "couch": {"type": "string"},
+        "computer": {"type": "string"}
+      }
+    }
+  }
+}
