@@ -50,5 +50,33 @@
       "evidence": [{"report_id": "report-1", "block_id": "block-8", "quote": "Reconstruction check: Failed | Overall result: Passed", "supports": ["expected", "actual", "result"]}],
       "reason": "一项必需的详细检查失败，与 Actual 以及整体 Passed 结论均不一致。"
     }
+  },
+  {
+    "input": {
+      "alm_run_status": "Failed",
+      "review_mode": "final",
+      "batch_index": 1,
+      "batch_count": 1,
+      "review_step": 4,
+      "alm_step_status": "Failed",
+      "description": "Verify startup time",
+      "expected": "Startup time shall be no more than 10 seconds.",
+      "actual": "Startup took 14.2 seconds and failed the limit.",
+      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34836", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
+      "batch_observations": [],
+      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-9", "text": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed"}]}]
+    },
+    "output": {
+      "review_step": 4,
+      "status": "pass",
+      "description_coverage": "supported",
+      "expected_coverage": "supported",
+      "actual_coverage": "supported",
+      "result_consistency": "consistent",
+      "release_consistency": "not_checked",
+      "reviewed_report_ids": ["report-1"],
+      "evidence": [{"report_id": "report-1", "block_id": "block-9", "quote": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed", "supports": ["description", "expected", "actual", "result"]}],
+      "reason": "报告清楚记录了超限结果，与 Actual 及可信的 Failed 状态一致，因此失败记录合格。"
+    }
   }
 ]

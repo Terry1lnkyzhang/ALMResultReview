@@ -1,0 +1,22 @@
+[skill]
+id = "location-consistency"
+name = "Test Location Consistency Review"
+version = "1.0.0"
+stage = "location_review"
+enabled = true
+
+[contract]
+version = "1"
+input_collection = ""
+output_collection = ""
+identity_field = ""
+
+[capabilities]
+required = ["review.location.parent_name", "location.configuration.metadata"]
+optional = []
+forbidden = ["database.read", "filesystem.read", "network.fetch", "location.configuration.write"]
+
+[model]
+temperature = 0
+max_tokens = 1536
+max_tokens_per_item = 0

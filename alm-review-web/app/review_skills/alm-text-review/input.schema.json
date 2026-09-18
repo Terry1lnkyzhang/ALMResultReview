@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["project", "steps"],
+  "required": ["project", "alm_run_status", "steps"],
   "properties": {
     "project": {
       "type": "string",
       "description": "Trusted Workspace project identifier for the execution under review, such as earth_kylin."
+    },
+    "alm_run_status": {
+      "enum": ["Passed", "Failed"],
+      "description": "Trusted final ALM Run status."
     },
     "steps": {
       "type": "array",
@@ -14,9 +18,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["review_step", "description", "expected", "actual", "actual_format", "numbered_comparison", "reference_candidates"],
+        "required": ["review_step", "alm_step_status", "description", "expected", "actual", "actual_format", "numbered_comparison", "reference_candidates"],
         "properties": {
           "review_step": {"type": "integer", "minimum": 1},
+          "alm_step_status": {"type": "string", "minLength": 1},
           "description": {"type": "string"},
           "expected": {"type": "string"},
           "actual": {"type": "string"},

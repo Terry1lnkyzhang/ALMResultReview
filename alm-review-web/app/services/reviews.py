@@ -65,6 +65,11 @@ from app.services.image_evidence import (
     ResolvedImage,
     embedded_image,
 )
+from app.services.location_review import (
+    fallback_location_skill_output,
+    load_location_assessment,
+    validate_location_skill_output,
+)
 from app.services.review_pipeline import build_pipeline_trace
 from app.services.review_policy import current_review_policy_key
 from app.services.skill_runner import SkillFailure, skill_runner
@@ -77,6 +82,7 @@ from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 VALID_VERDICTS = {"qualified", "unqualified", "needs_manual_review"}
 CRITERIA_NAMES = (
+    "location_consistency",
     "language_quality",
     "expected_vs_actual",
     "screenshot_evidence",
@@ -190,6 +196,7 @@ class ReviewContext:
     automation_release_assessments: dict[int, dict[str, Any]] = field(
         default_factory=dict
     )
+    location_assessment: dict[str, Any] = field(default_factory=dict)
     equipment_checks: list[dict[str, Any]] = field(default_factory=list)
     open_questions: list[OpenQuestion] = field(default_factory=list)
     text_result: dict[str, Any] = field(default_factory=dict)
@@ -394,6 +401,9 @@ def _append_step_issue(
 
 def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
     criteria = {
+        "location_consistency": _criterion(
+            "not_applicable", "Test location configuration review is not available."
+        ),
         "language_quality": _criterion(
             "pass", "未发现影响结论的语言问题。"
         ),
@@ -459,6 +469,32 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
                 if issue["summary"] not in criterion["summary"]:
                     criterion["summary"] += "; " + issue["summary"]
 
+    location_review = parsed.get("location_review")
+    location_failure = ""
+    if isinstance(location_review, dict):
+        location_status = str(location_review.get("status") or "uncertain")
+        criterion_status = {
+            "disabled": "not_applicable",
+            "not_applicable": "not_applicable",
+            "pass": "pass",
+            "fail": "fail",
+            "uncertain": "fail",
+            "ready": "fail",
+        }.get(location_status, "fail")
+        location_reason = str(
+            location_review.get("reason") or "Test location review is incomplete."
+        )
+        criteria["location_consistency"] = _criterion(
+            criterion_status,
+            location_reason,
+            (
+                f"Location: {location_review.get('alm_location') or '-'}; "
+                f"parent: {location_review.get('parent_name') or '-'}"
+            ),
+        )
+        if criterion_status == "fail":
+            location_failure = location_reason
+
     equipment_results = [
         item["equipment"]
         for item in parsed["step_results"]
@@ -484,13 +520,21 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         )
 
     step_statuses = {item["status"] for item in parsed["step_results"]}
-    if "fail" in step_statuses:
+    if location_failure or "fail" in step_statuses:
         verdict = "unqualified"
     elif "manual" in step_statuses:
         verdict = "needs_manual_review"
     else:
         verdict = "qualified"
-    if all_issues:
+    if location_failure:
+        displayed = [f"测试位置：{location_failure}"]
+        displayed.extend(
+            f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:5]
+        )
+        if len(all_issues) > 5:
+            displayed.append(f"另有 {len(all_issues) - 5} 个问题")
+        issue_summary = "；".join(displayed)
+    elif all_issues:
         displayed = [
             f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:6]
         ]
@@ -1163,12 +1207,14 @@ def _html_skill_input(
             }
         )
     return {
+        "alm_run_status": str(ctx.content.get("run_status") or "Passed"),
         "review_mode": "final",
         "batch_index": 1,
         "batch_count": 1,
         "steps": [
             {
                 "review_step": request.review_step,
+                "alm_step_status": str(step.get("status") or "Passed"),
                 "description": _clip_step_text(step.get("description"))[0],
                 "expected": _clip_step_text(step.get("expected"))[0],
                 "actual": _clip_step_text(step.get("actual"))[0],
@@ -1250,6 +1296,7 @@ def _html_skill_batch_inputs(
     batch_count = len(report_batches)
     return [
         {
+            "alm_run_status": str(skill_input.get("alm_run_status") or "Passed"),
             "review_mode": "evidence_batch",
             "batch_index": batch_index,
             "batch_count": batch_count,
@@ -1271,6 +1318,7 @@ def _html_final_input(
 ) -> dict[str, Any]:
     step = skill_input["steps"][0]
     return {
+        "alm_run_status": str(skill_input.get("alm_run_status") or "Passed"),
         "review_mode": "final",
         "batch_index": max(1, len(observations)),
         "batch_count": max(1, len(observations)),
@@ -1310,18 +1358,23 @@ def _validate_html_citations(
     }
     for citation in assessment["evidence"]:
         block_text = blocks.get((citation["report_id"], citation["block_id"]))
-        quote_lines = [
-            " ".join(line.split()).casefold()
+        raw_quote_lines = [
+            line.strip()
             for line in citation["quote"].splitlines()
             if line.strip()
         ]
+        quote_lines = [" ".join(line.split()).casefold() for line in raw_quote_lines]
+        raw_block_lines = [
+            line.strip() for line in (block_text or "").splitlines() if line.strip()
+        ]
         block_lines = [
-            " ".join(line.split()).casefold()
-            for line in (block_text or "").splitlines()
-            if line.strip()
+            " ".join(line.split()).casefold() for line in raw_block_lines
         ]
         next_index = 0
-        for quote_line in quote_lines:
+        unmatched_line = ""
+        for raw_quote_line, quote_line in zip(
+            raw_quote_lines, quote_lines, strict=True
+        ):
             matching_index = next(
                 (
                     index
@@ -1332,11 +1385,42 @@ def _validate_html_citations(
             )
             if matching_index is None:
                 next_index = -1
+                unmatched_line = raw_quote_line
                 break
             next_index = matching_index + 1
+        if quote_lines and next_index < 0:
+            source_matches: list[tuple[int, str]] = []
+            used_indexes: set[int] = set()
+            for raw_quote_line, quote_line in zip(
+                raw_quote_lines, quote_lines, strict=True
+            ):
+                matching_index = next(
+                    (
+                        index
+                        for index, block_line in enumerate(block_lines)
+                        if index not in used_indexes and quote_line in block_line
+                    ),
+                    None,
+                )
+                if matching_index is None:
+                    break
+                used_indexes.add(matching_index)
+                source_matches.append((matching_index, raw_quote_line))
+            if len(source_matches) == len(quote_lines):
+                citation["quote"] = "\n".join(
+                    quote_line for _, quote_line in sorted(source_matches)
+                )
+                continue
         if not quote_lines or next_index < 0:
+            detail = (
+                "empty quote"
+                if not quote_lines
+                else f"unmatched line {unmatched_line[:200]!r}"
+            )
             raise SkillFailure(
-                "HTML evidence Skill cited text outside the supplied report block.",
+                "HTML evidence Skill cited text outside the supplied report block: "
+                f"report_id={citation['report_id']!r}, "
+                f"block_id={citation['block_id']!r}, {detail}.",
                 retryable=False,
             )
 
@@ -1357,6 +1441,31 @@ def _compact_html_quote(quote: str, max_chars: int = 400) -> str:
         line_budget = base_chars + (1 if index < remainder else 0)
         excerpts.append(line[:line_budget].rstrip())
     return "\n".join(excerpts)
+
+
+def _reuse_verified_html_citations(
+    observations: list[dict[str, Any]],
+    assessment: dict[str, Any],
+) -> None:
+    verified_citations: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    for observation in observations:
+        for citation in observation.get("evidence", []):
+            key = (citation.get("report_id", ""), citation.get("block_id", ""))
+            quote = citation.get("quote", "")
+            if all(key) and quote:
+                verified_citations.setdefault(
+                    key,
+                    (
+                        _compact_html_quote(quote),
+                        list(citation.get("supports", [])),
+                    ),
+                )
+    for citation in assessment.get("evidence", []):
+        key = (citation.get("report_id", ""), citation.get("block_id", ""))
+        if key in verified_citations:
+            quote, supports = verified_citations[key]
+            citation["quote"] = quote
+            citation["supports"] = list(supports)
 
 
 def _validate_html_assessment(
@@ -1521,6 +1630,7 @@ def _run_html_review_batches(
         _validated_input: dict[str, Any],
         assessment: dict[str, Any],
     ) -> None:
+        _reuse_verified_html_citations(observations, assessment)
         _validate_html_assessment(skill_input, assessment)
 
     final_trace, assessment = _run_html_review_skill(
@@ -1699,9 +1809,13 @@ def _run_image_review_skill(
             ]
         )
     skill_input = {
+        "alm_run_status": str(content.get("run_status") or "Passed"),
         "steps": [
             {
                 "review_step": review_step,
+                "alm_step_status": str(
+                    step_by_number[review_step].get("status") or "Passed"
+                ),
                 "description": _clip_step_text(
                     step_by_number[review_step].get("description")
                 )[0],
@@ -2224,6 +2338,7 @@ def _run_text_semantic_skills(
         payloads.append(
             {
                 "review_step": int(step["review_step"]),
+                "alm_step_status": str(step.get("status") or "Passed"),
                 "description": description,
                 "expected": expected,
                 "actual": actual,
@@ -2238,7 +2353,11 @@ def _run_text_semantic_skills(
     for batch in _text_skill_batches(payloads):
         trace = skill_runner.run(
             "alm-text-review",
-            {"project": project, "steps": batch},
+            {
+                "project": project,
+                "alm_run_status": str(content.get("run_status") or "Passed"),
+                "steps": batch,
+            },
             endpoint=_completion_url(ai_config.base_url),
             model_name=ai_config.model_name,
             headers=_ai_headers(ai_config),
@@ -2452,6 +2571,60 @@ def _routing_stage(ctx: ReviewContext) -> dict[str, Any]:
     }
 
 
+def _location_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    assessment = dict(ctx.location_assessment)
+    trace: dict[str, Any] | None = None
+    if assessment.get("status") == "ready":
+        skill_input = {
+            "alm_location": assessment["alm_location"],
+            "folder_path": assessment["folder_path"],
+            "parent_name": assessment["parent_name"],
+            "location_config": assessment["selected_config"],
+        }
+        trace = skill_runner.run(
+            "location-consistency",
+            skill_input,
+            endpoint=_completion_url(ctx.ai_config.base_url),
+            model_name=ctx.ai_config.model_name,
+            headers=_ai_headers(ctx.ai_config),
+            timeout_seconds=ctx.ai_config.timeout_seconds,
+            granted_capabilities={
+                "review.location.parent_name",
+                "location.configuration.metadata",
+            },
+            request_post=httpx.post,
+            output_validator=validate_location_skill_output,
+            output_fallback=fallback_location_skill_output,
+        )
+        if trace.get("status") != "completed":
+            raise _skill_failure(trace, "Location consistency Skill failed.")
+        semantic_review = trace["output"]
+        assessment.update(
+            status=semantic_review["status"],
+            reason=semantic_review["reason"],
+            semantic_review=semantic_review,
+        )
+        raw_outputs = json.loads(ctx.raw_response) if ctx.raw_response else {}
+        raw_outputs["location-consistency"] = semantic_review
+        ctx.raw_response = json.dumps(
+            raw_outputs,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    ctx.location_assessment = assessment
+    ctx.text_result["location_review"] = assessment
+    ctx.text_result = _recalculate_result(ctx.text_result)
+    return {
+        "status": (
+            "disabled" if assessment.get("status") == "disabled" else "completed"
+        ),
+        "ai_calls": int(trace.get("ai_calls", 0)) if trace else 0,
+        "assessment": assessment,
+        "skill": trace,
+    }
+
+
 def _plan_specialist_passes(ctx: ReviewContext) -> None:
     """Turn the first pass answer into the work list for the specialist stages."""
     if ctx.equipment_enabled:
@@ -2649,6 +2822,7 @@ def execute_review(ctx: ReviewContext) -> PipelineOutcome:
     _prepare_stage(ctx)
     text_trace = _text_review_stage(ctx)
     routing_trace = _routing_stage(ctx)
+    location_trace = _location_review_stage(ctx)
     _plan_specialist_passes(ctx)
     image_trace = _image_review_stage(ctx)
     report_trace = _report_review_stage(ctx)
@@ -2665,6 +2839,7 @@ def execute_review(ctx: ReviewContext) -> PipelineOutcome:
         stages={
             "routing": routing_trace,
             "text_review": text_trace,
+            "location_review": location_trace,
             "image_review": image_trace,
             "report_review": report_trace,
             "equipment_review": equipment_trace,
@@ -2754,6 +2929,11 @@ def process_job(
             )
         equipment_registry = list(db.scalars(equipment_statement).all())
     content = review_payload(snapshot)
+    location_assessment = load_location_assessment(
+        db,
+        str(content.get("execution_location") or ""),
+        str(content.get("folder_path") or ""),
+    )
     evidence_config = workspace_evidence_config(db, workspace.id)
     release_assessments: dict[int, dict[str, Any]] = {}
     release_project = (
@@ -2803,6 +2983,7 @@ def process_job(
         equipment_enabled=workspace.equipment_review_enabled,
         equipment_registry=equipment_registry,
         automation_release_assessments=release_assessments,
+        location_assessment=location_assessment,
     )
     started = time.perf_counter()
     try:

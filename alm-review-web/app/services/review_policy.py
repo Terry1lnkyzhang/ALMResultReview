@@ -15,11 +15,12 @@ from app.models import (
     Workspace,
 )
 from app.services.automation_release import automation_release_policy_snapshot
+from app.services.location_review import location_config_policy_snapshot
 from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.09.02.2"
+REVIEW_ENGINE_VERSION = "2026.09.17.1"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",
@@ -30,6 +31,7 @@ _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "services" / "equipment_review.py",
     _APP_DIRECTORY / "services" / "html_evidence.py",
     _APP_DIRECTORY / "services" / "image_evidence.py",
+    _APP_DIRECTORY / "services" / "location_review.py",
     _APP_DIRECTORY / "services" / "review_pipeline.py",
     _APP_DIRECTORY / "services" / "skill_runner.py",
     _APP_DIRECTORY / "services" / "reviews.py",
@@ -95,7 +97,7 @@ def current_review_policy_key(
         }
         for item in equipment_registry
     ]
-    authoritative_skill_ids = ["alm-text-review"]
+    authoritative_skill_ids = ["alm-text-review", "location-consistency"]
     if (
         evidence_config
         and evidence_config.external_evidence_review_enabled
@@ -140,6 +142,7 @@ def current_review_policy_key(
             db,
             release_project_name,
         ),
+        "test_location_snapshot": location_config_policy_snapshot(db),
         "external_evidence_review_enabled": bool(
             evidence_config and evidence_config.external_evidence_review_enabled
         ),
