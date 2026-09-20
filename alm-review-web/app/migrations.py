@@ -508,6 +508,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                         "VARCHAR(1000) NOT NULL DEFAULT ''"
                     )
                 )
+            if "temporary_evidence_used" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE review_results ADD COLUMN "
+                        "temporary_evidence_used BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
             indexes = {
                 index["name"] for index in inspector.get_indexes("review_results")
             }

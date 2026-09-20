@@ -1419,6 +1419,7 @@ def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None
                     size_bytes=100,
                     sha256="a" * 64,
                     blocks=(HtmlEvidenceBlock("block-1", "Passed"),),
+                    source_kind="local_html_fallback",
                 ),
                 second_report: HtmlEvidenceResult(
                     status="ready",
@@ -1446,8 +1447,13 @@ def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None
     )
 
     assert guarded["verdict"] == "qualified"
+    assert guarded["temporary_evidence_used"] is True
     assert guarded["criteria"]["html_report_sequence"]["status"] == "pass"
     assert guarded["criteria"]["automation_results"]["status"] == "pass"
+    assert (
+        guarded["step_results"][0]["html_evidence"][0]["source_kind"]
+        == "local_html_fallback"
+    )
     assert guarded["step_results"][0]["html_evidence"][1]["block_count"] == 1
 
 

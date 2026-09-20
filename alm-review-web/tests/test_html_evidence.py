@@ -150,6 +150,7 @@ def test_html_resolves_report_quoted_with_a_non_breaking_space(tmp_path: Path) -
     )
 
     assert result.status == "ready"
+    assert result.source_kind == "local_html_fallback"
 
 
 def test_html_stays_missing_when_whitespace_match_is_ambiguous(tmp_path: Path) -> None:

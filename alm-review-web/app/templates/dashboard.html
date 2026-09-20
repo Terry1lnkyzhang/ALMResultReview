@@ -269,6 +269,7 @@
   <a class="metric metric-pending" href="/?workspace={{ current_workspace.id }}&amp;status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
   <a class="metric metric-failed" href="/?workspace={{ current_workspace.id }}&amp;status=review_failed"><span>Review failed</span><strong>{{ status_counts.get('review_failed', 0) }}</strong></a>
   <a class="metric metric-warning" href="/?workspace={{ current_workspace.id }}&amp;status=warning"><span>Has warning</span><strong>{{ status_counts.get('warning', 0) }}</strong></a>
+  <a class="metric metric-temporary" href="/?workspace={{ current_workspace.id }}&amp;status=temporary_evidence"><span>Temporary evidence</span><strong>{{ status_counts.get('temporary_evidence', 0) }}</strong></a>
 </section>
 
 <section class="workspace-grid">
@@ -328,7 +329,7 @@
             <td>{{ item.actual_tester_label }}</td>
             <td>{{ item.test_owner_label }}</td>
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
-            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span></td>
+            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
             <td>{{ item.run.execution_at.strftime('%Y-%m-%d %H:%M') if item.run.execution_at else '-' }}</td>
           </tr>

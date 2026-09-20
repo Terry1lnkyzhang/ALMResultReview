@@ -104,6 +104,7 @@ def test_export_includes_ai_result_and_manual_override() -> None:
     assert rows[0]["test_owner"] == "Test Owner (owner1)"
     assert rows[0]["ai_verdict"] == "unqualified"
     assert rows[0]["final_status"] == "qualified"
+    assert rows[0]["temporary_evidence_used"] == "False"
     assert rows[0]["manual_decision"] == "override_qualified"
     assert rows[0]["manual_operator"] == "reviewer1"
     assert rows[0]["manual_reason"] == "Checked against the source evidence"

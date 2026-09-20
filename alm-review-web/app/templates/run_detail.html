@@ -123,6 +123,12 @@
 </section>
 {% endif %}
 
+{% if review.temporary_evidence_used %}
+<section class="review-advisory review-advisory-detail temporary-evidence-advisory">
+  <div><p class="eyebrow">Temporary evidence</p><h2>当前评审使用了临时证据</h2><p>证据来自临时目录，请归档到批准目录后重新评审。使用临时证据时不允许人工强制合格。</p></div>
+</section>
+{% endif %}
+
 {% if review.result %}
 <section class="review-band">
   <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>

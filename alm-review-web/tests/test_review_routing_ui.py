@@ -77,6 +77,17 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "'override_qualified': '人工确认合格'" in source
     assert "'confirmed_warning_qualified': '确认警告已处理'" in source
     assert 'action="/runs/{{ run.run_id }}/manual-decision/revoke"' in source
+    assert "证据来自临时目录，请归档到批准目录后重新评审。" in source
+    assert "review.temporary_evidence_used" in source
+
+    dashboard = templates.get_template("dashboard.html")
+    dashboard_source, _, _ = templates.env.loader.get_source(
+        templates.env,
+        dashboard.name,
+    )
+    assert "Temporary evidence" in dashboard_source
+    assert "status=temporary_evidence" in dashboard_source
+    assert "item.temporary_evidence_used" in dashboard_source
 
     web_source = Path(web.__file__).read_text(encoding="utf-8")
     assert '"review_step_results": review_step_results' in web_source

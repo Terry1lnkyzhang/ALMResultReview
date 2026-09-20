@@ -351,6 +351,7 @@ def test_workspace_review_progress_counts_current_runs_once() -> None:
                 model_name="test-model",
                 verdict="qualified",
                 warnings_json='[{"step": 1, "type": "minor_language", "summary": "Typo"}]',
+                temporary_evidence_used=True,
             )
         )
         db.commit()
@@ -361,6 +362,7 @@ def test_workspace_review_progress_counts_current_runs_once() -> None:
         assert progress.reviewed == 1
         assert progress.qualified == 1
         assert progress.warning == 1
+        assert progress.temporary_evidence == 1
         assert progress.pending == 1
         assert progress.queued == 1
         assert progress.percent == 50.0

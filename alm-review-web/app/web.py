@@ -228,7 +228,7 @@ templates = Jinja2Templates(directory=PROJECT_DIR / "app" / "templates")
 templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
-    "not_qualified": "除合格外全部 + 警告",
+    "not_qualified": "除合格外全部 + 警告/临时证据",
     "qualified": "合格",
     "force_qualified": "人工确认合格",
     "unqualified": "不合格",
@@ -236,6 +236,7 @@ STATUS_LABELS = {
     "pending_review": "待评审",
     "review_failed": "评审失败",
     "warning": "有警告",
+    "temporary_evidence": "临时证据",
 }
 
 _SEARCH_WHITESPACE_RE = re.compile(r"\s+")
@@ -295,6 +296,7 @@ def _run_view(
         "final_status": review.final_status,
         "force_qualified": is_force_qualified(review),
         "has_warning": review.has_warning,
+        "temporary_evidence_used": review.temporary_evidence_used,
         "status_label": STATUS_LABELS[review.final_status],
         "review_update_reasons": review_update_reasons(
             review.result,
@@ -306,13 +308,19 @@ def _run_view(
 
 
 def _matches_status(item: dict, status: str) -> bool:
-    # Force qualified and warning are lenses over the final statuses, not statuses.
+    # These values are lenses over the final statuses, not statuses themselves.
     if status == "not_qualified":
-        return item["final_status"] != "qualified" or item["has_warning"]
+        return (
+            item["final_status"] != "qualified"
+            or item["has_warning"]
+            or item.get("temporary_evidence_used", False)
+        )
     if status == "force_qualified":
         return item["force_qualified"]
     if status == "warning":
         return item["has_warning"]
+    if status == "temporary_evidence":
+        return item.get("temporary_evidence_used", False)
     return status == "all" or item["final_status"] == status
 
 
@@ -812,6 +820,9 @@ def dashboard(
     status_counts = Counter(item["final_status"] for item in all_views)
     status_counts["force_qualified"] = sum(item["force_qualified"] for item in all_views)
     status_counts["warning"] = sum(item["has_warning"] for item in all_views)
+    status_counts["temporary_evidence"] = sum(
+        item["temporary_evidence_used"] for item in all_views
+    )
     step_matches = (
         _step_text_run_ids(db, current_workspace.id, include_legacy, query)
         if search_steps
@@ -1010,6 +1021,7 @@ def review_progress(workspace: int | None = None, db: Session = Depends(get_db))
         "pending": progress.pending,
         "review_failed": progress.review_failed,
         "warning": progress.warning,
+        "temporary_evidence": progress.temporary_evidence,
         "queued": progress.queued,
         "running": progress.running,
         "percent": progress.percent,
@@ -1316,6 +1328,7 @@ def export_reviews(
             "criteria_json",
             "step_results_json",
             "warnings_json",
+            "temporary_evidence_used",
             "model_name",
             "review_policy_key",
             "review_completed_at",
@@ -1356,6 +1369,7 @@ def export_reviews(
                 result.criteria_json if result else None,
                 result.step_results_json if result else None,
                 result.warnings_json if result else None,
+                review.temporary_evidence_used,
                 result.model_name if result else None,
                 result.review_policy_key if result else None,
                 result.completed_at if result else None,

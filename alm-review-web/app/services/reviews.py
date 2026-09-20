@@ -111,6 +111,9 @@ WARNING_QUALIFIED_DECISION = "confirmed_warning_qualified"
 FORCE_QUALIFIED_DECISIONS = frozenset(
     {"override_qualified", "confirmed_qualified", WARNING_QUALIFIED_DECISION}
 )
+TEMPORARY_EVIDENCE_MESSAGE = (
+    "证据来自临时目录，请归档到批准目录后重新评审。"
+)
 
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 MAX_REVIEW_JOB_ATTEMPTS = 3
@@ -123,6 +126,7 @@ class CurrentReview:
     manual_decision: ManualDecision | None
     final_status: str
     has_warning: bool = False
+    temporary_evidence_used: bool = False
 
 
 def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
@@ -135,6 +139,8 @@ def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
     allowed = set(VALID_MANUAL_DECISIONS.get(review.result.verdict, set()))
     if review.result.verdict == "qualified" and review.has_warning:
         allowed.add(WARNING_QUALIFIED_DECISION)
+    if review.temporary_evidence_used:
+        allowed.difference_update(FORCE_QUALIFIED_DECISIONS)
     return frozenset(allowed)
 
 
@@ -300,7 +306,13 @@ def current_review(
             manual,
             "review_failed" if failed_job else "pending_review",
         )
-    if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
+    temporary_evidence_used = bool(result.temporary_evidence_used)
+    force_qualified = (
+        manual
+        and manual.decision in FORCE_QUALIFIED_DECISIONS
+        and not temporary_evidence_used
+    )
+    if force_qualified:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
         final_status = "unqualified"
@@ -316,8 +328,9 @@ def current_review(
         final_status,
         has_unresolved_review_warning(
             has_review_warning(result.warnings_json),
-            manual,
+            manual if force_qualified or not temporary_evidence_used else None,
         ),
+        temporary_evidence_used,
     )
 
 def revoke_manual_decision(db: Session, run: AlmRun) -> int:
@@ -345,6 +358,8 @@ def save_manual_decision(
     reason: str,
 ) -> ManualDecision:
     review = current_review(db, run)
+    if review.temporary_evidence_used and decision in FORCE_QUALIFIED_DECISIONS:
+        raise ValueError(TEMPORARY_EVIDENCE_MESSAGE)
     allowed = allowed_manual_decisions(review)
     if decision not in allowed:
         basis = (
@@ -608,6 +623,7 @@ def _apply_capability_guards(
     ai_reviewed_html_count = 0
     passed_html_step_count = 0
     html_assessment_statuses: list[str] = []
+    temporary_evidence_used = False
     sequence_count = 0
     continuous_sequence_count = 0
     for content_step, step_result in zip(
@@ -864,9 +880,12 @@ def _apply_capability_guards(
                 continue
             if evidence.status == "ready":
                 readable_html_count += 1
+            if evidence.source_kind == "local_html_fallback":
+                temporary_evidence_used = True
             step_result["html_evidence"].append(
                 {
                     "source_path": path["raw"],
+                    "source_kind": evidence.source_kind,
                     "status": evidence.status,
                     "size_bytes": evidence.size_bytes,
                     "sha256": evidence.sha256,
@@ -1061,6 +1080,7 @@ def _apply_capability_guards(
             f"AI 已评审 {ai_reviewed_html_count} 个报告引用；"
             f"通过的步骤评审 {passed_html_step_count} 个。"
         )
+    result["temporary_evidence_used"] = temporary_evidence_used
     return result
 
 
@@ -3011,6 +3031,7 @@ def process_job(
             step_results_json=json.dumps(parsed["step_results"], ensure_ascii=False),
             warnings_json=json.dumps(parsed["warnings"], ensure_ascii=False),
             pipeline_json=json.dumps(outcome.pipeline, ensure_ascii=False),
+            temporary_evidence_used=bool(parsed.get("temporary_evidence_used")),
             raw_response=outcome.raw_response,
             duration_ms=duration_ms,
         )

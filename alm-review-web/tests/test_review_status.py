@@ -34,7 +34,12 @@ from app.services.reviews import (
 from app.web import STATUS_LABELS, _matches_status
 
 
-def prepare_run(db: Session, verdict: str, warnings_json: str | None = None) -> AlmRun:
+def prepare_run(
+    db: Session,
+    verdict: str,
+    warnings_json: str | None = None,
+    temporary_evidence_used: bool = False,
+) -> AlmRun:
     run = AlmRun(
         run_id=42,
         source_hash="a" * 64,
@@ -67,6 +72,7 @@ def prepare_run(db: Session, verdict: str, warnings_json: str | None = None) -> 
             model_name="test-model",
             verdict=verdict,
             warnings_json=warnings_json,
+            temporary_evidence_used=temporary_evidence_used,
         )
     )
     db.commit()
@@ -102,6 +108,75 @@ def test_manual_rules_allow_review_confirmation_and_unqualified_override() -> No
             save_manual_decision(db, run, decision, "operator", "Evidence checked")
             expected = "unqualified" if decision == "confirmed_unqualified" else "qualified"
             assert current_review(db, run).final_status == expected
+
+
+@pytest.mark.parametrize(
+    ("verdict", "warnings_json", "decision"),
+    [
+        (
+            "qualified",
+            '[{"step": 1, "summary": "Warning"}]',
+            "confirmed_warning_qualified",
+        ),
+        ("needs_manual_review", None, "confirmed_qualified"),
+        ("unqualified", None, "override_qualified"),
+    ],
+)
+def test_temporary_evidence_preserves_ai_status_but_blocks_force_qualified(
+    verdict: str,
+    warnings_json: str | None,
+    decision: str,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(
+            db,
+            verdict,
+            warnings_json,
+            temporary_evidence_used=True,
+        )
+        policy_key = current_review_policy_key(db)
+        review = current_review(db, run, policy_key)
+        batched = current_reviews(db, [run], policy_key)[run.run_id]
+
+        assert review.final_status == verdict
+        assert review.temporary_evidence_used
+        assert batched.final_status == verdict
+        assert batched.temporary_evidence_used
+        assert not is_force_qualified(review)
+        assert _matches_status(
+            {
+                "final_status": batched.final_status,
+                "force_qualified": False,
+                "has_warning": batched.has_warning,
+                "temporary_evidence_used": True,
+            },
+            "temporary_evidence",
+        )
+        with pytest.raises(ValueError, match="证据来自临时目录"):
+            save_manual_decision(db, run, decision, "operator", "Reviewed")
+
+
+def test_existing_force_qualified_decision_is_ignored_for_temporary_evidence() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        save_manual_decision(db, run, "override_qualified", "operator", "Reviewed")
+        result = db.scalar(select(ReviewResult).where(ReviewResult.run_id == run.run_id))
+        assert result is not None
+        result.temporary_evidence_used = True
+        db.commit()
+
+        policy_key = current_review_policy_key(db)
+        review = current_review(db, run, policy_key)
+        batched = current_reviews(db, [run], policy_key)[run.run_id]
+
+        assert review.final_status == "unqualified"
+        assert batched.final_status == "unqualified"
+        assert not is_force_qualified(review)
+        assert not is_force_qualified(batched)
 
 
 def test_failed_review_can_be_force_qualified_and_revoked() -> None:
@@ -320,7 +395,7 @@ def test_not_qualified_filter_includes_every_other_final_status(
     }
 
     assert _matches_status(item, "not_qualified") is expected
-    assert STATUS_LABELS["not_qualified"] == "除合格外全部 + 警告"
+    assert STATUS_LABELS["not_qualified"] == "除合格外全部 + 警告/临时证据"
 
 
 @pytest.mark.parametrize("force_qualified", [False, True])
@@ -331,6 +406,17 @@ def test_not_qualified_filter_also_includes_qualified_runs_with_warnings(
         "final_status": "qualified",
         "force_qualified": force_qualified,
         "has_warning": True,
+    }
+
+    assert _matches_status(item, "not_qualified")
+
+
+def test_not_qualified_filter_includes_qualified_temporary_evidence() -> None:
+    item = {
+        "final_status": "qualified",
+        "force_qualified": False,
+        "has_warning": False,
+        "temporary_evidence_used": True,
     }
 
     assert _matches_status(item, "not_qualified")

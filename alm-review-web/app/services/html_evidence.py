@@ -5,7 +5,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from pathlib import Path, PureWindowsPath
 
@@ -71,6 +71,7 @@ class HtmlEvidenceResult:
     sha256: str = ""
     blocks: tuple[HtmlEvidenceBlock, ...] = ()
     detail: str = ""
+    source_kind: str = "approved_root"
 
 
 def actual_phantom_codes(block: HtmlEvidenceBlock) -> tuple[tuple[str, str], ...]:
@@ -208,11 +209,13 @@ class HtmlEvidenceResolver:
         path_status = validate_network_evidence_path(value, allowed_root)
         if path_status != "allowed":
             return HtmlEvidenceResult(status=path_status)
+        source_kind = "approved_root"
         try:
             source = self._approved_source(value, allowed_root)
         except FileNotFoundError:
             try:
                 source = self._fallback_source(value, allowed_root, fallback_root)
+                source_kind = "local_html_fallback"
             except FileNotFoundError:
                 return HtmlEvidenceResult(status="missing")
         except PermissionError as exc:
@@ -221,7 +224,7 @@ class HtmlEvidenceResolver:
             return HtmlEvidenceResult(status="unavailable", detail=str(exc)[:300])
         if source is None:
             return HtmlEvidenceResult(status="outside_root")
-        return self.collect(source)
+        return replace(self.collect(source), source_kind=source_kind)
 
     def collect(self, source: Path) -> HtmlEvidenceResult:
         try:
