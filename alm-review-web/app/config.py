@@ -10,6 +10,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 class Settings(BaseSettings):
     database_url: str
     app_timezone: str = "Asia/Shanghai"
+    alm_timezone: str = "Asia/Jerusalem"
     initial_import_path: str = ""
     alm_username: str = ""
     alm_password: str = ""

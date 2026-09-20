@@ -11,6 +11,7 @@ from app.models import (
     EquipmentRegistry,
     EvidenceConfig,
     ManualDecision,
+    NonSiteExecutionLocation,
     ReviewJob,
     ReviewResult,
     RunRevision,
@@ -638,6 +639,32 @@ def test_evidence_configuration_change_updates_review_policy() -> None:
         db.commit()
 
         assert current_review_policy_key(db) != first_key
+
+
+def test_non_site_execution_location_changes_update_review_policy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        first_key = current_review_policy_key(db)
+        location = NonSiteExecutionLocation(
+            name="Offline",
+            normalized_key="offline",
+            enabled=True,
+        )
+        db.add(location)
+        db.commit()
+        added_key = current_review_policy_key(db)
+        assert added_key != first_key
+
+        location.name = "Remote"
+        location.normalized_key = "remote"
+        db.commit()
+        renamed_key = current_review_policy_key(db)
+        assert renamed_key != added_key
+
+        location.enabled = False
+        db.commit()
+        assert current_review_policy_key(db) != renamed_key
 
 
 def test_review_policy_tracks_enabled_endpoint_identity_but_not_capacity() -> None:

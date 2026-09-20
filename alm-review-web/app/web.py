@@ -48,6 +48,13 @@ from app.services.equipment_registry import (
     optional_equipment_identity_error,
 )
 from app.services.importer import import_data, import_file, queue_latest_alm_changes
+from app.services.non_site_locations import (
+    NonSiteLocationNotFoundError,
+    NonSiteLocationValidationError,
+    create_non_site_location,
+    list_non_site_locations,
+    update_non_site_location,
+)
 from app.services.review_operations import (
     REREVIEW_SCOPES,
     active_run_review_job,
@@ -83,8 +90,8 @@ from app.services.test_locations import (
     TestLocationNotFoundError,
     TestLocationValidationError,
     add_earlier_test_location_version,
-    current_business_time,
     create_test_location,
+    current_business_time,
     delete_test_location,
     get_test_location,
     get_test_location_history,
@@ -92,6 +99,7 @@ from app.services.test_locations import (
     resolve_test_location_at,
     update_test_location,
 )
+from app.services.timezones import alm_execution_in_app_timezone
 from app.services.worker_tasks import queue_run_sync_jobs, queue_sync_job
 from app.services.workspace_insights import workspace_equipment_insights
 from app.services.workspaces import (
@@ -289,6 +297,7 @@ def _run_view(
         review = current_review(db, run, policy_key)
     return {
         "run": run,
+        "execution_at": alm_execution_in_app_timezone(run.execution_at),
         "actual_tester_label": _person_label(run.actual_tester, users),
         "test_owner_label": _person_label(run.test_owner, users),
         "review": review,
@@ -1358,7 +1367,7 @@ def export_reviews(
                 run.test_owner,
                 item["test_owner_label"],
                 run.run_status,
-                run.execution_at,
+                alm_execution_in_app_timezone(run.execution_at),
                 run.source_hash,
                 result.verdict if result else None,
                 review.final_status,
@@ -1401,11 +1410,15 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    execution_at = alm_execution_in_app_timezone(run.execution_at)
+    business_execution_at = (
+        execution_at.replace(tzinfo=None) if execution_at is not None else None
+    )
     try:
         test_location_resolution = resolve_test_location_at(
             db,
             run.execution_location,
-            run.execution_at,
+            business_execution_at,
         )
     except SQLAlchemyError:
         db.rollback()
@@ -1551,6 +1564,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         name="run_detail.html",
         context={
             "run": run,
+            "execution_at": execution_at,
             "test_location_resolution": test_location_resolution,
             "test_owner_label": _person_label(run.test_owner, users),
             "assigned_tester_label": _person_label(run.assigned_tester, users),
@@ -2200,22 +2214,90 @@ def test_location_registry(
     db: Session = Depends(get_db),
 ):
     database_error = ""
+    non_site_database_error = ""
     try:
         locations = list_test_locations(db, query)
     except SQLAlchemyError:
         db.rollback()
         locations = []
         database_error = "AT Framework test location data is currently unavailable."
+    try:
+        non_site_locations = list_non_site_locations(db)
+    except SQLAlchemyError:
+        db.rollback()
+        non_site_locations = ()
+        non_site_database_error = (
+            "Non-site execution modes are currently unavailable."
+        )
     return templates.TemplateResponse(
         request=request,
         name="test_location_registry.html",
         context={
             "locations": locations,
+            "non_site_locations": non_site_locations,
             "query": query,
             "database_error": database_error,
+            "non_site_database_error": non_site_database_error,
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
+    )
+
+
+@router.post("/ops/test-locations/non-site")
+def create_non_site_location_record(
+    name: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        location = create_non_site_location(db, name)
+    except NonSiteLocationValidationError as exc:
+        return _redirect("/ops/test-locations", str(exc), "error")
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations",
+            "Non-site execution mode could not be saved.",
+            "error",
+        )
+    return _redirect(
+        "/ops/test-locations",
+        f"Non-site execution mode {location.name} added.",
+    )
+
+
+@router.post("/ops/test-locations/non-site/{location_id}")
+def update_non_site_location_record(
+    location_id: int,
+    name: str = Form(...),
+    enabled: bool = Form(False),
+    db: Session = Depends(get_db),
+):
+    try:
+        location = update_non_site_location(
+            db,
+            location_id,
+            name=name,
+            enabled=enabled,
+        )
+    except NonSiteLocationValidationError as exc:
+        return _redirect("/ops/test-locations", str(exc), "error")
+    except NonSiteLocationNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Non-site execution mode not found",
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations",
+            "Non-site execution mode could not be saved.",
+            "error",
+        )
+    state = "enabled" if location.enabled else "disabled"
+    return _redirect(
+        "/ops/test-locations",
+        f"Non-site execution mode {location.name} {state}.",
     )
 
 

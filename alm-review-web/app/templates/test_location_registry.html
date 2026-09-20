@@ -12,6 +12,32 @@
 </section>
 
 {% if database_error %}<div class="notice notice-error">{{ database_error }}</div>{% endif %}
+{% if non_site_database_error %}<div class="notice notice-error">{{ non_site_database_error }}</div>{% endif %}
+
+<section class="non-site-location-section">
+  <header>
+    <div>
+      <p class="eyebrow">EXECUTION MODES</p>
+      <h2>Non-site execution modes</h2>
+      <p>Enabled names bypass physical test location lookup while retaining folder applicability checks.</p>
+    </div>
+    <form class="non-site-location-add" method="post" action="/ops/test-locations/non-site">
+      <label><span>Mode name</span><input name="name" placeholder="e.g. Remote" required></label>
+      <button class="button primary" type="submit">Add mode</button>
+    </form>
+  </header>
+  <div class="non-site-location-list">
+    {% for location in non_site_locations %}
+      <form class="non-site-location-row" method="post" action="/ops/test-locations/non-site/{{ location.id }}">
+        <label><span>Mode name</span><input name="name" value="{{ location.name }}" required></label>
+        <label class="non-site-location-toggle"><input type="checkbox" name="enabled" value="true" {% if location.enabled %}checked{% endif %}><span>Enabled</span></label>
+        <button class="button secondary" type="submit">Save</button>
+      </form>
+    {% else %}
+      <p class="non-site-location-empty">No non-site execution modes have been configured.</p>
+    {% endfor %}
+  </div>
+</section>
 
 <section class="equipment-list-section">
   <form class="equipment-filterbar test-location-filterbar" method="get">

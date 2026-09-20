@@ -257,6 +257,21 @@ class TestLocationVersion(Base):
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class NonSiteExecutionLocation(Base):
+    __tablename__ = "non_site_execution_locations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(250), nullable=False)
+    normalized_key: Mapped[str] = mapped_column(
+        String(250), unique=True, nullable=False, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
 class ReviewJob(Base):
     __tablename__ = "review_jobs"
     __table_args__ = (Index("ix_review_jobs_status_created", "status", "created_at"),)

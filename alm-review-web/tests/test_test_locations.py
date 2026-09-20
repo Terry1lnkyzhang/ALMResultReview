@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from fastapi.staticfiles import StaticFiles
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -10,13 +10,16 @@ from sqlalchemy.pool import StaticPool
 from app.config import PROJECT_DIR
 from app.database import get_db
 from app.models import (
+    NonSiteExecutionLocation,
+)
+from app.models import (
     TestLocationIdentity as LocationIdentity,
+)
+from app.models import (
     TestLocationVersion as LocationVersion,
 )
 from app.services.test_locations import (
     TEST_LOCATION_TABLE,
-    TestLocationNotFoundError as LocationNotFoundError,
-    TestLocationValidationError as LocationValidationError,
     add_earlier_test_location_version,
     create_test_location,
     delete_test_location,
@@ -26,6 +29,12 @@ from app.services.test_locations import (
     resolve_test_location_at,
     synchronize_test_location_baselines,
     update_test_location,
+)
+from app.services.test_locations import (
+    TestLocationNotFoundError as LocationNotFoundError,
+)
+from app.services.test_locations import (
+    TestLocationValidationError as LocationValidationError,
 )
 from app.web import router
 
@@ -51,6 +60,7 @@ def _test_client() -> tuple[TestClient, object]:
     connection.exec_driver_sql("ATTACH DATABASE ':memory:' AS atframeworkdb")
     LocationIdentity.__table__.create(connection)
     LocationVersion.__table__.create(connection)
+    NonSiteExecutionLocation.__table__.create(connection)
     TEST_LOCATION_TABLE.create(connection)
 
     def override_get_db():
@@ -246,6 +256,52 @@ def test_test_location_routes_cover_crud_and_search() -> None:
         )
         assert retire_response.status_code == 303
         assert client.get("/ops/test-locations").text.count("ROOM/B 02") == 0
+    finally:
+        client.close()
+        connection.close()
+
+
+def test_non_site_execution_location_routes_cover_create_update_and_duplicates() -> None:
+    client, connection = _test_client()
+    try:
+        create_response = client.post(
+            "/ops/test-locations/non-site",
+            data={"name": "Offline"},
+        )
+        assert create_response.status_code == 303
+
+        duplicate_response = client.post(
+            "/ops/test-locations/non-site",
+            data={"name": " offline "},
+        )
+        assert duplicate_response.status_code == 303
+        assert "message_kind=error" in duplicate_response.headers["location"]
+
+        page = client.get("/ops/test-locations")
+        assert page.status_code == 200
+        assert "Non-site execution modes" in page.text
+        assert 'value="Offline"' in page.text
+        assert 'name="enabled" value="true" checked' in page.text
+
+        update_response = client.post(
+            "/ops/test-locations/non-site/1",
+            data={"name": "Remote workstation"},
+        )
+        assert update_response.status_code == 303
+        row = connection.execute(
+            select(
+                NonSiteExecutionLocation.name,
+                NonSiteExecutionLocation.normalized_key,
+                NonSiteExecutionLocation.enabled,
+            )
+        ).one()
+        assert row.name == "Remote workstation"
+        assert row.normalized_key == "remote workstation"
+        assert row.enabled is False
+
+        updated_page = client.get("/ops/test-locations")
+        assert 'value="Remote workstation"' in updated_page.text
+        assert 'name="enabled" value="true" checked' not in updated_page.text
     finally:
         client.close()
         connection.close()

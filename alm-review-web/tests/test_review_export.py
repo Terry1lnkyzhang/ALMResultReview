@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import datetime
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -32,6 +33,7 @@ def test_export_includes_ai_result_and_manual_override() -> None:
             run_status="Passed",
             test_owner="owner1",
             actual_tester="tester1",
+            execution_at=datetime(2026, 9, 20, 3, 40, 11),
             source_hash="a" * 64,
             review_hash="b" * 64,
             raw_json="{}",
@@ -99,6 +101,7 @@ def test_export_includes_ai_result_and_manual_override() -> None:
     rows = list(csv.DictReader(io.StringIO(response.body.decode("utf-8-sig"))))
     assert len(rows) == 1
     assert rows[0]["actual_tester"] == "Test User (tester1)"
+    assert rows[0]["execution_at"] == "2026-09-20 08:40:11+08:00"
     assert rows[0]["execution_location"] == "Bay 5"
     assert rows[0]["test_owner_id"] == "owner1"
     assert rows[0]["test_owner"] == "Test Owner (owner1)"

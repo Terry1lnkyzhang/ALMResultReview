@@ -67,7 +67,12 @@ class StubImageResolver:
     def __init__(self, **_kwargs: Any) -> None:
         return None
 
-    def resolve(self, _value: str, _allowed_root: str) -> ImageEvidenceResult:
+    def resolve(
+        self,
+        _value: str,
+        _allowed_root: str,
+        _fallback_root: str = "",
+    ) -> ImageEvidenceResult:
         return ImageEvidenceResult(
             status="ready",
             images=(
@@ -425,6 +430,52 @@ def test_missing_location_configuration_fails_without_location_ai(monkeypatch) -
     assert pipeline["stages"]["location_review"]["assessment"]["status"] == "fail"
     assert verdict == "unqualified"
     assert criteria["location_consistency"]["status"] == "fail"
+
+
+def test_non_site_location_is_not_applicable_without_location_ai(monkeypatch) -> None:
+    assessment = {
+        **ready_location_assessment("0. Common Config"),
+        "status": "not_applicable",
+        "failure_code": "",
+        "reason": "Physical test-location configuration review does not apply.",
+        "candidate_count": 0,
+        "candidate_items": [],
+        "selected_config": None,
+    }
+
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_assessment=assessment,
+    )
+
+    assert called_skills == ["alm-text-review"]
+    assert pipeline["stages"]["location_review"]["ai_calls"] == 0
+    assert verdict == "qualified"
+    assert criteria["location_consistency"]["status"] == "not_applicable"
+
+
+def test_non_site_configuration_claim_requires_manual_review(monkeypatch) -> None:
+    assessment = {
+        **ready_location_assessment("1.1 Product-CT Tenara"),
+        "status": "manual",
+        "failure_code": "non_site_location_configuration_claim",
+        "reason": "The non-site folder declares a product configuration.",
+        "candidate_count": 0,
+        "candidate_items": [],
+        "selected_config": None,
+    }
+
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_assessment=assessment,
+    )
+
+    assert called_skills == ["alm-text-review"]
+    assert pipeline["stages"]["location_review"]["ai_calls"] == 0
+    assert verdict == "needs_manual_review"
+    assert criteria["location_consistency"]["status"] == "manual"
 
 
 def test_generic_parent_name_is_not_a_configuration_claim(monkeypatch) -> None:

@@ -486,12 +486,14 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
 
     location_review = parsed.get("location_review")
     location_failure = ""
+    location_manual = ""
     if isinstance(location_review, dict):
         location_status = str(location_review.get("status") or "uncertain")
         criterion_status = {
             "disabled": "not_applicable",
             "not_applicable": "not_applicable",
             "pass": "pass",
+            "manual": "manual",
             "fail": "fail",
             "uncertain": "fail",
             "ready": "fail",
@@ -509,6 +511,8 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
         )
         if criterion_status == "fail":
             location_failure = location_reason
+        elif criterion_status == "manual":
+            location_manual = location_reason
 
     equipment_results = [
         item["equipment"]
@@ -537,12 +541,12 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
     step_statuses = {item["status"] for item in parsed["step_results"]}
     if location_failure or "fail" in step_statuses:
         verdict = "unqualified"
-    elif "manual" in step_statuses:
+    elif location_manual or "manual" in step_statuses:
         verdict = "needs_manual_review"
     else:
         verdict = "qualified"
-    if location_failure:
-        displayed = [f"测试位置：{location_failure}"]
+    if location_failure or location_manual:
+        displayed = [f"测试位置：{location_failure or location_manual}"]
         displayed.extend(
             f"步骤 {issue['step']}：{issue['summary']}" for issue in all_issues[:5]
         )
@@ -841,6 +845,7 @@ def _apply_capability_guards(
                 step_result["image_evidence"].append(
                     {
                         "source_path": path["raw"],
+                        "source_kind": evidence.source_kind,
                         "status": evidence.status,
                         "images": [
                             {
@@ -1723,6 +1728,7 @@ def _prepare_image_evidence(
                 status="ready" if image else "no_usable_images",
                 images=(image,) if image else (),
                 skipped_invalid=0 if image else 1,
+                source_kind="alm_attachment",
             )
             if image:
                 remaining_step_images -= 1
@@ -1749,7 +1755,9 @@ def _prepare_image_evidence(
                 ),
             )
             result = resolver.resolve(
-                path["raw"], evidence_config.allowed_network_root
+                path["raw"],
+                evidence_config.allowed_network_root,
+                evidence_config.local_html_fallback_root,
             )
             if (
                 result.status == "ready"
@@ -1763,6 +1771,7 @@ def _prepare_image_evidence(
                     status="transport_too_large",
                     images=result.images,
                     detail="Image evidence exceeds the AI endpoint transport budget.",
+                    source_kind=result.source_kind,
                 )
             step_results[path["raw"]] = result
             image_count = len(result.images)

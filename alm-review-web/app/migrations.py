@@ -1,11 +1,17 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, MetaData, Table, inspect, text
+from sqlalchemy import Engine, MetaData, Table, inspect, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 
-from app.models import TestLocationIdentity, TestLocationVersion, WorkerLease
+from app.models import (
+    NonSiteExecutionLocation,
+    TestLocationIdentity,
+    TestLocationVersion,
+    WorkerLease,
+)
+from app.services.non_site_locations import DEFAULT_NON_SITE_EXECUTION_LOCATIONS
 
 _MYSQL_SCHEMA_LOCK_WAIT_SECONDS = 5
 
@@ -79,6 +85,19 @@ def ensure_compatible_schema(engine: Engine) -> None:
         WorkerLease.__table__.create(connection, checkfirst=True)
         TestLocationIdentity.__table__.create(connection, checkfirst=True)
         TestLocationVersion.__table__.create(connection, checkfirst=True)
+        NonSiteExecutionLocation.__table__.create(connection, checkfirst=True)
+        if connection.scalar(select(NonSiteExecutionLocation.id).limit(1)) is None:
+            connection.execute(
+                NonSiteExecutionLocation.__table__.insert(),
+                [
+                    {
+                        "name": name,
+                        "normalized_key": name.casefold(),
+                        "enabled": True,
+                    }
+                    for name in DEFAULT_NON_SITE_EXECUTION_LOCATIONS
+                ],
+            )
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         boolean_type = "BOOLEAN" if engine.dialect.name != "mysql" else "TINYINT(1)"

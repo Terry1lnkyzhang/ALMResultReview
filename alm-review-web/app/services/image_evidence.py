@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
 
 from app.services.evidence import validate_network_evidence_path
@@ -42,6 +42,7 @@ class ImageEvidenceResult:
     skipped_oversized: int = 0
     skipped_invalid: int = 0
     detail: str = ""
+    source_kind: str = "approved_root"
 
 
 def embedded_image(
@@ -98,12 +99,38 @@ class NetworkImageResolver:
         self.matching_step_numbers = frozenset(matching_step_numbers or ())
         self.require_step_marker = require_step_marker
 
-    def resolve(self, value: str, allowed_root: str) -> ImageEvidenceResult:
+    def resolve(
+        self,
+        value: str,
+        allowed_root: str,
+        fallback_root: str = "",
+    ) -> ImageEvidenceResult:
         path_status = validate_network_evidence_path(value, allowed_root)
         if path_status != "allowed":
             return ImageEvidenceResult(status=path_status)
         try:
             source = self._approved_source(value, allowed_root)
+        except FileNotFoundError:
+            return self._resolve_fallback(value, allowed_root, fallback_root)
+        except PermissionError as exc:
+            return ImageEvidenceResult(status="denied", detail=str(exc)[:300])
+        except OSError as exc:
+            return ImageEvidenceResult(status="unavailable", detail=str(exc)[:300])
+        if source is None:
+            return ImageEvidenceResult(status="outside_root")
+        result = self.collect(source)
+        if result.status == "missing":
+            return self._resolve_fallback(value, allowed_root, fallback_root)
+        return result
+
+    def _resolve_fallback(
+        self,
+        value: str,
+        allowed_root: str,
+        fallback_root: str,
+    ) -> ImageEvidenceResult:
+        try:
+            source = self._fallback_source(value, allowed_root, fallback_root)
         except FileNotFoundError:
             return ImageEvidenceResult(status="missing")
         except PermissionError as exc:
@@ -112,7 +139,7 @@ class NetworkImageResolver:
             return ImageEvidenceResult(status="unavailable", detail=str(exc)[:300])
         if source is None:
             return ImageEvidenceResult(status="outside_root")
-        return self.collect(source)
+        return replace(self.collect(source), source_kind="evidence_fallback")
 
     def collect(self, source: Path) -> ImageEvidenceResult:
         try:
@@ -214,7 +241,27 @@ class NetworkImageResolver:
     def _approved_source(self, value: str, allowed_root: str) -> Path | None:
         root = PureWindowsPath(allowed_root.strip().rstrip("\\/"))
         relative_parts = PureWindowsPath(value).relative_to(root).parts
-        current = Path(str(root))
+        return self._relative_source(Path(str(root)), relative_parts)
+
+    def _fallback_source(
+        self,
+        value: str,
+        allowed_root: str,
+        fallback_root: str,
+    ) -> Path | None:
+        configured_fallback = fallback_root.strip().rstrip("\/")
+        if not configured_fallback:
+            raise FileNotFoundError(value)
+        approved_root = PureWindowsPath(allowed_root.strip().rstrip("\/"))
+        relative_parts = PureWindowsPath(value).relative_to(approved_root).parts
+        return self._relative_source(Path(configured_fallback), relative_parts)
+
+    def _relative_source(
+        self,
+        root: Path,
+        relative_parts: tuple[str, ...],
+    ) -> Path | None:
+        current = root
         last_index = len(relative_parts) - 1
         for index, part in enumerate(relative_parts):
             with os.scandir(current) as entries:

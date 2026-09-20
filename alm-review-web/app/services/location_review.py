@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.non_site_locations import enabled_non_site_location_keys
+
 _LOCATION_ALIAS_RE = re.compile(r"\((?P<identifier>[^()]*)\)\s*$")
 _LOCATION_CONFIG_QUERY = text(
     "SELECT Item AS item, Product AS product, "
@@ -80,6 +82,7 @@ def assess_location_config(
     execution_location: str,
     folder_path: str,
     configs: tuple[LocationConfig, ...],
+    non_site_location_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     location = execution_location.strip()
     review_parent_name = parent_name(folder_path)
@@ -97,6 +100,35 @@ def assess_location_config(
             "status": "fail",
             "failure_code": "alm_location_missing",
             "reason": "ALM Run Location is empty.",
+        }
+    if location.casefold() in non_site_location_keys:
+        if not review_parent_name:
+            return {
+                **base,
+                "status": "fail",
+                "failure_code": "parent_name_missing",
+                "reason": "The ALM test-set folder name is empty.",
+            }
+        asserted_fields = sorted(required_parent_fields(review_parent_name))
+        if asserted_fields:
+            return {
+                **base,
+                "status": "manual",
+                "failure_code": "non_site_location_configuration_claim",
+                "reason": (
+                    f"ALM Location {location} is a non-site execution mode, but "
+                    "the test-set folder declares configuration fields "
+                    f"{', '.join(asserted_fields)}; manual review is required."
+                ),
+            }
+        return {
+            **base,
+            "status": "not_applicable",
+            "failure_code": "",
+            "reason": (
+                f"ALM Location {location} is a recognized non-site execution mode; "
+                "physical test-location configuration review does not apply."
+            ),
         }
 
     candidates = [
@@ -158,6 +190,14 @@ def load_location_assessment(
     execution_location: str,
     folder_path: str,
 ) -> dict[str, Any]:
+    non_site_location_keys = enabled_non_site_location_keys(db)
+    if execution_location.strip().casefold() in non_site_location_keys:
+        return assess_location_config(
+            execution_location,
+            folder_path,
+            (),
+            non_site_location_keys,
+        )
     if db.bind is not None and db.bind.dialect.name != "mysql":
         return {
             "status": "disabled",
@@ -174,6 +214,7 @@ def load_location_assessment(
         execution_location,
         folder_path,
         load_location_configs(db),
+        non_site_location_keys,
     )
 
 

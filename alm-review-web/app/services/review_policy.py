@@ -16,6 +16,7 @@ from app.models import (
 )
 from app.services.automation_release import automation_release_policy_snapshot
 from app.services.location_review import location_config_policy_snapshot
+from app.services.non_site_locations import non_site_location_policy_snapshot
 from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
@@ -32,6 +33,7 @@ _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "services" / "html_evidence.py",
     _APP_DIRECTORY / "services" / "image_evidence.py",
     _APP_DIRECTORY / "services" / "location_review.py",
+    _APP_DIRECTORY / "services" / "non_site_locations.py",
     _APP_DIRECTORY / "services" / "review_pipeline.py",
     _APP_DIRECTORY / "services" / "skill_runner.py",
     _APP_DIRECTORY / "services" / "reviews.py",
@@ -143,6 +145,7 @@ def current_review_policy_key(
             release_project_name,
         ),
         "test_location_snapshot": location_config_policy_snapshot(db),
+        "non_site_location_snapshot": non_site_location_policy_snapshot(db),
         "external_evidence_review_enabled": bool(
             evidence_config and evidence_config.external_evidence_review_enabled
         ),

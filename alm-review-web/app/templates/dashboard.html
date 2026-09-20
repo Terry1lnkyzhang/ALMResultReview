@@ -331,7 +331,7 @@
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
             <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
-            <td>{{ item.run.execution_at.strftime('%Y-%m-%d %H:%M') if item.run.execution_at else '-' }}</td>
+            <td>{{ item.execution_at.strftime('%Y-%m-%d %H:%M') if item.execution_at else '-' }}</td>
           </tr>
         {% else %}<tr><td class="empty" colspan="9">No runs match these filters.</td></tr>{% endfor %}
         </tbody>

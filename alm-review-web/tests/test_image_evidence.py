@@ -369,6 +369,177 @@ def test_resolve_does_not_require_pathlib_resolve_for_approved_path(
 
     assert result.status == "ready"
     assert [image.relative_name for image in result.images] == ["evidence.png"]
+    assert result.source_kind == "approved_root"
+
+
+def test_primary_image_path_wins_when_fallback_is_also_available(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    approved = tmp_path / "approved"
+    fallback = tmp_path / "fallback"
+    relative = Path("case") / "Step3.png"
+    write_image(approved / relative, PNG_BYTES)
+    write_image(fallback / relative, JPEG_BYTES)
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+
+    result = NetworkImageResolver().resolve(
+        str(approved / relative),
+        str(approved),
+        str(fallback),
+    )
+
+    assert result.status == "ready"
+    assert result.source_kind == "approved_root"
+    assert result.images[0].media_type == "image/png"
+
+
+def test_missing_primary_image_path_uses_fallback_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    approved = tmp_path / "approved"
+    fallback = tmp_path / "fallback"
+    relative = Path("SYBay09") / "34961" / "Step3.png"
+    approved.mkdir()
+    write_image(fallback / relative)
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+
+    result = NetworkImageResolver().resolve(
+        str(approved / relative),
+        str(approved),
+        str(fallback),
+    )
+
+    assert result.status == "ready"
+    assert result.source_kind == "evidence_fallback"
+    assert [image.relative_name for image in result.images] == ["Step3.png"]
+
+
+def test_image_preparation_uses_the_configured_evidence_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    approved = tmp_path / "approved"
+    fallback = tmp_path / "fallback"
+    source = approved / "SYBay09" / "34961" / "Step3.png"
+    approved.mkdir()
+    write_image(fallback / "SYBay09" / "34961" / "Step3.png")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    content = {
+        "steps": [
+            {
+                "review_step": 3,
+                "order": "3",
+                "evidence_profile": {
+                    "screenshot_review_required": True,
+                    "actual_paths": [{"raw": str(source)}],
+                },
+            }
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=str(approved),
+            local_html_fallback_root=str(fallback),
+            external_evidence_review_enabled=True,
+        ),
+    )
+
+    result = prepared.results[3][str(source)]
+    assert result.status == "ready"
+    assert result.source_kind == "evidence_fallback"
+
+
+def test_missing_primary_and_fallback_image_paths_stay_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    approved = tmp_path / "approved"
+    fallback = tmp_path / "fallback"
+    approved.mkdir()
+    fallback.mkdir()
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+
+    result = NetworkImageResolver().resolve(
+        str(approved / "case" / "Step3.png"),
+        str(approved),
+        str(fallback),
+    )
+
+    assert result.status == "missing"
+
+
+def test_primary_permission_error_does_not_use_image_fallback(monkeypatch) -> None:
+    resolver = NetworkImageResolver()
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    monkeypatch.setattr(
+        resolver,
+        "_approved_source",
+        lambda value, allowed_root: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+    monkeypatch.setattr(
+        resolver,
+        "_fallback_source",
+        lambda value, allowed_root, fallback_root: (_ for _ in ()).throw(
+            AssertionError("fallback must not be accessed")
+        ),
+    )
+
+    result = resolver.resolve(
+        r"\\server\approved\case\Step3.png",
+        r"\\server\approved",
+        r"\\server\fallback",
+    )
+
+    assert result.status == "denied"
+
+
+def test_image_fallback_rejects_paths_outside_the_approved_root(monkeypatch) -> None:
+    resolver = NetworkImageResolver()
+    monkeypatch.setattr(
+        resolver,
+        "_fallback_source",
+        lambda value, allowed_root, fallback_root: (_ for _ in ()).throw(
+            AssertionError("fallback must not be accessed")
+        ),
+    )
+
+    outside = resolver.resolve(
+        r"\\server\other\case\Step3.png",
+        r"\\server\approved",
+        r"\\server\fallback",
+    )
+    traversal = resolver.resolve(
+        r"\\server\approved\..\other\Step3.png",
+        r"\\server\approved",
+        r"\\server\fallback",
+    )
+
+    assert outside.status == "outside_root"
+    assert traversal.status == "outside_root"
 
 
 def test_extensionless_leaf_resolves_to_the_matching_image_file(

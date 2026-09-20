@@ -484,6 +484,74 @@ def test_separately_labelled_equipment_id_and_serial_are_two_devices() -> None:
     }
 
 
+def test_continued_serial_field_inherits_the_previous_device_label() -> None:
+    registry = [
+        equipment(
+            None,
+            "RPM36208-0004",
+            description="System Phantom",
+            model_number="459801550744",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=1,
+        ),
+        equipment(
+            "PCCSY-RD-CT-1-0176",
+            "91314A",
+            description="Steel tape measure",
+            model_number="5m",
+            calibration_date=date(2026, 7, 6),
+            calibration_due_date=date(2027, 7, 5),
+            equipment_pk=2,
+        ),
+    ]
+    content = review_content(
+        "Used the phantom information:____The system phantom:"
+        "12NC:459801550744, SN:RPM36208-0004___\n"
+        "used the measuring tool information as below:\n"
+        "-Steel tape measure equipment code: _PCCSY-RD-CT-1-0176_\n"
+        "-Certification Date: _2026-07-06_\n"
+        "-Certification Due Date: _2027-07-05_",
+        description="Record the phantom and measuring tool information.",
+        expected=(
+            "Used the phantom information:_______\n"
+            "used the measuring tool information:________"
+        ),
+        execution_date="2026-09-20",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"
+    assert {item["registry_reference"] for item in checks[0]["matches"]} == {
+        "SN:RPM36208-0004",
+        "PCCSY-RD-CT-1-0176",
+    }
+
+
+def test_unlabelled_mixed_equipment_identifiers_require_manual_review() -> None:
+    registry = [
+        equipment("PCCSY-RD-CT-1-0175", "00850540007089", equipment_pk=1),
+        equipment(
+            "PCCSY-RD-CT-1-0076",
+            "STOPWATCH-7788",
+            description="Stop watch",
+            equipment_pk=2,
+        ),
+    ]
+    content = review_content(
+        "Equipment ID: PCCSY-RD-CT-1-0175; Serial Number: STOPWATCH-7788"
+    )
+
+    checks, _ = analyze_equipment_steps(content, registry)
+
+    assert checks[0]["status"] == "manual"
+    assert checks[0]["code"] == "equipment_identifier_context_uncertain"
+
+
 def test_part_number_does_not_create_conflict_between_labelled_devices() -> None:
     registry = [
         equipment(
@@ -641,6 +709,50 @@ def test_serial_field_stops_at_comma_before_trailing_attributes() -> None:
 
     assert checks[0]["reported_identifiers"] == ["F53331-0046"]
     assert checks[0]["reported_part_numbers"] == ["459801550744"]
+
+
+def test_serial_field_stops_at_closing_parenthesis_before_trailing_text() -> None:
+    registry = [
+        equipment(
+            "PHSZ-RD-VV-0-0043",
+            "MAR-0043",
+            description="MAR phantom",
+        )
+    ]
+    content = review_content(
+        "MAR phantom (SN: PHSZ-RD-VV-0-0043) has been placed the Couch",
+        description="Place the MAR phantom on the couch.",
+        expected="The MAR phantom is on the couch.",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["reported_identifiers"] == ["PHSZ-RD-VV-0-0043"]
+    assert checks[0]["unrecognized_reported_identifiers"] == []
+    assert checks[0]["status"] == "pass"
+
+
+def test_part_field_stops_at_closing_parenthesis_before_trailing_text() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-0-0001",
+            "SYSTEM-0001",
+            description="System phantom",
+            model_number="459801550744",
+        )
+    ]
+    content = review_content(
+        "System phantom (P/N: 459801550744) has been placed on the couch",
+        description="Place the System phantom on the couch.",
+        expected="The System phantom is on the couch.",
+    )
+
+    checks, ambiguous = analyze_equipment_steps(content, registry)
+
+    assert ambiguous == []
+    assert checks[0]["reported_part_numbers"] == ["459801550744"]
+    assert checks[0]["status"] == "pass"
 
 
 def test_unique_part_number_matches_registry_model_number() -> None:

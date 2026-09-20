@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ReviewResult
 from app.services.review_status import current_reviews
+from app.services.timezones import alm_execution_in_app_timezone
 
 
 def _values(value: Any) -> list[str]:
@@ -24,7 +25,8 @@ def _usage_date(equipment: dict[str, Any], run: AlmRun) -> date | None:
             return date.fromisoformat(raw)
         except ValueError:
             pass
-    return run.execution_at.date() if run.execution_at else None
+    execution_at = alm_execution_in_app_timezone(run.execution_at)
+    return execution_at.date() if execution_at else None
 
 
 def _device_key(match: dict[str, Any], result_id: int, step: int, index: int) -> str:

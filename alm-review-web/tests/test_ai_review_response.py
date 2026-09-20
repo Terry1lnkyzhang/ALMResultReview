@@ -1227,6 +1227,7 @@ def test_oversized_transport_evidence_requires_manual_review() -> None:
                 source_path: ImageEvidenceResult(
                     status="transport_too_large",
                     images=(image,),
+                    source_kind="evidence_fallback",
                 )
             }
         },
@@ -1242,6 +1243,10 @@ def test_oversized_transport_evidence_requires_manual_review() -> None:
     assert guarded["verdict"] == "needs_manual_review"
     assert guarded["step_results"][0]["image_evidence"][0]["status"] == (
         "transport_too_large"
+    )
+    assert (
+        guarded["step_results"][0]["image_evidence"][0]["source_kind"]
+        == "evidence_fallback"
     )
 
 

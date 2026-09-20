@@ -69,6 +69,48 @@ def test_location_requires_one_effective_configuration() -> None:
     )
 
 
+@pytest.mark.parametrize("location", ["Offline", "offline", " Laptop "])
+def test_non_site_location_does_not_require_a_physical_configuration(
+    location: str,
+) -> None:
+    result = assess_location_config(
+        location,
+        "Testing / 0. Common Config",
+        (),
+        frozenset({"offline", "laptop"}),
+    )
+
+    assert result["status"] == "not_applicable"
+    assert result["failure_code"] == ""
+    assert result["candidate_count"] == 0
+    assert result["selected_config"] is None
+
+
+def test_non_site_location_with_configuration_claim_requires_manual_review() -> None:
+    result = assess_location_config(
+        "Offline",
+        "Testing / 1.1 Product-CT Tenara",
+        (),
+        frozenset({"offline", "laptop"}),
+    )
+
+    assert result["status"] == "manual"
+    assert result["failure_code"] == "non_site_location_configuration_claim"
+    assert "product" in result["reason"]
+
+
+def test_non_site_location_still_requires_a_parent_folder() -> None:
+    result = assess_location_config(
+        "Laptop",
+        "",
+        (),
+        frozenset({"offline", "laptop"}),
+    )
+
+    assert result["status"] == "fail"
+    assert result["failure_code"] == "parent_name_missing"
+
+
 def test_valid_location_configuration_is_ready_for_semantic_review() -> None:
     result = assess_location_config(
         "CHESS-CAST-20006",

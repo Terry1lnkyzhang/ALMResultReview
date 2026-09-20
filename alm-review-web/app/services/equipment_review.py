@@ -24,17 +24,22 @@ _US_DATE_RE = re.compile(
 # A comma ends the value: `SN: F53331-0046, REV: A` records one serial, not `0046, REV: A`.
 _SERIAL_FIELD_RE = re.compile(
     r"(?i)(?:\bS/?N\b|serial\s*(?:number|no\.?)?|序列号)\s*[:=]\s*"
-    r"_*(?P<value>[^;,\r\n]+?)_*"
-    r"(?=$|[;,\r\n]|\s+(?:and\s+)?(?:S/?N|serial\s*(?:number|no\.?))\s*[:=])"
+    r"_*(?P<value>[^;,()\r\n]+?)_*"
+    r"(?=$|[;,)\r\n]|\s+(?:and\s+)?(?:S/?N|serial\s*(?:number|no\.?))\s*[:=])"
 )
 _PART_FIELD_RE = re.compile(
     r"(?i)(?:\bP/?N\b|part\s*(?:number|no\.?)|型号|部件号)\s*[:=]\s*"
-    r"_*(?P<value>[^;,\r\n]+?)_*"
-    r"(?=$|[;,\r\n]|[._\s]+(?:\bS/?N\b|serial\s*(?:number|no\.?)?)\s*[:=])"
+    r"_*(?P<value>[^;,()\r\n]+?)_*"
+    r"(?=$|[;,)\r\n]|[._\s]+(?:\bS/?N\b|serial\s*(?:number|no\.?)?)\s*[:=])"
 )
 _IDENTITY_FIELD_SUFFIX_RE = re.compile(
     r"(?i)\s*(?:(?:equipment\s*)?(?:id|code|number|no\.?)|"
     r"(?:series|serial)\s*(?:number|no\.?)?|s/?n)\s*[:=]?\s*_*$"
+)
+_CONTEXT_FIELD_RE = re.compile(
+    r"(?i)(?:(?:equipment\s*)?(?:id|code|number|no\.?)|"
+    r"(?:series|serial)\s*(?:number|no\.?)?|s/?n|p/?n|"
+    r"part\s*(?:number|no\.?)|12nc)\s*[:=]"
 )
 _NUMBERED_FIELD_PREFIX_RE = re.compile(r"^\s*\d+\s*[.)]?\s*")
 _DUE_DATE_LABEL_RE = re.compile(
@@ -180,6 +185,28 @@ def _identifier_only_in_part_number_fields(actual: str, identifier: str | None) 
     )
 
 
+def _context_label_key(label: str) -> str:
+    value = label.strip(" _:-")
+    if ":" in value:
+        value = value.rsplit(":", 1)[-1].strip(" _:-")
+    value = re.sub(r"(?i)^the\s+", "", value)
+    return _NAME_NOISE_RE.sub("", value.casefold())
+
+
+def _inherited_context_label(actual: str, boundary: int) -> str:
+    line_start = max(actual.rfind("\r", 0, boundary), actual.rfind("\n", 0, boundary))
+    preceding = actual[line_start + 1 : boundary]
+    fields = list(_CONTEXT_FIELD_RE.finditer(preceding))
+    if not fields:
+        return ""
+    field = fields[-1]
+    segment_start = max(
+        preceding.rfind(";", 0, field.start()),
+        preceding.rfind(",", 0, field.start()),
+    )
+    return _context_label_key(preceding[segment_start + 1 : field.start()])
+
+
 def _identifier_context_labels(
     actual: str,
     identifiers: Iterable[str],
@@ -204,26 +231,25 @@ def _identifier_context_labels(
             field = _IDENTITY_FIELD_SUFFIX_RE.search(prefix)
             if field is None:
                 return None
-            label = prefix[: field.start()]
-            label_key = _NAME_NOISE_RE.sub("", label.casefold())
+            label_key = _context_label_key(prefix[: field.start()])
+            if not label_key:
+                label_key = _inherited_context_label(actual, boundary)
             if not label_key:
                 return None
             labels.add(label_key)
     return labels if found else None
 
 
-def _identifiers_are_separately_labelled(
+def _identifier_context_relationship(
     actual: str,
     explicit_identifiers: Iterable[str],
     serial_identifiers: Iterable[str],
-) -> bool:
+) -> Literal["same", "separate", "unknown"]:
     explicit_labels = _identifier_context_labels(actual, explicit_identifiers)
     serial_labels = _identifier_context_labels(actual, serial_identifiers)
-    return bool(
-        explicit_labels
-        and serial_labels
-        and explicit_labels.isdisjoint(serial_labels)
-    )
+    if not explicit_labels or not serial_labels:
+        return "unknown"
+    return "separate" if explicit_labels.isdisjoint(serial_labels) else "same"
 
 
 def _parse_date(value: str) -> date | None:
@@ -567,14 +593,20 @@ def analyze_equipment_steps(
             for alias in _serial_aliases(matched[item_id].serial_number)
             if _contains_identifier(actual, alias)
         ]
+        identifier_context = _identifier_context_relationship(
+            raw_actual,
+            explicit_identifiers,
+            serial_identifiers,
+        )
         identifier_conflict = bool(
             asserted_id_matches
             and serial_only_matches
-            and not _identifiers_are_separately_labelled(
-                raw_actual,
-                explicit_identifiers,
-                serial_identifiers,
-            )
+            and identifier_context == "same"
+        )
+        identifier_context_uncertain = bool(
+            asserted_id_matches
+            and serial_only_matches
+            and identifier_context == "unknown"
         )
         unrecognized_reported_identifiers = [
             identifier
@@ -649,6 +681,13 @@ def analyze_equipment_steps(
                 check["summary"] = (
                     f"Equipment ID {', '.join(explicit_ids)} 与记录的序列号指向"
                     f"不同的台账设备 {', '.join(serial_ids)}。"
+                )
+            elif identifier_context_uncertain:
+                check["status"] = "manual"
+                check["code"] = "equipment_identifier_context_uncertain"
+                check["summary"] = (
+                    "检测到指向不同台账设备的 Equipment ID 和序列号，但无法确认"
+                    "它们属于同一设备还是分别记录的多台设备。"
                 )
             elif unknown_asset_ids or unrecognized_reported_identifiers:
                 check["status"] = "manual"

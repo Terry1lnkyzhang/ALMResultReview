@@ -1,11 +1,12 @@
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from app.migrations import _schema_migration_connection, ensure_compatible_schema
-from app.models import EvidenceConfig, Workspace
+from app.models import EvidenceConfig, NonSiteExecutionLocation, Workspace
 
 
 def test_mysql_schema_migration_uses_short_metadata_lock_timeout() -> None:
@@ -103,6 +104,25 @@ def test_test_location_history_tables_are_created() -> None:
         index["name"] for index in inspector.get_indexes("test_location_versions")
     }
     assert "ix_test_location_version_lookup" in indexes
+
+
+def test_non_site_execution_locations_are_created_and_seeded_once() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    ensure_compatible_schema(engine)
+    ensure_compatible_schema(engine)
+
+    assert "non_site_execution_locations" in inspect(engine).get_table_names()
+    with Session(engine) as db:
+        rows = db.scalars(
+            select(NonSiteExecutionLocation).order_by(
+                NonSiteExecutionLocation.normalized_key
+            )
+        ).all()
+    assert [(row.name, row.normalized_key, row.enabled) for row in rows] == [
+        ("Laptop", "laptop", True),
+        ("Offline", "offline", True),
+    ]
 
 
 def test_evidence_capability_flags_are_added_to_existing_schema() -> None:
