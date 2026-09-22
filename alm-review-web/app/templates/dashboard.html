@@ -341,7 +341,7 @@
   <aside class="side-panel">
     <div class="panel-heading"><h2>Workload by tester</h2><span>{{ tester_counts|length }} people</span></div>
     <div class="tester-list">
-    {% for code1_id, label, count in tester_counts[:10] %}
+    {% for code1_id, label, count in tester_counts %}
       <a href="/?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ code1_id|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}"><span>{{ label }}</span><span class="bar-track"><i style="width: {{ (count / max_tester_count * 100)|round }}%"></i></span><strong>{{ count }}</strong></a>
     {% else %}<p class="empty">No synced data.</p>{% endfor %}
     </div>

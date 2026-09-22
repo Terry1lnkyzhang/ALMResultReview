@@ -28,6 +28,14 @@ def test_dashboard_uses_workspace_review_progress_and_latest_alm_action() -> Non
     assert "LATEST RE-REVIEW" not in source
 
 
+def test_dashboard_workload_lists_every_tester() -> None:
+    template = templates.get_template("dashboard.html")
+    source, _, _ = templates.env.loader.get_source(templates.env, template.name)
+
+    assert "for code1_id, label, count in tester_counts %}" in source
+    assert "tester_counts[:10]" not in source
+
+
 def test_dashboard_reports_failed_reviews_per_run_not_per_job() -> None:
     template = templates.get_template("dashboard.html")
     source, _, _ = templates.env.loader.get_source(templates.env, template.name)
