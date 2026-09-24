@@ -78,6 +78,8 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert "'confirmed_warning_qualified': '确认警告已处理'" in source
     assert 'action="/runs/{{ run.run_id }}/manual-decision/revoke"' in source
     assert "证据来自临时目录，请归档到批准目录后重新评审。" in source
+    assert "使用临时证据时不允许人工强制合格" not in source
+    assert "即使人工确认合格，仍保留临时证据标记" in source
     assert "review.temporary_evidence_used" in source
 
     dashboard = templates.get_template("dashboard.html")
@@ -91,6 +93,7 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
 
     web_source = Path(web.__file__).read_text(encoding="utf-8")
     assert '"review_step_results": review_step_results' in web_source
+    assert 'include_manually_resolved_temporary=(status == "temporary_evidence")' in web_source
 
 
 def test_run_detail_exposes_guarded_local_delete_action() -> None:

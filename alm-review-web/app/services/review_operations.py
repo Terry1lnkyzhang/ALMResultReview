@@ -326,8 +326,10 @@ def queue_rereviews_for_run_ids(
     db: Session,
     run_ids: Sequence[int],
     workspace_id: int | None = None,
+    *,
+    include_manually_resolved_temporary: bool = False,
 ) -> RereviewQueueResult:
-    """Queue a re-review for an explicit set of Runs, e.g. a dashboard filter."""
+    """Queue a filtered re-review; only the temporary-evidence lens may include manual Runs."""
     include_legacy = workspace_id is None
     workspace = resolve_workspace(db, workspace_id)
     policy_key = current_review_policy_key(db, workspace.id)
@@ -351,8 +353,9 @@ def queue_rereviews_for_run_ids(
     for run in runs:
         review = current_review(db, run, policy_key)
         if review.manual_decision is not None:
-            manually_resolved += 1
-            continue
+            if not (include_manually_resolved_temporary and review.temporary_evidence_used):
+                manually_resolved += 1
+                continue
         matched_runs.append(run)
     return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
 

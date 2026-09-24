@@ -1,12 +1,22 @@
 import base64
 import hashlib
+import io
 import re
 from pathlib import Path
+
+from PIL import Image
 
 import app.services.image_evidence as image_evidence
 from app.models import EvidenceConfig
 from app.services.evidence import step_evidence_profile
-from app.services.image_evidence import NetworkImageResolver
+from app.services.image_evidence import (
+    IMAGE_TRANSPORT_TARGET_BYTES,
+    IMAGE_TRANSPORT_TARGET_PIXELS,
+    ImageEvidenceResult,
+    NetworkImageResolver,
+    ResolvedImage,
+    optimize_images_for_transport,
+)
 from app.services.reviews import (
     _IMAGE_EVIDENCE_ISSUES,
     _image_review_batches,
@@ -28,6 +38,8 @@ IMAGE_EVIDENCE_STATUSES = frozenset(
         "no_matching_images",
         "ambiguous_step_mapping",
         "transport_too_large",
+        "budget_exhausted",
+        "not_checked",
     }
 )
 SILENT_IMAGE_EVIDENCE_STATUSES = frozenset(
@@ -42,6 +54,21 @@ WEBP_BYTES = b"RIFF\x04\x00\x00\x00WEBP" + b"test-webp"
 def write_image(path: Path, content: bytes = PNG_BYTES) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
+
+
+def rendered_jpeg(name: str, width: int, height: int, color: str) -> ResolvedImage:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(output, format="JPEG", quality=95)
+    content = output.getvalue()
+    return ResolvedImage(
+        relative_name=name,
+        media_type="image/jpeg",
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        data_url=f"data:image/jpeg;base64,{base64.b64encode(content).decode('ascii')}",
+        width=width,
+        height=height,
+    )
 
 
 def test_image_evidence_statuses_map_to_exactly_one_review_outcome() -> None:
@@ -117,6 +144,231 @@ def test_total_image_budget_limits_request_size(tmp_path: Path) -> None:
     assert result.status == "ready"
     assert [image.relative_name for image in result.images] == ["01.png"]
     assert result.skipped_oversized == 1
+
+
+def test_transport_optimizer_does_not_touch_images_within_budget() -> None:
+    images = (rendered_jpeg("small.jpg", 800, 600, "white"),)
+
+    assert optimize_images_for_transport(images) is images
+
+
+def test_transport_optimizer_handles_testcase_69303_dimensions() -> None:
+    images = (
+        rendered_jpeg("Step3-1.JPG", 3264, 2448, "navy"),
+        rendered_jpeg("Step3-2.jpg", 1437, 802, "white"),
+        rendered_jpeg("Step3-3.jpg", 1432, 805, "gray"),
+        rendered_jpeg("Step3-4.jpg", 3264, 2448, "teal"),
+    )
+
+    optimized = optimize_images_for_transport(images)
+
+    assert optimized is not None
+    assert sum(image.size_bytes for image in optimized) <= IMAGE_TRANSPORT_TARGET_BYTES
+    assert sum(image.width * image.height for image in optimized) <= (
+        IMAGE_TRANSPORT_TARGET_PIXELS
+    )
+    assert optimized[0].transport_optimized is True
+    assert optimized[0].original_width == 3264
+    assert optimized[0].original_height == 2448
+    assert optimized[0].original_sha256 == images[0].sha256
+    assert optimized[1] is images[1]
+
+
+def test_transport_optimizer_recompresses_when_only_byte_budget_is_exceeded() -> None:
+    image = rendered_jpeg("large.jpg", 800, 600, "white")
+    declared_large = ResolvedImage(
+        **{
+            **image.__dict__,
+            "size_bytes": 5 * 1024 * 1024,
+        }
+    )
+
+    optimized = optimize_images_for_transport((declared_large,))
+
+    assert optimized is not None
+    assert optimized[0].transport_optimized is True
+    assert optimized[0].size_bytes <= IMAGE_TRANSPORT_TARGET_BYTES
+    assert (optimized[0].width, optimized[0].height) == (800, 600)
+    assert optimized[0].original_size_bytes == 5 * 1024 * 1024
+
+
+def test_transport_optimizer_rejects_an_undecodable_over_budget_image() -> None:
+    image = ResolvedImage(
+        relative_name="invalid.jpg",
+        media_type="image/jpeg",
+        size_bytes=5 * 1024 * 1024,
+        sha256=hashlib.sha256(b"invalid").hexdigest(),
+        data_url=f"data:image/jpeg;base64,{base64.b64encode(b'invalid').decode('ascii')}",
+        width=800,
+        height=600,
+    )
+
+    assert optimize_images_for_transport((image,)) is None
+
+
+def test_image_preparation_optimizes_an_over_budget_step(monkeypatch) -> None:
+    images = (
+        rendered_jpeg("Step3-1.JPG", 3264, 2448, "navy"),
+        rendered_jpeg("Step3-2.jpg", 1437, 802, "white"),
+        rendered_jpeg("Step3-3.jpg", 1432, 805, "gray"),
+        rendered_jpeg("Step3-4.jpg", 3264, 2448, "teal"),
+    )
+    monkeypatch.setattr(
+        NetworkImageResolver,
+        "resolve",
+        lambda self, value, allowed_root, fallback_root="": ImageEvidenceResult(
+            status="ready",
+            images=images,
+        ),
+    )
+    content = {
+        "steps": [
+            {
+                "review_step": 3,
+                "order": "3",
+                "evidence_profile": {
+                    "actual_paths": [{"raw": r"\\server\evidence\case69303"}],
+                    "routing": {
+                        "actions": [
+                            "validate_path",
+                            "load_images",
+                            "send_to_visual_ai",
+                        ]
+                    },
+                },
+            }
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=r"\\server\evidence",
+            external_evidence_review_enabled=True,
+        ),
+    )
+
+    result = prepared.results[3][r"\\server\evidence\case69303"]
+    assert result.status == "ready"
+    assert any(image.transport_optimized for image in result.images)
+    assert any(
+        review_step == 3
+        for batch in _image_review_batches(prepared)
+        for review_step, _, _ in batch
+    )
+
+
+def test_run_image_limit_records_skipped_later_paths(monkeypatch) -> None:
+    image = rendered_jpeg("Step1.jpg", 10, 10, "white")
+    resolved_paths = []
+
+    def resolve(self, value, allowed_root, fallback_root=""):
+        resolved_paths.append(value)
+        if value.endswith("Step6"):
+            return ImageEvidenceResult(status="no_images")
+        selected = {"Step2": 1, "Step3": 4, "Step5": 4, "Step7": 3}
+        return ImageEvidenceResult(
+            status="ready",
+            images=(image,) * min(self.max_images, selected[value.rsplit("\\", 1)[-1]]),
+        )
+
+    monkeypatch.setattr(NetworkImageResolver, "resolve", resolve)
+    paths = [rf"\\server\evidence\Step{step}" for step in (2, 3, 5, 6, 7, 8)]
+    content = {
+        "steps": [
+            {
+                "review_step": step,
+                "order": str(step),
+                "evidence_profile": {
+                    "actual_paths": [{"raw": path, "kind": "folder_or_unknown"}],
+                    "routing": {"actions": ["validate_path", "load_images"]},
+                },
+            }
+            for step, path in zip((2, 3, 5, 6, 7, 8), paths, strict=True)
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=r"\\server\evidence",
+            external_evidence_review_enabled=True,
+        ),
+    )
+
+    assert prepared.results[6][paths[3]].status == "no_images"
+    assert sum(
+        len(result.images)
+        for results in prepared.results.values()
+        for result in results.values()
+    ) == 12
+    assert prepared.results[7][paths[4]].status == "ready"
+    assert prepared.results[8][paths[-1]].status == "budget_exhausted"
+    assert prepared.results[8][paths[-1]].source_kind == "not_read"
+    assert prepared.results[8][paths[-1]].images == ()
+    assert paths[-1] not in resolved_paths
+    assert all(step != 8 for batch in _image_review_batches(prepared) for step, _, _ in batch)
+
+
+def test_step_image_limit_records_skipped_path_and_attachment(monkeypatch) -> None:
+    image = rendered_jpeg("first.jpg", 10, 10, "white")
+    calls = []
+
+    def resolve(self, value, allowed_root, fallback_root=""):
+        calls.append(value)
+        return ImageEvidenceResult(status="ready", images=(image,) * self.max_images)
+
+    monkeypatch.setattr(NetworkImageResolver, "resolve", resolve)
+    first = r"\\server\evidence\first"
+    second = r"\\server\evidence\second"
+    content = {
+        "steps": [
+            {
+                "review_step": 1,
+                "order": "1",
+                "attachment_contents": [
+                    {
+                        "attachment_id": str(index),
+                        "name": "photo.jpg",
+                        "mime_type": "image/jpeg",
+                        "sha256": image.sha256,
+                        "data_url": image.data_url,
+                    }
+                    for index in range(1, 6)
+                ],
+                "evidence_profile": {
+                    "actual_paths": [{"raw": first, "kind": "folder_or_unknown"}],
+                    "routing": {"actions": ["review_attachment", "load_images"]},
+                },
+            },
+            {
+                "review_step": 2,
+                "order": "2",
+                "evidence_profile": {
+                    "actual_paths": [
+                        {"raw": first, "kind": "folder_or_unknown"},
+                        {"raw": second, "kind": "folder_or_unknown"},
+                    ],
+                    "routing": {"actions": ["load_images"]},
+                },
+            },
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=r"\\server\evidence",
+            external_evidence_review_enabled=True,
+        ),
+    )
+
+    assert prepared.results[1]["ALM attachment:5"].status == "budget_exhausted"
+    assert prepared.results[1]["ALM attachment:5"].source_kind == "alm_attachment"
+    assert prepared.results[1][first].status == "budget_exhausted"
+    assert prepared.results[2][first].status == "ready"
+    assert prepared.results[2][second].status == "budget_exhausted"
+    assert calls == [first]
 
 
 def test_shared_directory_images_are_matched_to_their_review_step(

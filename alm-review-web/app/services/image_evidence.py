@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import io
+import math
 import os
 import re
 import stat
 from dataclasses import dataclass, replace
 from pathlib import Path, PureWindowsPath
+
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.services.evidence import validate_network_evidence_path
 
@@ -22,6 +26,12 @@ _STEP_IMAGE_PATTERN = re.compile(
     r"(?:^|[\\/_.\s-])step[\s_-]*0*(\d+)[a-z]?(?=$|[\\/_.\s-])",
     re.IGNORECASE,
 )
+IMAGE_TRANSPORT_MAX_BYTES = 4 * 1024 * 1024
+IMAGE_TRANSPORT_MAX_PIXELS = 12_000_000
+IMAGE_TRANSPORT_TARGET_BYTES = 3_500_000
+IMAGE_TRANSPORT_TARGET_PIXELS = 10_000_000
+IMAGE_TRANSPORT_MAX_EDGE = 2048
+_MAX_OPTIMIZATION_SOURCE_PIXELS = 80_000_000
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,12 @@ class ResolvedImage:
     data_url: str
     width: int = 0
     height: int = 0
+    transport_optimized: bool = False
+    original_media_type: str = ""
+    original_size_bytes: int = 0
+    original_sha256: str = ""
+    original_width: int = 0
+    original_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +59,144 @@ class ImageEvidenceResult:
     skipped_invalid: int = 0
     detail: str = ""
     source_kind: str = "approved_root"
+
+
+def _decoded_image(image: ResolvedImage) -> Image.Image:
+    _, separator, encoded = image.data_url.partition(",")
+    if not separator:
+        raise ValueError("Image data URL is missing its payload.")
+    content = base64.b64decode(encoded, validate=True)
+    with Image.open(io.BytesIO(content)) as source:
+        decoded = ImageOps.exif_transpose(source)
+        decoded.load()
+        return decoded.copy()
+
+
+def _jpeg_compatible(image: Image.Image) -> Image.Image:
+    if image.mode in {"RGB", "L"}:
+        return image
+    if "A" in image.getbands():
+        background = Image.new("RGB", image.size, "white")
+        background.paste(image, mask=image.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
+def _encode_transport_image(
+    source: Image.Image,
+    image: ResolvedImage,
+    size: tuple[int, int],
+    *,
+    quality: int,
+    force_lossy: bool,
+) -> ResolvedImage:
+    rendered = source
+    if rendered.size != size:
+        rendered = rendered.resize(size, Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    media_type = image.media_type
+    if media_type == "image/png" and not force_lossy:
+        rendered.save(output, format="PNG", optimize=True, compress_level=9)
+    elif media_type == "image/webp" and not force_lossy:
+        rendered.save(output, format="WEBP", quality=quality, method=6)
+    else:
+        media_type = "image/jpeg"
+        _jpeg_compatible(rendered).save(
+            output,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+        )
+    content = output.getvalue()
+    return ResolvedImage(
+        relative_name=image.relative_name,
+        media_type=media_type,
+        size_bytes=len(content),
+        sha256=hashlib.sha256(content).hexdigest(),
+        data_url=f"data:{media_type};base64,{base64.b64encode(content).decode('ascii')}",
+        width=size[0],
+        height=size[1],
+        transport_optimized=True,
+        original_media_type=image.original_media_type or image.media_type,
+        original_size_bytes=image.original_size_bytes or image.size_bytes,
+        original_sha256=image.original_sha256 or image.sha256,
+        original_width=image.original_width or image.width,
+        original_height=image.original_height or image.height,
+    )
+
+
+def optimize_images_for_transport(
+    images: tuple[ResolvedImage, ...],
+) -> tuple[ResolvedImage, ...] | None:
+    total_bytes = sum(image.size_bytes for image in images)
+    total_pixels = sum(image.width * image.height for image in images)
+    if (
+        total_bytes <= IMAGE_TRANSPORT_MAX_BYTES
+        and total_pixels <= IMAGE_TRANSPORT_MAX_PIXELS
+    ):
+        return images
+    if not images or total_pixels <= 0 or total_pixels > _MAX_OPTIMIZATION_SOURCE_PIXELS:
+        return None
+    try:
+        decoded = tuple(_decoded_image(image) for image in images)
+    except (OSError, ValueError, binascii.Error, UnidentifiedImageError):
+        return None
+
+    base_sizes = []
+    for source in decoded:
+        edge_scale = min(1.0, IMAGE_TRANSPORT_MAX_EDGE / max(source.size))
+        base_sizes.append(
+            (
+                max(1, round(source.width * edge_scale)),
+                max(1, round(source.height * edge_scale)),
+            )
+        )
+    base_pixels = sum(width * height for width, height in base_sizes)
+    if base_pixels > IMAGE_TRANSPORT_TARGET_PIXELS:
+        pixel_scale = math.sqrt(IMAGE_TRANSPORT_TARGET_PIXELS / base_pixels)
+        base_sizes = [
+            (max(1, round(width * pixel_scale)), max(1, round(height * pixel_scale)))
+            for width, height in base_sizes
+        ]
+
+    attempts = (
+        (1.0, 85, False, False),
+        (1.0, 85, False, True),
+        (0.90, 80, True, True),
+        (0.80, 75, True, True),
+        (0.70, 70, True, True),
+        (0.60, 65, True, True),
+        (0.50, 60, True, True),
+        (0.40, 55, True, True),
+    )
+    try:
+        for scale, quality, force_lossy, reencode in attempts:
+            optimized = tuple(
+                image
+                if not reencode and scale == 1.0 and source.size == size
+                else _encode_transport_image(
+                    source,
+                    image,
+                    (
+                        max(1, round(size[0] * scale)),
+                        max(1, round(size[1] * scale)),
+                    ),
+                    quality=quality,
+                    force_lossy=force_lossy,
+                )
+                for source, image, size in zip(decoded, images, base_sizes, strict=True)
+            )
+            if (
+                sum(image.size_bytes for image in optimized)
+                <= IMAGE_TRANSPORT_TARGET_BYTES
+                and sum(image.width * image.height for image in optimized)
+                <= IMAGE_TRANSPORT_TARGET_PIXELS
+            ):
+                return optimized
+    except OSError:
+        return None
+    return None
 
 
 def embedded_image(
@@ -249,10 +403,10 @@ class NetworkImageResolver:
         allowed_root: str,
         fallback_root: str,
     ) -> Path | None:
-        configured_fallback = fallback_root.strip().rstrip("\/")
+        configured_fallback = fallback_root.strip().rstrip("\\/")
         if not configured_fallback:
             raise FileNotFoundError(value)
-        approved_root = PureWindowsPath(allowed_root.strip().rstrip("\/"))
+        approved_root = PureWindowsPath(allowed_root.strip().rstrip("\\/"))
         relative_parts = PureWindowsPath(value).relative_to(approved_root).parts
         return self._relative_source(Path(configured_fallback), relative_parts)
 

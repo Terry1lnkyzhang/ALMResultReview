@@ -144,6 +144,20 @@ flowchart TD
 
 ### 6. 调用图像 Skill
 
+发送前按 Step 汇总图片预算。总大小不超过 4 MiB 且总像素不超过 1200 万时，
+原图不解码、不转换；超过任一阈值时，应用只在内存中生成 AI 传输版本：优先把最长边
+限制到 2048 px，并把 Step 总量压到 3.5 MB / 1000 万像素以内。JPEG/WebP 使用渐进式
+质量和尺寸调整，PNG 优先保持原格式，只有仍超预算时才转换为 JPEG。原始文件、ALM
+附件和数据库源内容均不修改。
+
+发生优化时，审计结果同时保存原始与传输版本的 SHA-256、大小和尺寸。无法解码或多轮
+优化后仍超预算时，状态才会变为 `transport_too_large` 并要求人工复核。
+
+每 Step 最多读取 4 张/10 MiB，每 Run 最多读取 12 张/15 MiB。若前面的证据已用完
+任一配额，后续仍需检查的附件或路径会留下 `budget_exhausted` 审计状态并要求人工
+复核，不会无声地算作通过；若已路由的图片路径意外没有检查记录，则记录
+`not_checked` 并同样要求人工复核。超出上限的证据不会发送给图像 Skill。
+
 [`_image_review_batches()`](../app/services/reviews.py#L1158) 只收集状态为 `ready` 的图片。
 [`_run_image_review_skill()`](../app/services/reviews.py#L1177) 随后：
 
@@ -177,6 +191,8 @@ Step issue，并与图像 Skill 结果一起计算最终 Verdict。
 | `ambiguous_step_mapping` | 共用目录中的图片没有 Step 标记 | `manual` |
 | `denied` / `unavailable` | 权限或网络读取失败 | `manual` |
 | `transport_too_large` | 图片超过视觉端点处理预算 | `manual` |
+| `budget_exhausted` | Step 或 Run 图片数量/大小配额耗尽，证据未检查 | `manual` |
+| `not_checked` | 已路由图片路径意外缺少检查结果 | `manual` |
 
 ## 运行时怎样查看
 

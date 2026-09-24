@@ -19,11 +19,7 @@ _HAS_WARNING = func.length(func.coalesce(ReviewResult.warnings_json, "")) > 2
 
 def is_force_qualified(review: CurrentReview) -> bool:
     manual = review.manual_decision
-    return (
-        not review.temporary_evidence_used
-        and manual is not None
-        and manual.decision in FORCE_QUALIFIED_DECISIONS
-    )
+    return manual is not None and manual.decision in FORCE_QUALIFIED_DECISIONS
 
 
 def _review_from_result(
@@ -32,11 +28,7 @@ def _review_from_result(
     has_warning: bool,
 ) -> CurrentReview:
     temporary_evidence_used = bool(result.temporary_evidence_used)
-    force_qualified = (
-        manual
-        and manual.decision in FORCE_QUALIFIED_DECISIONS
-        and not temporary_evidence_used
-    )
+    force_qualified = manual and manual.decision in FORCE_QUALIFIED_DECISIONS
     if force_qualified:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
@@ -53,7 +45,7 @@ def _review_from_result(
         final_status,
         has_unresolved_review_warning(
             has_warning,
-            manual if force_qualified or not temporary_evidence_used else None,
+            manual,
         ),
         temporary_evidence_used,
     )

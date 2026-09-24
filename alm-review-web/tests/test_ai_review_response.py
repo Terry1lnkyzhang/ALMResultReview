@@ -1250,6 +1250,57 @@ def test_oversized_transport_evidence_requires_manual_review() -> None:
     )
 
 
+@pytest.mark.parametrize("status", ["budget_exhausted", "not_checked"])
+def test_skipped_image_source_requires_manual_review(status: str) -> None:
+    source_path = r"\\server\approved\Step8"
+    parsed = text_review_result()
+    content = evidence_content(
+        paths=[{"raw": source_path, "kind": "folder_or_unknown"}],
+        screenshot_required=True,
+    )
+    content["steps"][0]["evidence_profile"]["routing"] = {
+        "actions": ["validate_path", "load_images"]
+    }
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={1: {source_path: ImageEvidenceResult(status=status)}},
+    )
+
+    guarded = _apply_capability_guards(
+        parsed,
+        content,
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        prepared,
+    )
+
+    assert guarded["step_results"][0]["status"] == "manual"
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["step_results"][0]["image_evidence"][0]["status"] == status
+    assert "需人工复核" in guarded["step_results"][0]["issues"][0]["summary"]
+
+
+def test_missing_routed_image_result_cannot_pass_silently() -> None:
+    source_path = r"\\server\approved\Step8"
+    content = evidence_content(
+        paths=[{"raw": source_path, "kind": "folder_or_unknown"}],
+        screenshot_required=True,
+    )
+    content["steps"][0]["evidence_profile"]["routing"] = {
+        "actions": ["validate_path", "load_images"]
+    }
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        content,
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        PreparedImageEvidence(external_review_enabled=True, results={}),
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["step_results"][0]["image_evidence"][0]["status"] == "not_checked"
+    assert guarded["step_results"][0]["image_evidence"][0]["source_kind"] == "not_read"
+
+
 def test_missing_network_evidence_is_unqualified() -> None:
     source_path = r"\\server\approved\missing"
     parsed = text_review_result()

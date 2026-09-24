@@ -20,6 +20,8 @@ from app.models import (
     WorkerHeartbeat,
     Workspace,
 )
+from app.services.review_policy import current_review_policy_key
+from app.services.reviews import save_manual_decision
 from app.web import (
     _current_sync_job,
     _run_sync_batch_progress,
@@ -29,6 +31,7 @@ from app.web import (
     import_snapshot,
     process_reviews,
     queue_status,
+    rereview_filtered_runs,
     retry_failed_reviews,
     review_progress,
     review_run_now,
@@ -112,6 +115,77 @@ def test_review_action_only_creates_a_database_job() -> None:
         assert job.run_id == run.run_id
         assert job.revision_id == revision.id
         assert job.status == "queued"
+
+
+def test_temporary_evidence_filter_rereviews_manually_qualified_run() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Testing", slug="testing")
+        db.add(workspace)
+        db.flush()
+        run = AlmRun(
+            run_id=42,
+            workspace_id=workspace.id,
+            run_status="Passed",
+            source_hash="a" * 64,
+            review_hash="b" * 64,
+            raw_json="{}",
+        )
+        db.add(run)
+        db.flush()
+        revision = RunRevision(
+            run_id=run.run_id,
+            revision_number=1,
+            source_hash=run.source_hash,
+            review_hash=run.review_hash,
+            snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        run.current_revision_id = revision.id
+        completed = ReviewJob(
+            workspace_id=workspace.id,
+            run_id=run.run_id,
+            revision_id=revision.id,
+            status="completed",
+        )
+        db.add(completed)
+        db.flush()
+        db.add(
+            ReviewResult(
+                workspace_id=workspace.id,
+                job_id=completed.id,
+                run_id=run.run_id,
+                revision_id=revision.id,
+                prompt_version_id=1,
+                source_hash=run.source_hash,
+                review_policy_key=current_review_policy_key(db, workspace.id),
+                model_name="test-model",
+                verdict="unqualified",
+                temporary_evidence_used=True,
+            )
+        )
+        db.add(AiConfig(id=1, enabled=True))
+        db.commit()
+        save_manual_decision(db, run, "override_qualified", "tester", "Reviewed")
+
+        options = dict(
+            tester="all", owner="all", query="", search_steps=False,
+            db=db, workspace_id=workspace.id,
+        )
+        ordinary = rereview_filtered_runs(status="all", **options)
+        assert ordinary.status_code == 303
+        assert db.scalars(
+            select(ReviewJob).where(ReviewJob.status == "queued")
+        ).all() == []
+
+        temporary = rereview_filtered_runs(status="temporary_evidence", **options)
+        jobs = db.scalars(
+            select(ReviewJob).where(ReviewJob.status == "queued")
+        ).all()
+        assert temporary.status_code == 303
+        assert [job.run_id for job in jobs] == [run.run_id]
 
 
 def test_delete_run_removes_all_local_run_history() -> None:

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
+{% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'budget_exhausted': '配额耗尽·未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
 {% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '确认警告已处理'} %}
 {% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
 {% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
@@ -125,7 +125,7 @@
 
 {% if review.temporary_evidence_used %}
 <section class="review-advisory review-advisory-detail temporary-evidence-advisory">
-  <div><p class="eyebrow">Temporary evidence</p><h2>当前评审使用了临时证据</h2><p>证据来自临时目录，请归档到批准目录后重新评审。使用临时证据时不允许人工强制合格。</p></div>
+  <div><p class="eyebrow">Temporary evidence</p><h2>当前评审使用了临时证据</h2><p>证据来自临时目录，请归档到批准目录后重新评审。即使人工确认合格，仍保留临时证据标记，直到重新评审不再使用临时证据。</p></div>
 </section>
 {% endif %}
 
@@ -250,7 +250,7 @@
     <article>
       <header><strong>步骤 {{ step_review.get('review_step') }}</strong><span>{{ 'ALM 附件' if evidence.get('source_kind') == 'alm_attachment' else '网络路径' }}</span><i>{{ review_status_labels.get(evidence.get('status'), evidence.get('status')) }}</i></header>
       <code>{{ evidence.get('source_path') }}</code>
-      {% for image in evidence.get('images', []) %}<dl><div><dt>文件</dt><dd>{{ image.get('name') }}</dd></div><div><dt>尺寸</dt><dd>{{ image.get('width') or '-' }} × {{ image.get('height') or '-' }}</dd></div><div><dt>大小</dt><dd>{{ image.get('size_bytes') or 0 }} bytes</dd></div><div><dt>SHA-256</dt><dd class="hash">{{ image.get('sha256') }}</dd></div></dl>{% endfor %}
+      {% for image in evidence.get('images', []) %}<dl><div><dt>文件</dt><dd>{{ image.get('name') }}{% if image.get('transport_optimized') %}<small>AI 传输已优化</small>{% endif %}</dd></div><div><dt>尺寸</dt><dd>{{ image.get('width') or '-' }} × {{ image.get('height') or '-' }}{% if image.get('original') %}<small>原始 {{ image.get('original').get('width') }} × {{ image.get('original').get('height') }}</small>{% endif %}</dd></div><div><dt>大小</dt><dd>{{ image.get('size_bytes') or 0 }} bytes{% if image.get('original') %}<small>原始 {{ image.get('original').get('size_bytes') }} bytes</small>{% endif %}</dd></div><div><dt>SHA-256</dt><dd class="hash">{{ image.get('sha256') }}</dd></div></dl>{% endfor %}
     </article>
     {% endfor %}{% endfor %}
   </div>

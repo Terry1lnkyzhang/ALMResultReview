@@ -18,6 +18,7 @@ from app.services.review_operations import (
     latest_rereview_progress,
     queue_recommended_review_updates,
     queue_rereviews,
+    queue_rereviews_for_run_ids,
     workspace_review_progress,
 )
 from app.services.review_policy import current_review_policy_key
@@ -176,6 +177,34 @@ def test_queue_rereviews_never_touches_a_manually_resolved_run() -> None:
         assert (result.matched, result.queued, result.manually_resolved) == (1, 1, 1)
         assert [job.run_id for job in queued] == [2]
         assert is_force_qualified(current_review(db, forced))
+
+
+def test_filtered_temporary_rereview_includes_manual_runs_only_when_explicit() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        temporary = add_reviewed_run(db, 1, "unqualified")
+        regular = add_reviewed_run(db, 2, "unqualified")
+        stored = db.scalar(select(ReviewResult).where(ReviewResult.run_id == 1))
+        assert stored is not None
+        stored.temporary_evidence_used = True
+        db.commit()
+        save_manual_decision(db, temporary, "override_qualified", "tester", "Checked")
+        save_manual_decision(db, regular, "override_qualified", "tester", "Checked")
+
+        ordinary = queue_rereviews_for_run_ids(db, [1, 2])
+        assert (ordinary.queued, ordinary.manually_resolved) == (0, 2)
+
+        filtered = queue_rereviews_for_run_ids(
+            db, [1, 2], include_manually_resolved_temporary=True
+        )
+        assert (filtered.matched, filtered.queued, filtered.manually_resolved) == (1, 1, 1)
+        queued = db.scalars(select(ReviewJob).where(ReviewJob.status == "queued"))
+        assert [job.run_id for job in queued] == [1]
+        assert queue_rereviews_for_run_ids(
+            db, [1], include_manually_resolved_temporary=True
+        ).already_active == 1
+        assert is_force_qualified(current_review(db, temporary))
 
 
 def test_queue_recommended_review_updates_only_queues_outdated_policy() -> None:

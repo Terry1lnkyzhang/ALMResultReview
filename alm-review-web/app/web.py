@@ -1904,7 +1904,12 @@ def rereview_filtered_runs(
     run_ids = _filtered_run_ids(
         db, workspace.id, include_legacy, status, tester, owner, query, search_steps
     )
-    result = queue_rereviews_for_run_ids(db, run_ids, workspace.id)
+    result = queue_rereviews_for_run_ids(
+        db,
+        run_ids,
+        workspace.id,
+        include_manually_resolved_temporary=(status == "temporary_evidence"),
+    )
     message = (
         f"Filtered re-review queued: {result.queued} of {result.matched} matching Runs. "
         f"{result.already_active} already active, "

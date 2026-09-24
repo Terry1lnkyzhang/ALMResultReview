@@ -28,6 +28,7 @@ from app.services.review_status import (
     review_update_reasons,
 )
 from app.services.reviews import (
+    allowed_manual_decisions,
     current_review,
     revoke_manual_decision,
     save_manual_decision,
@@ -123,7 +124,7 @@ def test_manual_rules_allow_review_confirmation_and_unqualified_override() -> No
         ("unqualified", None, "override_qualified"),
     ],
 )
-def test_temporary_evidence_preserves_ai_status_but_blocks_force_qualified(
+def test_temporary_evidence_allows_force_qualified_without_losing_provenance(
     verdict: str,
     warnings_json: str | None,
     decision: str,
@@ -146,20 +147,26 @@ def test_temporary_evidence_preserves_ai_status_but_blocks_force_qualified(
         assert batched.final_status == verdict
         assert batched.temporary_evidence_used
         assert not is_force_qualified(review)
+        assert decision in allowed_manual_decisions(review)
+        save_manual_decision(db, run, decision, "operator", "Reviewed")
+        review = current_review(db, run, policy_key)
+        batched = current_reviews(db, [run], policy_key)[run.run_id]
+        assert review.final_status == batched.final_status == "qualified"
+        assert is_force_qualified(review) and is_force_qualified(batched)
+        assert review.temporary_evidence_used and batched.temporary_evidence_used
         assert _matches_status(
             {
                 "final_status": batched.final_status,
-                "force_qualified": False,
+                "force_qualified": is_force_qualified(batched),
                 "has_warning": batched.has_warning,
-                "temporary_evidence_used": True,
+                "temporary_evidence_used": batched.temporary_evidence_used,
             },
             "temporary_evidence",
         )
-        with pytest.raises(ValueError, match="证据来自临时目录"):
-            save_manual_decision(db, run, decision, "operator", "Reviewed")
+        assert not review.has_warning
 
 
-def test_existing_force_qualified_decision_is_ignored_for_temporary_evidence() -> None:
+def test_existing_force_qualified_decision_remains_effective_for_temporary_evidence() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -174,10 +181,49 @@ def test_existing_force_qualified_decision_is_ignored_for_temporary_evidence() -
         review = current_review(db, run, policy_key)
         batched = current_reviews(db, [run], policy_key)[run.run_id]
 
-        assert review.final_status == "unqualified"
-        assert batched.final_status == "unqualified"
-        assert not is_force_qualified(review)
-        assert not is_force_qualified(batched)
+        assert review.final_status == batched.final_status == "qualified"
+        assert is_force_qualified(review) and is_force_qualified(batched)
+        assert review.temporary_evidence_used and batched.temporary_evidence_used
+
+
+def test_rereview_keeps_manual_qualification_until_temporary_evidence_is_resolved() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified", temporary_evidence_used=True)
+        save_manual_decision(db, run, "override_qualified", "operator", "Reviewed")
+        policy_key = current_review_policy_key(db)
+
+        for still_temporary in (True, False):
+            job = ReviewJob(run_id=run.run_id, revision_id=run.current_revision_id,
+                            status="completed")
+            db.add(job)
+            db.flush()
+            db.add(
+                ReviewResult(
+                    job_id=job.id,
+                    run_id=run.run_id,
+                    revision_id=run.current_revision_id,
+                    prompt_version_id=1,
+                    source_hash=run.source_hash,
+                    review_policy_key=policy_key,
+                    model_name="test-model",
+                    verdict="unqualified",
+                    temporary_evidence_used=still_temporary,
+                )
+            )
+            db.commit()
+
+            single = current_review(db, run, policy_key)
+            batched = current_reviews(db, [run], policy_key)[run.run_id]
+            for review in (single, batched):
+                assert review.final_status == "qualified"
+                assert is_force_qualified(review)
+                assert review.temporary_evidence_used is still_temporary
+            assert _matches_status(
+                {"temporary_evidence_used": batched.temporary_evidence_used},
+                "temporary_evidence",
+            ) is still_temporary
 
 
 def test_failed_review_can_be_force_qualified_and_revoked() -> None:
@@ -415,12 +461,14 @@ def test_not_qualified_filter_also_includes_qualified_runs_with_warnings(
 def test_not_qualified_filter_includes_qualified_temporary_evidence() -> None:
     item = {
         "final_status": "qualified",
-        "force_qualified": False,
+        "force_qualified": True,
         "has_warning": False,
         "temporary_evidence_used": True,
     }
 
     assert _matches_status(item, "not_qualified")
+    assert _matches_status(item, "temporary_evidence")
+    assert _matches_status(item, "force_qualified")
 
 
 def test_confirmed_unqualified_is_not_force_qualified() -> None:

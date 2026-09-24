@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import PureWindowsPath
 from typing import Any
@@ -60,10 +60,13 @@ from app.services.html_evidence import (
     actual_phantom_codes,
 )
 from app.services.image_evidence import (
+    IMAGE_TRANSPORT_MAX_BYTES,
+    IMAGE_TRANSPORT_MAX_PIXELS,
     ImageEvidenceResult,
     NetworkImageResolver,
     ResolvedImage,
     embedded_image,
+    optimize_images_for_transport,
 )
 from app.services.location_review import (
     fallback_location_skill_output,
@@ -111,9 +114,6 @@ WARNING_QUALIFIED_DECISION = "confirmed_warning_qualified"
 FORCE_QUALIFIED_DECISIONS = frozenset(
     {"override_qualified", "confirmed_qualified", WARNING_QUALIFIED_DECISION}
 )
-TEMPORARY_EVIDENCE_MESSAGE = (
-    "证据来自临时目录，请归档到批准目录后重新评审。"
-)
 
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 MAX_REVIEW_JOB_ATTEMPTS = 3
@@ -139,8 +139,6 @@ def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
     allowed = set(VALID_MANUAL_DECISIONS.get(review.result.verdict, set()))
     if review.result.verdict == "qualified" and review.has_warning:
         allowed.add(WARNING_QUALIFIED_DECISION)
-    if review.temporary_evidence_used:
-        allowed.difference_update(FORCE_QUALIFIED_DECISIONS)
     return frozenset(allowed)
 
 
@@ -307,11 +305,7 @@ def current_review(
             "review_failed" if failed_job else "pending_review",
         )
     temporary_evidence_used = bool(result.temporary_evidence_used)
-    force_qualified = (
-        manual
-        and manual.decision in FORCE_QUALIFIED_DECISIONS
-        and not temporary_evidence_used
-    )
+    force_qualified = manual and manual.decision in FORCE_QUALIFIED_DECISIONS
     if force_qualified:
         final_status = "qualified"
     elif manual and manual.decision == "confirmed_unqualified":
@@ -328,7 +322,7 @@ def current_review(
         final_status,
         has_unresolved_review_warning(
             has_review_warning(result.warnings_json),
-            manual if force_qualified or not temporary_evidence_used else None,
+            manual,
         ),
         temporary_evidence_used,
     )
@@ -358,8 +352,6 @@ def save_manual_decision(
     reason: str,
 ) -> ManualDecision:
     review = current_review(db, run)
-    if review.temporary_evidence_used and decision in FORCE_QUALIFIED_DECISIONS:
-        raise ValueError(TEMPORARY_EVIDENCE_MESSAGE)
     allowed = allowed_manual_decisions(review)
     if decision not in allowed:
         basis = (
@@ -577,6 +569,27 @@ def _recalculate_result(parsed: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def _image_audit_metadata(image: ResolvedImage) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "name": image.relative_name,
+        "media_type": image.media_type,
+        "size_bytes": image.size_bytes,
+        "width": image.width,
+        "height": image.height,
+        "sha256": image.sha256,
+    }
+    if image.transport_optimized:
+        metadata["transport_optimized"] = True
+        metadata["original"] = {
+            "media_type": image.original_media_type,
+            "size_bytes": image.original_size_bytes,
+            "width": image.original_width,
+            "height": image.original_height,
+            "sha256": image.original_sha256,
+        }
+    return metadata
+
+
 # Image evidence statuses that raise an issue, mapped to severity, issue type, and text.
 # Any status missing here is deliberately silent; `tests/test_image_evidence.py` pins the set.
 _IMAGE_EVIDENCE_ISSUES: dict[str, tuple[str, str, str]] = {
@@ -608,6 +621,16 @@ _IMAGE_EVIDENCE_ISSUES: dict[str, tuple[str, str, str]] = {
         "manual",
         "screenshot",
         "证据图像存在，但超过当前 AI 接口可接受的大小。",
+    ),
+    "budget_exhausted": (
+        "manual",
+        "screenshot",
+        "图像证据数量或大小达到评审上限，该证据未检查，需人工复核。",
+    ),
+    "not_checked": (
+        "manual",
+        "screenshot",
+        "图像证据已请求检查，但没有检查结果，需人工复核。",
     ),
 }
 
@@ -789,17 +812,7 @@ def _apply_capability_guards(
                     "source_path": source,
                     "source_kind": "alm_attachment",
                     "status": evidence.status,
-                    "images": [
-                        {
-                            "name": image.relative_name,
-                            "media_type": image.media_type,
-                            "size_bytes": image.size_bytes,
-                            "width": image.width,
-                            "height": image.height,
-                            "sha256": image.sha256,
-                        }
-                        for image in evidence.images
-                    ],
+                    "images": [_image_audit_metadata(image) for image in evidence.images],
                 }
             )
             issue = _IMAGE_EVIDENCE_ISSUES.get(evidence.status)
@@ -841,22 +854,18 @@ def _apply_capability_guards(
             else:
                 evidence = step_evidence.get(path["raw"])
                 if evidence is None:
-                    continue
+                    if "load_images" not in actions or path.get("kind") == "html":
+                        continue
+                    evidence = ImageEvidenceResult(
+                        status="not_checked", source_kind="not_read"
+                    )
                 step_result["image_evidence"].append(
                     {
                         "source_path": path["raw"],
                         "source_kind": evidence.source_kind,
                         "status": evidence.status,
                         "images": [
-                            {
-                                "name": image.relative_name,
-                                "media_type": image.media_type,
-                                "size_bytes": image.size_bytes,
-                                "width": image.width,
-                                "height": image.height,
-                                "sha256": image.sha256,
-                            }
-                            for image in evidence.images
+                            _image_audit_metadata(image) for image in evidence.images
                         ],
                     }
                 )
@@ -1704,22 +1713,27 @@ def _prepare_image_evidence(
         }
         step_results: dict[str, ImageEvidenceResult] = {}
         for attachment in step.get("attachment_contents", []):
+            attachment_id = str(attachment.get("attachment_id") or "").strip()
+            source = f"ALM attachment:{attachment_id or 'unknown'}"
             if (
                 remaining_step_images <= 0
                 or remaining_run_images <= 0
                 or remaining_step_bytes <= 0
                 or remaining_run_bytes <= 0
             ):
-                break
-            attachment_id = str(attachment.get("attachment_id") or "").strip()
-            source = f"ALM attachment:{attachment_id or 'unknown'}"
+                step_results[source] = ImageEvidenceResult(
+                    status="budget_exhausted",
+                    detail="Image count or byte limit exhausted before reading this attachment.",
+                    source_kind="alm_attachment",
+                )
+                continue
             image = embedded_image(
                 name=str(attachment.get("name") or source),
                 media_type=str(attachment.get("mime_type") or ""),
                 data_url=str(attachment.get("data_url") or ""),
                 expected_sha256=str(attachment.get("sha256") or ""),
                 max_image_bytes=min(
-                    5 * 1024 * 1024,
+                    10 * 1024 * 1024,
                     remaining_step_bytes,
                     remaining_run_bytes,
                 ),
@@ -1744,10 +1758,20 @@ def _prepare_image_evidence(
                 or remaining_step_bytes <= 0
                 or remaining_run_bytes <= 0
             ):
-                break
+                step_results[path["raw"]] = ImageEvidenceResult(
+                    status="budget_exhausted",
+                    detail="Image count or byte limit exhausted before reading this path.",
+                    source_kind="not_read",
+                )
+                continue
             resolver = NetworkImageResolver(
                 max_depth=2,
                 max_images=min(remaining_step_images, remaining_run_images),
+                max_image_bytes=min(
+                    10 * 1024 * 1024,
+                    remaining_step_bytes,
+                    remaining_run_bytes,
+                ),
                 max_total_bytes=min(remaining_step_bytes, remaining_run_bytes),
                 matching_step_numbers=matching_step_numbers,
                 require_step_marker=(
@@ -1759,20 +1783,6 @@ def _prepare_image_evidence(
                 evidence_config.allowed_network_root,
                 evidence_config.local_html_fallback_root,
             )
-            if (
-                result.status == "ready"
-                and (
-                    sum(image.size_bytes for image in result.images) > 4 * 1024 * 1024
-                    or sum(image.width * image.height for image in result.images)
-                    > 12_000_000
-                )
-            ):
-                result = ImageEvidenceResult(
-                    status="transport_too_large",
-                    images=result.images,
-                    detail="Image evidence exceeds the AI endpoint transport budget.",
-                    source_kind=result.source_kind,
-                )
             step_results[path["raw"]] = result
             image_count = len(result.images)
             image_bytes = sum(image.size_bytes for image in result.images)
@@ -1780,6 +1790,40 @@ def _prepare_image_evidence(
             remaining_run_images -= image_count
             remaining_step_bytes -= image_bytes
             remaining_run_bytes -= image_bytes
+        ready_sources = [
+            (source, result)
+            for source, result in step_results.items()
+            if result.status == "ready" and result.images
+        ]
+        step_images = tuple(
+            image for _, result in ready_sources for image in result.images
+        )
+        if (
+            sum(image.size_bytes for image in step_images) > IMAGE_TRANSPORT_MAX_BYTES
+            or sum(image.width * image.height for image in step_images)
+            > IMAGE_TRANSPORT_MAX_PIXELS
+        ):
+            optimized = optimize_images_for_transport(step_images)
+            if optimized is None:
+                for source, result in ready_sources:
+                    step_results[source] = replace(
+                        result,
+                        status="transport_too_large",
+                        detail="Image evidence exceeds the AI endpoint transport budget.",
+                    )
+            else:
+                offset = 0
+                for source, result in ready_sources:
+                    count = len(result.images)
+                    step_results[source] = replace(
+                        result,
+                        images=optimized[offset : offset + count],
+                    )
+                    offset += count
+                saved_bytes = sum(image.size_bytes for image in step_images) - sum(
+                    image.size_bytes for image in optimized
+                )
+                remaining_run_bytes += max(0, saved_bytes)
         results[step["review_step"]] = step_results
     return PreparedImageEvidence(
         external_review_enabled=True,
