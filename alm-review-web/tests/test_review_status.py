@@ -427,11 +427,11 @@ def test_force_qualified_is_a_lens_over_qualified_runs() -> None:
         ("qualified", False),
         ("unqualified", True),
         ("needs_manual_review", True),
-        ("pending_review", True),
-        ("review_failed", True),
+        ("pending_review", False),
+        ("review_failed", False),
     ],
 )
-def test_not_qualified_filter_includes_every_other_final_status(
+def test_not_qualified_filter_only_includes_unqualified_and_manual_statuses(
     final_status: str,
     expected: bool,
 ) -> None:
@@ -442,7 +442,7 @@ def test_not_qualified_filter_includes_every_other_final_status(
     }
 
     assert _matches_status(item, "not_qualified") is expected
-    assert STATUS_LABELS["not_qualified"] == "除合格外全部 + 警告/临时证据"
+    assert STATUS_LABELS["not_qualified"] == "不合格 + 警告 + 需人工复核"
 
 
 @pytest.mark.parametrize("force_qualified", [False, True])
@@ -458,7 +458,7 @@ def test_not_qualified_filter_also_includes_qualified_runs_with_warnings(
     assert _matches_status(item, "not_qualified")
 
 
-def test_not_qualified_filter_includes_qualified_temporary_evidence() -> None:
+def test_qualified_temporary_evidence_only_appears_in_its_own_lens() -> None:
     item = {
         "final_status": "qualified",
         "force_qualified": True,
@@ -466,9 +466,25 @@ def test_not_qualified_filter_includes_qualified_temporary_evidence() -> None:
         "temporary_evidence_used": True,
     }
 
-    assert _matches_status(item, "not_qualified")
+    assert not _matches_status(item, "not_qualified")
     assert _matches_status(item, "temporary_evidence")
     assert _matches_status(item, "force_qualified")
+
+
+def test_temporary_evidence_still_matches_attention_filter_for_other_reasons() -> None:
+    item = {
+        "final_status": "unqualified",
+        "has_warning": False,
+        "temporary_evidence_used": True,
+    }
+    assert _matches_status(item, "not_qualified")
+
+    item["final_status"] = "needs_manual_review"
+    assert _matches_status(item, "not_qualified")
+
+    item["final_status"] = "qualified"
+    item["has_warning"] = True
+    assert _matches_status(item, "not_qualified")
 
 
 def test_confirmed_unqualified_is_not_force_qualified() -> None:

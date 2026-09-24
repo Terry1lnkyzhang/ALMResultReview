@@ -236,7 +236,7 @@ templates = Jinja2Templates(directory=PROJECT_DIR / "app" / "templates")
 templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
-    "not_qualified": "除合格外全部 + 警告/临时证据",
+    "not_qualified": "不合格 + 警告 + 需人工复核",
     "qualified": "合格",
     "force_qualified": "人工确认合格",
     "unqualified": "不合格",
@@ -320,9 +320,8 @@ def _matches_status(item: dict, status: str) -> bool:
     # These values are lenses over the final statuses, not statuses themselves.
     if status == "not_qualified":
         return (
-            item["final_status"] != "qualified"
+            item["final_status"] in {"unqualified", "needs_manual_review"}
             or item["has_warning"]
-            or item.get("temporary_evidence_used", False)
         )
     if status == "force_qualified":
         return item["force_qualified"]
