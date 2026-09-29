@@ -21,12 +21,15 @@ from app.services.automation_release import AutomationReleaseRecord
 from app.services.equipment_review import OpenQuestion
 from app.services.html_evidence import HtmlEvidenceBlock, HtmlEvidenceResult
 from app.services.reviews import (
+    ReviewContext,
     _build_review_plan,
     _compact_html_quote,
     _equipment_source_field,
     _html_skill_batch_inputs,
+    _manual_html_assessment,
     _reuse_verified_html_citations,
     _run_html_review_batches,
+    _run_html_review_skill,
     _validate_html_assessment,
     process_job,
 )
@@ -526,6 +529,99 @@ def test_html_final_synthesis_reuses_verified_batch_citation_text() -> None:
     assert assessment["evidence"][0]["supports"] == ["actual", "result"]
 
 
+def test_html_final_adds_only_verified_citations_for_omitted_reports() -> None:
+    observations = [
+        {
+            "evidence": [
+                {
+                    "report_id": f"report-{index}",
+                    "block_id": "result-1",
+                    "quote": f"expect: {index}.0 mm",
+                    "supports": ["expected"],
+                }
+                for index in range(1, 9)
+            ]
+        }
+    ]
+    assessment = {
+        "status": "pass",
+        "description_coverage": "supported",
+        "expected_coverage": "supported",
+        "actual_coverage": "supported",
+        "result_consistency": "consistent",
+        "release_consistency": "not_checked",
+        "reviewed_report_ids": [f"report-{index}" for index in range(1, 9)],
+        "evidence": [
+            {
+                "report_id": "report-1", "block_id": "result-1",
+                "quote": "The result was 1.0 mm.", "supports": ["result"],
+            }
+        ],
+    }
+    skill_input = {
+        "steps": [{
+            "automation_release": {"status": "disabled"},
+            "reports": [
+                {
+                    "report_id": f"report-{index}", "content_truncated": False,
+                    "blocks": [{"block_id": "result-1", "text": f"expect: {index}.0 mm"}],
+                }
+                for index in range(1, 9)
+            ],
+        }]
+    }
+
+    recovery = _reuse_verified_html_citations(observations, assessment)
+
+    assert recovery["appended_report_ids"] == [f"report-{index}" for index in range(2, 9)]
+    assert [item["report_id"] for item in assessment["evidence"]] == [
+        f"report-{index}" for index in range(1, 9)
+    ]
+    assert assessment["evidence"][0]["quote"] == "expect: 1.0 mm"
+    _validate_html_assessment(skill_input, assessment)
+
+
+def test_html_final_never_moves_an_expected_value_to_a_different_report() -> None:
+    observations = [
+        {"evidence": [
+            {"report_id": "report-1", "block_id": "test-result-16",
+             "quote": "expect: @140kv -3mm: __2.6042 mm.", "supports": ["expected"]},
+            {"report_id": "report-4", "block_id": "test-result-16",
+             "quote": "expect: @140kv -3mm: __2.6781 mm.", "supports": ["expected"]},
+        ]}
+    ]
+    assessment = {
+        "status": "fail",
+        "evidence": [
+            {"report_id": "report-4", "block_id": "test-result-16",
+             "quote": "expect: @140kv -3mm: __2.6042 mm.", "supports": ["expected"]},
+        ],
+    }
+
+    recovery = _reuse_verified_html_citations(observations, assessment)
+
+    assert recovery["appended_report_ids"] == ["report-1"]
+    assert assessment["evidence"][0]["quote"] == (
+        "expect: @140kv -3mm: __2.6781 mm."
+    )
+    assert assessment["evidence"][1]["report_id"] == "report-1"
+
+
+def test_html_final_rejects_citations_not_present_in_validated_batches() -> None:
+    observations = [{"evidence": [
+        {"report_id": "report-1", "block_id": "result-1",
+         "quote": "expect: 2.6042 mm", "supports": ["expected"]},
+    ]}]
+    assessment = {
+        "status": "pass",
+        "evidence": [{"report_id": "report-4", "block_id": "result-1",
+                      "quote": "expect: 2.6042 mm", "supports": ["expected"]}],
+    }
+
+    with pytest.raises(SkillFailure, match="not verified in evidence batches"):
+        _reuse_verified_html_citations(observations, assessment)
+
+
 def test_html_quote_compaction_keeps_ordered_exact_line_excerpts() -> None:
     quote = "\n".join(
         [
@@ -680,7 +776,7 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
                 }
                 for observation in observations
                 for citation in observation["evidence"]
-            ]
+            ][:1]
         else:
             evidence = [
                 {
@@ -730,6 +826,110 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
         citation["quote"].startswith("Result ")
         for citation in assessment["evidence"]
     )
+    assert {citation["report_id"] for citation in assessment["evidence"]} == {
+        "report-1", "report-2"
+    }
+    assert traces[-1]["citation_recovery"]["appended_report_ids"] == ["report-2"]
+
+
+def test_invalid_html_skill_output_degrades_to_manual_without_claiming_reviewed_ids(
+    monkeypatch,
+) -> None:
+    skill_input = {
+        "alm_run_status": "Passed",
+        "steps": [{
+            "review_step": 7,
+            "automation_release": {"status": "disabled"},
+            "reports": [
+                {"report_id": "report-4", "blocks": [
+                    {"block_id": "result-16", "text": "expect: 2.6781 mm"}
+                ]}
+            ],
+        }],
+    }
+    ctx = ReviewContext(
+        ai_config=AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content={},
+        evidence_config=None,
+        equipment_enabled=False,
+    )
+    monkeypatch.setattr(
+        "app.services.reviews.skill_runner.run",
+        lambda *_args, **_kwargs: {
+            "skill_id": "html-evidence-review",
+            "status": "failed",
+            "ai_calls": 2,
+            "failure_kind": "invalid_output",
+            "error": "HTML evidence Skill cited text outside the supplied report block.",
+        },
+    )
+
+    trace, assessment = _run_html_review_skill(
+        ctx, skill_input, assessment_validator=_validate_html_assessment
+    )
+
+    assert trace["manual_fallback"] == "invalid_output"
+    assert trace["status"] == "failed"
+    assert assessment["status"] == "manual"
+    assert assessment["evidence"] == []
+    assert assessment["reviewed_report_ids"] == []
+
+
+def test_html_service_error_is_not_hidden_as_manual(monkeypatch) -> None:
+    ctx = ReviewContext(
+        ai_config=AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content={},
+        evidence_config=None,
+        equipment_enabled=False,
+    )
+    monkeypatch.setattr(
+        "app.services.reviews.skill_runner.run",
+        lambda *_args, **_kwargs: {
+            "skill_id": "html-evidence-review", "status": "failed", "ai_calls": 1,
+            "retryable": True, "error": "HTTP 503 Service Unavailable",
+        },
+    )
+
+    with pytest.raises(SkillFailure, match="HTTP 503"):
+        _run_html_review_skill(
+            ctx, {"steps": [{"review_step": 1}]},
+            assessment_validator=_validate_html_assessment,
+        )
+
+
+def test_invalid_html_evidence_batch_stops_before_final_and_is_manual(monkeypatch) -> None:
+    skill_input = {
+        "alm_run_status": "Passed", "review_mode": "final",
+        "steps": [{
+            "review_step": 7,
+            "automation_release": {"status": "disabled"},
+            "reports": [{
+                "report_id": "report-4", "source_path": "report-4.html",
+                "blocks": [
+                    {"block_id": f"block-{index}", "text": "x" * 20000}
+                    for index in range(2)
+                ],
+            }],
+        }],
+    }
+    calls = []
+
+    def failed_batch(_ctx, request, *, assessment_validator):
+        del assessment_validator
+        calls.append(request["review_mode"])
+        return (
+            {"status": "failed", "manual_fallback": "invalid_output", "ai_calls": 2},
+            _manual_html_assessment(request),
+        )
+
+    monkeypatch.setattr("app.services.reviews._run_html_review_skill", failed_batch)
+
+    traces, assessment = _run_html_review_batches(None, skill_input)  # type: ignore[arg-type]
+
+    assert calls == ["evidence_batch"]
+    assert len(traces) == 1
+    assert assessment["status"] == "manual"
+    assert assessment["evidence"] == []
 
 
 def test_html_ai_verdict_must_cite_every_supplied_report() -> None:

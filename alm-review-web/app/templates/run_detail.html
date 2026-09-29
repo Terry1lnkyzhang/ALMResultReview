@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'budget_exhausted': '配额耗尽·未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
+{% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'invalid_image': '图像损坏·需复核', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'budget_exhausted': '配额耗尽·未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
 {% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '确认警告已处理'} %}
 {% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
 {% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
@@ -78,7 +78,9 @@
     {% elif test_location_resolution.status == 'history_unknown' %}
       <h2>执行时配置未知</h2><p>该运行早于历史基线，不能用当前配置替代当时信息。</p>
     {% elif test_location_resolution.status == 'retired' %}
-      <h2>执行时位置已退役</h2><p>此执行时间不在任何有效配置区间内。</p>
+      <h2>执行时无有效位置配置</h2><p>此执行时间不在任何有效配置区间内。</p>
+    {% elif test_location_resolution.status == 'ambiguous' %}
+      <h2>执行时位置历史不唯一</h2><p>多个配置版本在该执行时间生效，需要核对历史数据。</p>
     {% elif test_location_resolution.status == 'missing_execution_time' %}
       <h2>缺少执行时间</h2><p>无法选择对应的历史位置配置。</p>
     {% elif test_location_resolution.status == 'unavailable' %}
@@ -129,6 +131,21 @@
 </section>
 {% endif %}
 
+{% if superseded_qualification %}
+<section class="review-advisory review-advisory-detail superseded-manual-advisory" aria-label="历史人工合格裁决已失效">
+  <div>
+    <p class="eyebrow">历史人工裁决</p>
+    <h2>之前人工确认合格，因 ALM 源版本变化已失效</h2>
+    <p>原裁决仅对版本 #{{ superseded_qualification.previous_revision }} 生效；当前版本 #{{ superseded_qualification.current_revision }} 需要重新评审或重新人工裁决。原记录仍保留，并非人工主动撤销。</p>
+    <p><strong>上次裁决：{{ decision_labels.get(superseded_qualification.decision.decision, superseded_qualification.decision.decision) }}</strong> · {{ superseded_qualification.decision.operator }} · {{ superseded_qualification.decision_at.strftime('%Y-%m-%d %H:%M') if superseded_qualification.decision_at else '-' }}</p>
+    <p>上次人工理由：{{ superseded_qualification.decision.reason }}</p>
+  </div>
+  <div class="review-advisory-reasons" aria-label="ALM 版本变化字段">
+    {% for field in superseded_qualification.changed_fields %}<span>{{ field }}</span>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if review.result %}
 <section class="review-band">
   <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
@@ -173,6 +190,11 @@
       <div class="routing-step-body">
         <p>{{ location_review.get('reason') or '未记录校验原因。' }}</p>
         <dl><dt>父层级</dt><dd><code>{{ location_review.get('parent_name') or '-' }}</code><small>{{ location_review.get('folder_path') or '-' }}</small></dd></dl>
+        {% if location_review.get('execution_at') %}<dl><dt>执行时间</dt><dd>{{ location_review.get('execution_at') }}（应用时区）</dd></dl>{% endif %}
+        {% if location_review.get('selected_version') %}
+        {% set location_version_audit = location_review.get('selected_version') %}
+        <dl><dt>历史版本</dt><dd>#{{ location_version_audit.get('id') }} · {{ location_version_audit.get('valid_from') }} 至 {{ location_version_audit.get('valid_to') or '现在' }}<small>按执行时间选取的配置，不是当前配置</small></dd></dl>
+        {% endif %}
         {% if location_review.get('selected_config') %}
         {% set config = location_review.get('selected_config') %}
         <dl><dt>配置记录</dt><dd><strong>{{ config.get('item') }}</strong><small>Product: {{ config.get('product') or '-' }} · DMS: {{ config.get('dms_version') or '-' }} / {{ config.get('dms_coverage') or '-' }} · Couch: {{ config.get('couch') or '-' }} · Computer: {{ config.get('computer') or '-' }}</small></dd></dl>
@@ -250,6 +272,7 @@
     <article>
       <header><strong>步骤 {{ step_review.get('review_step') }}</strong><span>{{ 'ALM 附件' if evidence.get('source_kind') == 'alm_attachment' else '网络路径' }}</span><i>{{ review_status_labels.get(evidence.get('status'), evidence.get('status')) }}</i></header>
       <code>{{ evidence.get('source_path') }}</code>
+      {% if evidence.get('corrupt_images') %}<p>未送交 AI 的损坏图像：{{ evidence.get('corrupt_images')|join('、') }}</p>{% endif %}
       {% for image in evidence.get('images', []) %}<dl><div><dt>文件</dt><dd>{{ image.get('name') }}{% if image.get('transport_optimized') %}<small>AI 传输已优化</small>{% endif %}</dd></div><div><dt>尺寸</dt><dd>{{ image.get('width') or '-' }} × {{ image.get('height') or '-' }}{% if image.get('original') %}<small>原始 {{ image.get('original').get('width') }} × {{ image.get('original').get('height') }}</small>{% endif %}</dd></div><div><dt>大小</dt><dd>{{ image.get('size_bytes') or 0 }} bytes{% if image.get('original') %}<small>原始 {{ image.get('original').get('size_bytes') }} bytes</small>{% endif %}</dd></div><div><dt>SHA-256</dt><dd class="hash">{{ image.get('sha256') }}</dd></div></dl>{% endfor %}
     </article>
     {% endfor %}{% endfor %}

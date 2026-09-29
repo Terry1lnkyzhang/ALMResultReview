@@ -1,13 +1,22 @@
-import pytest
+from datetime import datetime
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from app.database import Base
+from app.models import TestLocationIdentity as LocationIdentity
+from app.models import TestLocationVersion as LocationVersion
 from app.services.location_review import (
     LocationConfig,
     assess_location_config,
+    assess_location_history,
     fallback_location_skill_output,
     location_key,
     parent_name,
     validate_location_skill_output,
 )
+from app.services.test_locations import TEST_LOCATION_TABLE, resolve_test_location_at
 
 
 def config(
@@ -194,3 +203,149 @@ def test_location_fallback_rejects_a_match_against_an_empty_field() -> None:
     validate_location_skill_output(skill_input, fallback)
     assert fallback["status"] == "fail"
     assert fallback["comparisons"][0]["status"] == "mismatched"
+
+
+def test_run_157322_uses_bay17_version_effective_at_execution_not_current() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("ATTACH DATABASE ':memory:' AS atframeworkdb")
+        Base.metadata.create_all(connection)
+        TEST_LOCATION_TABLE.create(connection)
+        with Session(bind=connection) as db:
+            item = "SY Bay17(CHESS-SCIM-0009)"
+            db.execute(
+                TEST_LOCATION_TABLE.insert().values(
+                    Item=item,
+                    Product="Tenara",
+                    Version="V6",
+                    Collimation="4cm",
+                    Platform="Noah",
+                    SystemConfig="CT 5300/Incisive CT G4 Prem",
+                )
+            )
+            identity = LocationIdentity(current_item=item)
+            db.add(identity)
+            db.flush()
+            db.add_all(
+                [
+                    LocationVersion(
+                        location_id=identity.id,
+                        item=item,
+                        product="Tenara",
+                        version="V6",
+                        collimation="4cm",
+                        platform="Noah",
+                        system_config=computer,
+                        valid_from=start,
+                        valid_to=end,
+                        operation="update",
+                    )
+                    for computer, start, end in (
+                        (
+                            "CT Tenara G5 Prem",
+                            datetime(2026, 9, 16, 15, 39, 30),
+                            datetime(2026, 9, 25, 0, 2, 22),
+                        ),
+                        (
+                            "CT 5300/Incisive CT G4 Prem",
+                            datetime(2026, 9, 25, 0, 2, 22),
+                            None,
+                        ),
+                    )
+                ]
+            )
+            db.commit()
+            folder = "Testing / Zhao Yize / 5.1 PC-CT Tenara G5 Prem+ V6 4cm DMS"
+
+            result = assess_location_history(
+                db, "CHESS-SCIM-0009", folder, datetime(2026, 9, 20, 5, 12, 8)
+            )
+            assert result["status"] == "ready"
+            assert result["execution_at"] == "2026-09-20 10:12:08"
+            assert result["selected_config"]["computer"] == "CT Tenara G5 Prem"
+            assert result["selected_version"]["valid_to"] == "2026-09-25 00:02:22"
+            assert resolve_test_location_at(
+                db, "CHESS-SCIM-0009", datetime(2026, 9, 20, 10, 12, 8)
+            ).version.id == result["selected_version"]["id"]
+
+            after_change = assess_location_history(
+                db, "CHESS-SCIM-0009", folder, datetime(2026, 9, 25, 0, 0)
+            )
+            assert after_change["selected_config"]["computer"] == (
+                "CT 5300/Incisive CT G4 Prem"
+            )
+            unknown = assess_location_history(
+                db, "CHESS-SCIM-0009", folder, datetime(2026, 9, 14)
+            )
+            assert unknown["status"] == "manual"
+            assert unknown["failure_code"] == "location_history_unknown"
+            assert unknown["selected_config"] is None
+
+            missing_time = assess_location_history(db, "CHESS-SCIM-0009", folder, None)
+            assert missing_time["status"] == "manual"
+            assert missing_time["failure_code"] == "location_execution_time_missing"
+            assert missing_time["selected_config"] is None
+
+            missing_location = assess_location_history(
+                db, "CHESS-UNKNOWN", folder, datetime(2026, 9, 20, 5, 12, 8)
+            )
+            assert missing_location["status"] == "fail"
+            assert missing_location["failure_code"] == "location_config_not_found"
+            unknown_without_time = assess_location_history(
+                db, "CHESS-UNKNOWN", folder, None
+            )
+            assert unknown_without_time["status"] == "fail"
+
+            new_item = "SY Bay18(CHESS-SCIM-0010)"
+            db.execute(TEST_LOCATION_TABLE.insert().values(Item=new_item, Product="Tenara"))
+            db.commit()
+            no_history = assess_location_history(
+                db, "CHESS-SCIM-0010", folder, datetime(2026, 9, 20, 5, 12, 8)
+            )
+            assert no_history["status"] == "manual"
+            assert no_history["failure_code"] == "location_history_unknown"
+            assert no_history["selected_config"] is None
+
+            # Historical executions remain reviewable after retirement, even
+            # when the current AT Framework row has been removed.
+            db.execute(TEST_LOCATION_TABLE.delete().where(TEST_LOCATION_TABLE.c.Item == item))
+            db.commit()
+            retired_location = assess_location_history(
+                db, "CHESS-SCIM-0009", folder, datetime(2026, 9, 20, 5, 12, 8)
+            )
+            assert retired_location["selected_config"]["computer"] == (
+                "CT Tenara G5 Prem"
+            )
+            assert assess_location_history(db, "CHESS-SCIM-0009", folder, None)[
+                "status"
+            ] == "manual"
+
+
+def test_location_history_rejects_overlapping_aliases() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        for item in ("SY Bay17(CHESS-SCIM-0009)", "Other Bay(CHESS-SCIM-0009)"):
+            identity = LocationIdentity(current_item=item)
+            db.add(identity)
+            db.flush()
+            db.add(
+                LocationVersion(
+                    location_id=identity.id,
+                    item=item,
+                    valid_from=datetime(2026, 9, 1),
+                    operation="create",
+                )
+            )
+        db.commit()
+        resolution = resolve_test_location_at(
+            db, "CHESS-SCIM-0009", datetime(2026, 9, 20)
+        )
+        assert resolution.status == "ambiguous"
+        assert resolution.version is None
+        assert len(resolution.candidates) == 2
+        assessment = assess_location_history(
+            db, "CHESS-SCIM-0009", "Testing / 0. Common Config", datetime(2026, 9, 20)
+        )
+        assert assessment["status"] == "fail"
+        assert assessment["candidate_count"] == 2

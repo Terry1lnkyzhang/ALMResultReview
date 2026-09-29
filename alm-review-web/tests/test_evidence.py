@@ -86,6 +86,26 @@ def test_extracts_unc_path_after_referred_to_prefix() -> None:
     assert [item["raw"] for item in paths] == [path]
 
 
+def test_extracts_unc_path_with_spaces_directly_after_referred_to() -> None:
+    root = r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Kylin\Collab live"
+    path = root + r"\69302\Step2"
+
+    for prefix in ("refered to", "referred to", "refer to", "refers to"):
+        actual = "Screenshot " + prefix + path + "\n\nNext step recorded."
+        paths = extract_paths(actual)
+
+        assert [item["raw"] for item in paths] == [path]
+        assert validate_network_evidence_path(paths[0]["raw"], root) == "allowed"
+
+
+def test_adjacent_unc_with_spaces_still_rejects_parent_traversal() -> None:
+    root = r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Kylin\Collab live"
+    paths = extract_paths("Screenshot refered to" + root + r"\..\other\Step2")
+
+    assert len(paths) == 1
+    assert validate_network_evidence_path(paths[0]["raw"], root) == "outside_root"
+
+
 def test_repeated_path_with_spaces_does_not_leak_a_truncated_prefix() -> None:
     path = (
         r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Earth"

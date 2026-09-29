@@ -96,6 +96,21 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert 'include_manually_resolved_temporary=(status == "temporary_evidence")' in web_source
 
 
+def test_run_detail_explains_superseded_manual_qualification() -> None:
+    source, _, _ = templates.env.loader.get_source(
+        templates.env, "run_detail.html"
+    )
+
+    assert "superseded_qualification" in source
+    assert "因 ALM 源版本变化已失效" in source
+    assert "上次人工理由：{{ superseded_qualification.decision.reason }}" in source
+    assert "原记录仍保留，并非人工主动撤销" in source
+    notice = source.split("superseded-manual-advisory", maxsplit=1)[1].split(
+        "</section>", maxsplit=1
+    )[0]
+    assert "manual-decision/revoke" not in notice
+
+
 def test_run_detail_exposes_guarded_local_delete_action() -> None:
     template = templates.get_template("run_detail.html")
     source, _, _ = templates.env.loader.get_source(

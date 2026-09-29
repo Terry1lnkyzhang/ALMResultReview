@@ -213,20 +213,39 @@ def unchanged_run_check(
     db: Session,
     workspace_id: int,
 ) -> Callable[[dict[str, Any]], bool]:
-    """Skip ALM runs whose stored last-modified stamp already matches the server."""
+    """Skip only when both ALM's modified stamp and execution time match."""
 
     def is_unchanged(run: dict[str, Any]) -> bool:
         alm_run_id = _integer(run.get("id"))
         last_modified = _date_time(run.get("last-modified"))
-        if alm_run_id is None or last_modified is None:
+        # A missing header is not proof that the Run did not change. In particular,
+        # ALM may update execution time without advancing last-modified.
+        if (
+            alm_run_id is None
+            or last_modified is None
+            or "execution-date" not in run
+            or "execution-time" not in run
+        ):
+            return False
+        execution_at = _date_time(run.get("execution-date"), run.get("execution-time"))
+        if execution_at is None:
             return False
         row = db.execute(
-            select(AlmRun.alm_last_modified, AlmRun.current_revision_id).where(
+            select(
+                AlmRun.alm_last_modified,
+                AlmRun.current_revision_id,
+                AlmRun.execution_at,
+            ).where(
                 AlmRun.workspace_id == workspace_id,
                 AlmRun.alm_run_id == alm_run_id,
             )
         ).first()
-        return bool(row and row[1] is not None and row[0] == last_modified)
+        return bool(
+            row
+            and row[1] is not None
+            and row[0] == last_modified
+            and row[2] == execution_at
+        )
 
     return is_unchanged
 

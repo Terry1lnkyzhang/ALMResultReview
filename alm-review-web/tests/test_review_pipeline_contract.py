@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -14,7 +15,10 @@ from app.models import (
     ReviewJob,
     RunRevision,
 )
+from app.models import TestLocationIdentity as LocationIdentity
+from app.models import TestLocationVersion as LocationVersion
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
+from app.services.location_review import assess_location_history
 from app.services.review_pipeline import (
     STAGE_GATES,
     STAGE_ORDER,
@@ -23,6 +27,7 @@ from app.services.review_pipeline import (
 )
 from app.services.reviews import process_job
 from app.services.skill_runner import discover_skills, load_skill
+from app.services.test_locations import TEST_LOCATION_TABLE
 
 EXPECTED_STAGE_ORDER = [
     "routing",
@@ -114,6 +119,36 @@ def skill_response(request: dict[str, Any]) -> StubResponse:
                     "status": "not_applicable",
                     "comparisons": [],
                     "reason": "父层级没有声明具体配置。",
+                }
+            )
+        if payload["parent_name"].startswith("5.1 PC-"):
+            computer = payload["location_config"]["computer"]
+            matched = computer == "CT Tenara G5 Prem"
+            return StubResponse(
+                {
+                    "has_configuration_claim": True,
+                    "status": "pass" if matched else "fail",
+                    "comparisons": [
+                        {
+                            "field": "computer",
+                            "parent_text": "CT Tenara G5 Prem",
+                            "status": "matched" if matched else "mismatched",
+                            "reason": "Computer configuration checked against the folder.",
+                        },
+                        {
+                            "field": "dms_version",
+                            "parent_text": "V6",
+                            "status": "matched",
+                            "reason": "DMS version matches.",
+                        },
+                        {
+                            "field": "dms_coverage",
+                            "parent_text": "4cm",
+                            "status": "matched",
+                            "reason": "DMS coverage matches.",
+                        },
+                    ],
+                    "reason": "Computer configuration checked against the folder.",
                 }
             )
         return StubResponse(
@@ -212,11 +247,19 @@ def configure_review(db: Session) -> None:
     db.commit()
 
 
-def add_job(db: Session, *, actual: str) -> ReviewJob:
+def add_job(
+    db: Session,
+    *,
+    actual: str,
+    location: str = "",
+    folder_path: str = "",
+    execution_at: datetime | None = None,
+) -> ReviewJob:
     snapshot = {
         "run": {
             "id": "42",
             "status": "Passed",
+            "location": location,
             "execution-date": "2026-08-01",
             "execution-time": "10:30:00",
             "steps": [
@@ -231,11 +274,14 @@ def add_job(db: Session, *, actual: str) -> ReviewJob:
                     "execution-time": "10:31:00",
                 }
             ],
-        }
+        },
+        "folder": {"path": folder_path},
     }
     run = AlmRun(
         run_id=42,
         run_status="Passed",
+        execution_location=location,
+        execution_at=execution_at,
         source_hash="a" * 64,
         review_hash="b" * 64,
         raw_json=json.dumps(snapshot),
@@ -508,3 +554,77 @@ def test_parent_configuration_mismatch_fails_the_run(monkeypatch) -> None:
     )
     assert verdict == "unqualified"
     assert criteria["location_consistency"]["status"] == "fail"
+
+
+def test_pipeline_compares_the_historical_location_effective_at_execution(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("ATTACH DATABASE ':memory:' AS atframeworkdb")
+        Base.metadata.create_all(connection)
+        TEST_LOCATION_TABLE.create(connection)
+        with Session(bind=connection) as db:
+            configure_review(db)
+            item = "SY Bay17(CHESS-SCIM-0009)"
+            db.execute(
+                TEST_LOCATION_TABLE.insert().values(
+                    Item=item, SystemConfig="CT 5300/Incisive CT G4 Prem"
+                )
+            )
+            identity = LocationIdentity(current_item=item)
+            db.add(identity)
+            db.flush()
+            db.add_all(
+                [
+                    LocationVersion(
+                        location_id=identity.id,
+                        item=item,
+                        product="Tenara",
+                        version="V6",
+                        collimation="4cm",
+                        platform="Noah",
+                        system_config=computer,
+                        valid_from=start,
+                        valid_to=end,
+                        operation="update",
+                    )
+                    for computer, start, end in (
+                        (
+                            "CT Tenara G5 Prem",
+                            datetime(2026, 9, 16, 15, 39, 30),
+                            datetime(2026, 9, 25, 0, 2, 22),
+                        ),
+                        (
+                            "CT 5300/Incisive CT G4 Prem",
+                            datetime(2026, 9, 25, 0, 2, 22),
+                            None,
+                        ),
+                    )
+                ]
+            )
+            db.commit()
+            job = add_job(
+                db,
+                actual="The result was recorded in the test report.",
+                location="CHESS-SCIM-0009",
+                folder_path="Testing / 5.1 PC-CT Tenara G5 Prem+ V6 4cm DMS",
+                execution_at=datetime(2026, 9, 20, 5, 12, 8),
+            )
+            monkeypatch.setattr(
+                "app.services.reviews.load_location_assessment",
+                assess_location_history,
+            )
+            monkeypatch.setattr(
+                "app.services.reviews.httpx.post",
+                lambda *_args, **kwargs: skill_response(kwargs["json"]),
+            )
+
+            result = process_job(db, job)
+            assessment = json.loads(result.pipeline_json)["stages"]["location_review"]["assessment"]
+            assert result.verdict == "qualified", (
+                result.issue_summary,
+                assessment,
+                json.loads(result.criteria_json),
+            )
+            assert assessment["status"] == "pass"
+            assert assessment["selected_config"]["computer"] == "CT Tenara G5 Prem"
+            assert assessment["selected_version"]["valid_to"] == "2026-09-25 00:02:22"

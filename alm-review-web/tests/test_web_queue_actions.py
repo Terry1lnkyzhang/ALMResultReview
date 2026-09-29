@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from fastapi import Request
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
-from app.database import Base
+from app.database import Base, get_db
 from app.models import (
     AiConfig,
     AlmRun,
@@ -35,6 +38,7 @@ from app.web import (
     retry_failed_reviews,
     review_progress,
     review_run_now,
+    router,
     save_configuration,
     sync_alm,
     update_workspace_queue,
@@ -73,13 +77,88 @@ def test_sync_action_only_creates_a_database_job() -> None:
         )
         db.commit()
 
-        response = sync_alm(db)
+        response = sync_alm(db, full_refresh=False)
 
         job = db.scalar(select(SyncJob))
         assert response.status_code == 303
         assert job is not None
         assert job.status == "queued"
         assert job.requested_by == "web"
+        assert not job.full_refresh
+
+
+@pytest.mark.parametrize(
+    ("form_fields", "expected_full_refresh"),
+    [({}, False), ({"full_refresh": "true"}, True)],
+)
+def test_sync_form_queues_the_requested_refresh_mode(
+    form_fields: dict[str, str], expected_full_refresh: bool
+) -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(
+            SyncConfig(
+                workspace_id=workspace.id,
+                name="Project A",
+                server_url="http://alm.example.test",
+                domain="domain",
+                project="project",
+                folder_id=5172,
+            )
+        )
+        db.commit()
+        workspace_id = workspace.id
+
+    def override_get_db():
+        with Session(engine) as db:
+            yield db
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.post(
+            "/actions/sync-alm",
+            data={"workspace_id": str(workspace_id), **form_fields},
+        )
+
+    with Session(engine) as db:
+        job = db.scalar(select(SyncJob))
+        assert response.status_code == 303
+        assert job is not None
+        assert job.status == "queued"
+        assert job.requested_by == "web"
+        assert job.full_refresh is expected_full_refresh
+
+
+def test_full_resync_does_not_claim_to_upgrade_an_existing_incremental_job() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(SyncConfig(
+            name="Project A",
+            server_url="http://alm.example.test",
+            domain="domain",
+            project="project",
+            folder_id=5172,
+        ))
+        db.commit()
+
+        sync_alm(db, full_refresh=False)
+        response = sync_alm(db, full_refresh=True)
+
+        jobs = db.scalars(select(SyncJob)).all()
+        assert len(jobs) == 1
+        assert not jobs[0].full_refresh
+        assert "Full%20resync%20was%20not%20queued" in response.headers["location"]
 
 
 def test_review_action_only_creates_a_database_job() -> None:

@@ -752,6 +752,9 @@ class SkillRunner:
                     timeout=timeout_seconds,
                 )
                 raw_content = _response_content(response)
+                trace["finish_reason"] = response.json()["choices"][0].get(
+                    "finish_reason"
+                )
                 validated_output: dict[str, Any] | None = None
                 try:
                     validated_output = _validated_output(
@@ -766,6 +769,7 @@ class SkillRunner:
                     detail = str(exc)
                     repairs.append(detail[:300])
                     if attempt == MAX_OUTPUT_REPAIR_ATTEMPTS:
+                        trace["failure_kind"] = "invalid_output"
                         if output_fallback is None or validated_output is None:
                             raise SkillFailure(detail, retryable=False) from exc
                         validated_output = output_fallback(
@@ -775,6 +779,9 @@ class SkillRunner:
                         )
                         if output_validator is not None:
                             output_validator(validated_input, validated_output)
+                        # A validated fallback completed successfully; reserve
+                        # failure_kind for outputs that could not be recovered.
+                        trace.pop("failure_kind", None)
                         trace["fallback"] = detail[:300]
                         break
                     messages = [

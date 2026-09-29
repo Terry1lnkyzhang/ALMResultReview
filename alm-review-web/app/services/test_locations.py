@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,6 +13,15 @@ from app.config import get_settings
 from app.models import TestLocationIdentity, TestLocationVersion, utcnow
 
 ATFRAMEWORK_SCHEMA = "atframeworkdb"
+_LOCATION_ALIAS_RE = re.compile(r"\((?P<identifier>[^()]*)\)\s*$")
+
+
+def location_key(value: str) -> str:
+    normalized = value.strip()
+    match = _LOCATION_ALIAS_RE.search(normalized)
+    if match is not None:
+        normalized = match.group("identifier").strip()
+    return normalized.casefold()
 
 _metadata = MetaData()
 TEST_LOCATION_TABLE = Table(
@@ -91,6 +101,8 @@ class TestLocationHistory:
 class TestLocationResolution:
     status: str
     version: TestLocationVersion | None
+    candidates: tuple[TestLocationVersion, ...] = ()
+    known_alias: bool = False
 
 
 def current_business_time() -> datetime:
@@ -585,30 +597,35 @@ def resolve_test_location_at(
     item: str,
     execution_at: datetime | None,
 ) -> TestLocationResolution:
-    if execution_at is None:
-        return TestLocationResolution(status="missing_execution_time", version=None)
-    synchronize_test_location_baselines(db)
-    version = db.scalar(
-        select(TestLocationVersion)
-        .where(
-            func.lower(TestLocationVersion.item) == item.strip().casefold(),
-            TestLocationVersion.valid_from <= execution_at,
-            or_(
-                TestLocationVersion.valid_to.is_(None),
-                execution_at < TestLocationVersion.valid_to,
-            ),
+    # ALM supplies the code; the history stores a full Item such as
+    # "SY Bay17(CHESS-SCIM-0009)". Resolve the same alias used by the review.
+    key = location_key(item)
+    versions = tuple(
+        version
+        for version in db.scalars(
+            select(TestLocationVersion).order_by(
+                TestLocationVersion.valid_from.desc(), TestLocationVersion.id.desc()
+            )
         )
-        .order_by(TestLocationVersion.valid_from.desc(), TestLocationVersion.id.desc())
-        .limit(1)
+        if key and location_key(version.item) == key
     )
-    if version is not None:
-        return TestLocationResolution(status="matched", version=version)
-    known_version = db.scalar(
-        select(TestLocationVersion)
-        .where(func.lower(TestLocationVersion.item) == item.strip().casefold())
-        .order_by(TestLocationVersion.valid_from.desc(), TestLocationVersion.id.desc())
-        .limit(1)
+    if execution_at is None:
+        return TestLocationResolution(
+            status="missing_execution_time", version=None, known_alias=bool(versions)
+        )
+    candidates = tuple(
+        version
+        for version in versions
+        if version.valid_from <= execution_at
+        and (version.valid_to is None or execution_at < version.valid_to)
     )
+    if len(candidates) > 1:
+        return TestLocationResolution(status="ambiguous", version=None, candidates=candidates)
+    if candidates:
+        return TestLocationResolution(
+            status="matched", version=candidates[0], candidates=candidates
+        )
+    known_version = versions[0] if versions else None
     if (
         known_version is not None
         and known_version.valid_to is not None

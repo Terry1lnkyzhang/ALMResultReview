@@ -35,6 +35,7 @@ IMAGE_EVIDENCE_STATUSES = frozenset(
         "root_not_configured",
         "no_images",
         "no_usable_images",
+        "invalid_image",
         "no_matching_images",
         "ambiguous_step_mapping",
         "transport_too_large",
@@ -46,9 +47,15 @@ SILENT_IMAGE_EVIDENCE_STATUSES = frozenset(
     {"ready", "not_unc", "root_not_configured"}
 )
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"test-png"
-JPEG_BYTES = b"\xff\xd8\xff" + b"test-jpeg"
-WEBP_BYTES = b"RIFF\x04\x00\x00\x00WEBP" + b"test-webp"
+def image_bytes(format_name: str) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(output, format=format_name)
+    return output.getvalue()
+
+
+PNG_BYTES = image_bytes("PNG")
+JPEG_BYTES = image_bytes("JPEG")
+WEBP_BYTES = image_bytes("WEBP")
 
 
 def write_image(path: Path, content: bytes = PNG_BYTES) -> None:
@@ -521,6 +528,54 @@ def test_alm_attachment_image_is_prepared_for_visual_review() -> None:
     assert attachment_result.status == "ready"
     assert attachment_result.images[0].relative_name == "37411-Step1.JPG"
     assert _image_review_batches(prepared)[0][0][1] == "ALM attachment:36083"
+
+
+def test_truncated_alm_attachment_is_never_sent_to_visual_ai() -> None:
+    output = io.BytesIO()
+    Image.effect_noise((128, 128), 32).convert("RGB").save(output, format="PNG")
+    damaged = output.getvalue()[:-256]
+    content = {
+        "steps": [
+            {
+                "review_step": 4,
+                "order": "4",
+                "attachment_contents": [
+                    {
+                        "attachment_id": "36441",
+                        "name": "step4 Capture.PNG",
+                        "mime_type": "image/png",
+                        "sha256": hashlib.sha256(damaged).hexdigest(),
+                        "data_url": "data:image/png;base64,"
+                        + base64.b64encode(damaged).decode("ascii"),
+                    }
+                ],
+                "evidence_profile": {
+                    "actual_paths": [],
+                    "routing": {"actions": ["review_attachment"]},
+                },
+            }
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content, EvidenceConfig(external_evidence_review_enabled=True)
+    )
+
+    result = prepared.results[4]["ALM attachment:36441"]
+    assert result.status == "invalid_image"
+    assert result.corrupt_images == ("step4 Capture.PNG",)
+    assert _image_review_batches(prepared) == []
+
+
+def test_corrupt_network_image_is_recorded_without_hiding_valid_images(tmp_path: Path) -> None:
+    write_image(tmp_path / "Step1-good.png")
+    write_image(tmp_path / "Step1-corrupt.png", PNG_BYTES[:20])
+
+    result = NetworkImageResolver(matching_step_numbers={1}).collect(tmp_path)
+
+    assert result.status == "ready"
+    assert [image.relative_name for image in result.images] == ["Step1-good.png"]
+    assert result.corrupt_images == ("Step1-corrupt.png",)
 
 
 def test_alm_step_order_takes_priority_over_internal_review_step(

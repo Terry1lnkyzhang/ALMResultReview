@@ -17,9 +17,12 @@ from app.services.reviews import (
     _completion_url,
     _image_review_batches,
     _image_review_stage,
+    _manual_html_assessment,
     _recalculate_result,
+    _run_image_review_skill,
     _run_text_semantic_skills,
 )
+from app.services.skill_runner import SkillFailure
 
 
 class IntentStubResponse:
@@ -1250,6 +1253,228 @@ def test_oversized_transport_evidence_requires_manual_review() -> None:
     )
 
 
+def test_truncated_attachment_is_audited_as_manual_not_a_failed_job() -> None:
+    source = "ALM attachment:36441"
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={
+            1: {
+                source: ImageEvidenceResult(
+                    status="invalid_image",
+                    corrupt_images=("step4 Capture.PNG",),
+                    source_kind="alm_attachment",
+                )
+            }
+        },
+    )
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(screenshot_required=True, attachment_declared=True),
+        EvidenceConfig(external_evidence_review_enabled=True),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["step_results"][0]["image_evidence"][0]["corrupt_images"] == [
+        "step4 Capture.PNG"
+    ]
+
+
+def test_mixed_valid_and_corrupt_network_images_cannot_be_auto_qualified() -> None:
+    source = r"\\server\approved\Step1"
+    image = ResolvedImage(
+        relative_name="Step1-valid.png",
+        media_type="image/png",
+        size_bytes=50,
+        sha256="a" * 64,
+        data_url="data:image/png;base64,AA==",
+    )
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={
+            1: {
+                source: ImageEvidenceResult(
+                    status="ready",
+                    images=(image,),
+                    corrupt_images=("Step1-corrupt.png",),
+                )
+            }
+        },
+    )
+    content = evidence_content(
+        paths=[{"raw": source, "kind": "folder_or_unknown"}], screenshot_required=True
+    )
+    content["steps"][0]["evidence_profile"]["routing"] = {
+        "actions": ["validate_path", "load_images"]
+    }
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        content,
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["step_results"][0]["image_evidence"][0]["corrupt_images"] == [
+        "Step1-corrupt.png"
+    ]
+
+
+@pytest.mark.parametrize("failure_mode", ["duplicate", "malformed"])
+def test_invalid_image_assessments_fall_back_to_manual_with_trace(
+    monkeypatch, failure_mode: str
+) -> None:
+    image = ResolvedImage(
+        relative_name="Step1.png",
+        media_type="image/png",
+        size_bytes=50,
+        sha256="a" * 64,
+        data_url="data:image/png;base64,AA==",
+    )
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={
+            1: {
+                "ALM attachment:1": ImageEvidenceResult(
+                    status="ready", images=(image,), source_kind="alm_attachment"
+                )
+            }
+        },
+    )
+    content = {
+        "run_status": "Passed",
+        "steps": [
+            {
+                "review_step": 1,
+                "status": "Passed",
+                "description": "Record a screenshot.",
+                "expected": "Screenshot supports the outcome.",
+                "actual": "Captured the screenshot.",
+            }
+        ],
+    }
+
+    def duplicate_response(*_args, **kwargs) -> IntentStubResponse:
+        if failure_mode == "malformed":
+            return IntentStubResponse('{"assessments":[{')
+        request = kwargs["json"]
+        input_data = json.loads(request["messages"][1]["content"][0]["text"])
+        media_id = input_data["steps"][0]["images"][0]["media_id"]
+        assessment = {
+            "review_step": 1,
+            "status": "pass",
+            "reason": "The image matches.",
+            "observed_media_ids": [media_id],
+        }
+        return IntentStubResponse(json.dumps({"assessments": [assessment, assessment]}))
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", duplicate_response)
+    ctx = ReviewContext(
+        ai_config=AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content=content,
+        evidence_config=None,
+        equipment_enabled=False,
+        text_result=text_review_result(),
+        evidence=prepared,
+    )
+
+    stage = _image_review_stage(ctx)
+
+    assert stage["ai_calls"] == 2
+    assert stage["manual_fallbacks"] == 1
+    assert stage["skills"][0]["failure_kind"] == "invalid_output"
+    assert stage["skills"][0]["status"] == "failed"
+    assert ctx.text_result["verdict"] == "needs_manual_review"
+
+
+def test_image_service_error_is_not_hidden_as_manual(monkeypatch) -> None:
+    image = ResolvedImage(
+        relative_name="Step1.png", media_type="image/png",
+        size_bytes=50, sha256="a" * 64, data_url="data:image/png;base64,AA==",
+    )
+    monkeypatch.setattr(
+        "app.services.reviews.skill_runner.run",
+        lambda *_args, **_kwargs: {
+            "status": "failed", "ai_calls": 1, "retryable": True,
+            "error": "HTTP 503 Service Unavailable",
+        },
+    )
+    content = {
+        "run_status": "Passed",
+        "steps": [{
+            "review_step": 1, "status": "Passed", "description": "Screenshot.",
+            "expected": "Pass.", "actual": "Screenshot attached.",
+        }],
+    }
+
+    with pytest.raises(SkillFailure, match="HTTP 503"):
+        _run_image_review_skill(
+            AiConfig(base_url="https://ai.example/v1", model_name="test"),
+            [(1, "ALM attachment:1", image)], content,
+        )
+
+
+def test_image_missing_media_id_is_repaired_before_accepting_the_step(monkeypatch) -> None:
+    images = [
+        ResolvedImage(
+            relative_name=f"Step1-{index}.png",
+            media_type="image/png",
+            size_bytes=50,
+            sha256=str(index) * 64,
+            data_url="data:image/png;base64,AA==",
+        )
+        for index in (1, 2)
+    ]
+    requests = []
+
+    def repaired_response(*_args, **kwargs) -> IntentStubResponse:
+        payload = kwargs["json"]
+        requests.append(payload)
+        step = json.loads(payload["messages"][1]["content"][0]["text"])["steps"][0]
+        media_ids = [item["media_id"] for item in step["images"]]
+        return IntentStubResponse(
+            json.dumps({
+                "assessments": [{
+                    "review_step": 1, "status": "pass",
+                    "reason": "The available images support the outcome.",
+                    "observed_media_ids": media_ids if len(requests) > 1 else media_ids[:1],
+                }]
+            })
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", repaired_response)
+    ctx = ReviewContext(
+        ai_config=AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content={
+            "run_status": "Passed",
+            "steps": [{
+                "review_step": 1, "status": "Passed", "description": "Capture both.",
+                "expected": "Both images support the outcome.", "actual": "Captured both.",
+            }],
+        },
+        evidence_config=None,
+        equipment_enabled=False,
+        text_result=text_review_result(),
+        evidence=PreparedImageEvidence(
+            external_review_enabled=True,
+            results={
+                1: {"ALM attachment:1": ImageEvidenceResult(
+                    status="ready", images=tuple(images), source_kind="alm_attachment"
+                )}
+            },
+        ),
+    )
+
+    stage = _image_review_stage(ctx)
+
+    assert stage["ai_calls"] == 2
+    assert stage["manual_fallbacks"] == 0
+    assert stage["skills"][0]["repairs"]
+    assert ctx.text_result["verdict"] == "qualified"
+
+
 @pytest.mark.parametrize("status", ["budget_exhausted", "not_checked"])
 def test_skipped_image_source_requires_manual_review(status: str) -> None:
     source_path = r"\\server\approved\Step8"
@@ -1511,6 +1736,38 @@ def test_continuous_html_reports_with_all_passed_results_are_qualified() -> None
         == "local_html_fallback"
     )
     assert guarded["step_results"][0]["html_evidence"][1]["block_count"] == 1
+
+
+def test_html_invalid_output_manual_fallback_cannot_auto_qualify() -> None:
+    report = r"\\server\approved\report_103197.html"
+    prepared = PreparedImageEvidence(
+        external_review_enabled=True,
+        results={},
+        html_results={
+            1: {report: HtmlEvidenceResult(
+                status="ready", blocks=(HtmlEvidenceBlock("summary", "Passed"),)
+            )}
+        },
+        html_assessments={
+            1: _manual_html_assessment({
+                "steps": [{
+                    "review_step": 1,
+                    "automation_release": {"status": "disabled"},
+                }]
+            })
+        },
+    )
+
+    guarded = _apply_capability_guards(
+        text_review_result(),
+        evidence_content(paths=[{"raw": report, "kind": "html"}]),
+        EvidenceConfig(allowed_network_root=r"\\server\approved"),
+        prepared,
+    )
+
+    assert guarded["verdict"] == "needs_manual_review"
+    assert guarded["criteria"]["automation_results"]["status"] == "manual"
+    assert guarded["step_results"][0]["html_ai_review"]["evidence"] == []
 
 
 def test_missing_html_report_suffix_is_unqualified() -> None:

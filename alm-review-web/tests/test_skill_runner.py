@@ -83,8 +83,8 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
         "alm-text-review": "1.7.0",
         "equipment-role": "1.4.1",
-        "html-evidence-review": "1.7.0",
-        "image-evidence-review": "1.3.0",
+        "html-evidence-review": "1.7.1",
+        "image-evidence-review": "1.3.1",
         "location-consistency": "1.0.0",
     }
 
@@ -103,7 +103,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.7.0"
+    assert html["version"] == "1.7.1"
     assert load_skill("html-evidence-review").max_tokens == 32768
 
 
@@ -314,6 +314,7 @@ def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) ->
     assert trace["status"] == "failed"
     assert trace["ai_calls"] == 2
     assert trace["retryable"] is False
+    assert trace["failure_kind"] == "invalid_output"
     assert len(trace["repairs"]) == 2
     assert "validation error" in trace["error"]
     assert "output" not in trace
@@ -394,6 +395,7 @@ def test_skill_runner_marks_client_errors_terminal_and_server_errors_retryable(
         assert trace["status"] == "failed"
         assert trace["ai_calls"] == 1
         assert trace["retryable"] is retryable
+        assert "failure_kind" not in trace
         assert "quota exceeded" in trace["error"]
 
 

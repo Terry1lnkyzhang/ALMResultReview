@@ -57,6 +57,7 @@ class ImageEvidenceResult:
     images: tuple[ResolvedImage, ...] = ()
     skipped_oversized: int = 0
     skipped_invalid: int = 0
+    corrupt_images: tuple[str, ...] = ()
     detail: str = ""
     source_kind: str = "approved_root"
 
@@ -221,7 +222,10 @@ def embedded_image(
         return None
     if not _has_valid_signature(content, media_type):
         return None
-    width, height = _image_dimensions(content, media_type)
+    dimensions = _decoded_dimensions(content, media_type)
+    if dimensions is None:
+        return None
+    width, height = dimensions
     return ResolvedImage(
         relative_name=name,
         media_type=media_type,
@@ -344,6 +348,7 @@ class NetworkImageResolver:
         images: list[ResolvedImage] = []
         skipped_oversized = 0
         skipped_invalid = 0
+        corrupt_images: list[str] = []
         total_bytes = 0
         try:
             for path, relative_name in supported_candidates:
@@ -365,8 +370,13 @@ class NetworkImageResolver:
                 if not _has_valid_signature(content, media_type):
                     skipped_invalid += 1
                     continue
+                dimensions = _decoded_dimensions(content, media_type)
+                if dimensions is None:
+                    skipped_invalid += 1
+                    corrupt_images.append(relative_name)
+                    continue
                 encoded = base64.b64encode(content).decode("ascii")
-                width, height = _image_dimensions(content, media_type)
+                width, height = dimensions
                 images.append(
                     ResolvedImage(
                         relative_name=relative_name,
@@ -384,12 +394,13 @@ class NetworkImageResolver:
         except OSError as exc:
             return ImageEvidenceResult(status="unavailable", detail=str(exc)[:300])
 
-        status = "ready" if images else "no_usable_images"
+        status = "ready" if images else "invalid_image" if corrupt_images else "no_usable_images"
         return ImageEvidenceResult(
             status=status,
             images=tuple(images),
             skipped_oversized=skipped_oversized,
             skipped_invalid=skipped_invalid,
+            corrupt_images=tuple(corrupt_images),
         )
 
     def _approved_source(self, value: str, allowed_root: str) -> Path | None:
@@ -499,50 +510,22 @@ def _has_valid_signature(content: bytes, media_type: str) -> bool:
     return False
 
 
-def _image_dimensions(content: bytes, media_type: str) -> tuple[int, int]:
-    if media_type == "image/png" and len(content) >= 24:
-        return (
-            int.from_bytes(content[16:20], "big"),
-            int.from_bytes(content[20:24], "big"),
-        )
-    if media_type != "image/jpeg":
-        return 0, 0
-    index = 2
-    start_of_frame = {
-        0xC0,
-        0xC1,
-        0xC2,
-        0xC3,
-        0xC5,
-        0xC6,
-        0xC7,
-        0xC9,
-        0xCA,
-        0xCB,
-        0xCD,
-        0xCE,
-        0xCF,
-    }
-    while index + 9 < len(content):
-        if content[index] != 0xFF:
-            index += 1
-            continue
-        marker = content[index + 1]
-        index += 2
-        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
-            continue
-        if index + 2 > len(content):
-            break
-        segment_length = int.from_bytes(content[index : index + 2], "big")
-        if segment_length < 2:
-            break
-        if marker in start_of_frame and index + 7 <= len(content):
-            return (
-                int.from_bytes(content[index + 5 : index + 7], "big"),
-                int.from_bytes(content[index + 3 : index + 5], "big"),
-            )
-        index += segment_length
-    return 0, 0
+def _decoded_dimensions(content: bytes, media_type: str) -> tuple[int, int] | None:
+    """Never send a partially decoded or dangerously large image to the AI endpoint."""
+    formats = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            if (
+                image.format != formats.get(media_type)
+                or image.width * image.height > _MAX_OPTIMIZATION_SOURCE_PIXELS
+                or image.width <= 0
+                or image.height <= 0
+            ):
+                return None
+            image.load()
+            return image.size
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
 
 
 def _image_step_numbers(relative_name: str) -> frozenset[int]:

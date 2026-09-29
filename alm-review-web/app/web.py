@@ -31,6 +31,7 @@ from app.models import (
     EquipmentImportHistory,
     EquipmentRegistry,
     EvidenceConfig,
+    ManualDecision,
     PromptVersion,
     ReviewJob,
     ReviewResult,
@@ -73,6 +74,7 @@ from app.services.review_status import (
     review_update_reasons,
 )
 from app.services.reviews import (
+    FORCE_QUALIFIED_DECISIONS,
     allowed_manual_decisions,
     current_review,
     revoke_manual_decision,
@@ -925,6 +927,17 @@ def dashboard(
         .order_by(desc(SyncJob.created_at), desc(SyncJob.id))
         .limit(1)
     )
+    dashboard_sync_config = db.scalar(
+        select(SyncConfig)
+        .where(
+            or_(
+                SyncConfig.workspace_id == current_workspace.id,
+                SyncConfig.workspace_id.is_(None),
+            )
+        )
+        .order_by(SyncConfig.workspace_id.is_(None), SyncConfig.id)
+        .limit(1)
+    )
     current_sync_job = _current_sync_job(db, current_workspace.id)
     active_sync_job = (
         current_sync_job
@@ -1000,6 +1013,8 @@ def dashboard(
             "review_update_reason_counts": review_update_reason_counts,
             "active_sync_job": active_sync_job,
             "latest_sync_job": latest_sync_job,
+            "dashboard_sync_config": dashboard_sync_config,
+            "app_timezone": get_settings().app_timezone,
             "run_sync_batch": run_sync_batch,
             "sync_display_at": sync_display_at,
             "ai_config": ai_config,
@@ -1404,6 +1419,65 @@ def run_index() -> RedirectResponse:
     return RedirectResponse("/", status_code=307)
 
 
+def _superseded_qualification(
+    db: Session,
+    run: AlmRun,
+    current_revision: RunRevision | None,
+    current_manual: ManualDecision | None,
+) -> dict[str, Any] | None:
+    if current_revision is None or current_manual is not None:
+        return None
+    previous = db.execute(
+        select(ManualDecision, RunRevision)
+        .join(RunRevision, RunRevision.id == ManualDecision.revision_id)
+        .where(
+            ManualDecision.run_id == run.run_id,
+            RunRevision.run_id == run.run_id,
+            RunRevision.revision_number < current_revision.revision_number,
+            ManualDecision.decision.in_(FORCE_QUALIFIED_DECISIONS),
+        )
+        .order_by(
+            desc(RunRevision.revision_number),
+            desc(ManualDecision.created_at),
+            desc(ManualDecision.id),
+        )
+        .limit(1)
+    ).first()
+    if previous is None:
+        return None
+    manual, old_revision = previous
+    try:
+        old = json.loads(old_revision.snapshot_json)
+        new = json.loads(current_revision.snapshot_json)
+    except (TypeError, json.JSONDecodeError):
+        old, new = {}, {}
+    old_run, new_run = old.get("run") or {}, new.get("run") or {}
+    changes = [
+        label
+        for field, label in (
+            ("execution-date", "执行日期"),
+            ("execution-time", "执行时间"),
+            ("location", "执行位置"),
+            ("status", "ALM 结果"),
+            ("duration", "运行时长"),
+            ("last-modified", "ALM 修改时间"),
+            ("ver-stamp", "ALM 版本戳"),
+        )
+        if old_run.get(field) != new_run.get(field)
+    ]
+    if (old.get("folder") or {}).get("path") != (new.get("folder") or {}).get("path"):
+        changes.append("测试文件夹")
+    if old_run.get("steps") != new_run.get("steps"):
+        changes.append("步骤或证据内容")
+    return {
+        "decision": manual,
+        "previous_revision": old_revision.revision_number,
+        "current_revision": current_revision.revision_number,
+        "decision_at": _to_app_timezone(manual.created_at),
+        "changed_fields": changes or ["其他 ALM 源字段"],
+    }
+
+
 @router.get("/runs/{run_id}")
 def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
@@ -1439,10 +1513,16 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     )
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
     steps = []
-    if run.current_revision_id:
-        current_revision = db.get(RunRevision, run.current_revision_id)
+    current_revision = (
+        db.get(RunRevision, run.current_revision_id)
+        if run.current_revision_id else None
+    )
+    superseded_qualification = _superseded_qualification(
+        db, run, current_revision, review.manual_decision
+    )
+    if current_revision is not None:
         source_fields = snapshot_step_fields(
-            current_revision.snapshot_json if current_revision else ""
+            current_revision.snapshot_json
         )
         stored_steps = db.scalars(
             select(RunStep)
@@ -1588,6 +1668,7 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "review_warnings": review_warnings,
             "review_completed_at": review_completed_at,
             "manual_decision_at": manual_decision_at,
+            "superseded_qualification": superseded_qualification,
             "revision_created_at": revision_created_at,
             "status_label": STATUS_LABELS[review.final_status],
             "message": request.query_params.get("message"),
@@ -1766,6 +1847,7 @@ async def import_docx(
 def sync_alm(
     db: Session = Depends(get_db),
     workspace_id: int | None = Form(None),
+    full_refresh: bool = Form(False),
 ):
     explicit_workspace = isinstance(workspace_id, int)
     workspace = resolve_workspace(db, workspace_id)
@@ -1773,12 +1855,22 @@ def sync_alm(
     config = workspace_sync_config(db, workspace.id)
     if config is None:
         return _redirect(redirect_path, "No ALM synchronization scope is configured.", "error")
-    result = queue_sync_job(db, requested_by="web", workspace_id=workspace.id)
-    message = (
-        f"ALM synchronization queued as job {result.job.id}."
-        if result.created
-        else f"ALM synchronization job {result.job.id} is already {result.job.status}."
+    result = queue_sync_job(
+        db,
+        requested_by="web",
+        workspace_id=workspace.id,
+        full_refresh=full_refresh,
     )
+    if result.created:
+        mode = "Full ALM resync" if full_refresh else "ALM synchronization"
+        message = f"{mode} queued as job {result.job.id}."
+    elif full_refresh and not result.job.full_refresh:
+        message = (
+            f"ALM synchronization job {result.job.id} is already {result.job.status}. "
+            "Full resync was not queued; wait for the existing job to finish."
+        )
+    else:
+        message = f"ALM synchronization job {result.job.id} is already {result.job.status}."
     return _redirect(redirect_path, message)
 
 

@@ -1,4 +1,6 @@
+import json
 import re
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -17,6 +19,8 @@ from app.models import (
     RunRevision,
     Workspace,
 )
+from app.models import TestLocationIdentity as LocationIdentity
+from app.models import TestLocationVersion as LocationVersion
 from app.services.review_operations import active_run_review_job
 from app.services.review_policy import (
     adopt_legacy_workspace_policies,
@@ -33,7 +37,7 @@ from app.services.reviews import (
     revoke_manual_decision,
     save_manual_decision,
 )
-from app.web import STATUS_LABELS, _matches_status
+from app.web import STATUS_LABELS, _matches_status, _superseded_qualification
 
 
 def prepare_run(
@@ -110,6 +114,94 @@ def test_manual_rules_allow_review_confirmation_and_unqualified_override() -> No
             save_manual_decision(db, run, decision, "operator", "Evidence checked")
             expected = "unqualified" if decision == "confirmed_unqualified" else "qualified"
             assert current_review(db, run).final_status == expected
+
+
+def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        old = db.get(RunRevision, run.current_revision_id)
+        assert old is not None
+        old.snapshot_json = json.dumps({
+            "run": {"duration": "4511", "last-modified": "2026-09-28 09:09:02",
+                    "ver-stamp": "5", "execution-time": "09:07:37"}
+        })
+        manual = save_manual_decision(
+            db, run, "override_qualified", "operator", "OS install does not need bay config"
+        )
+        assert current_review(db, run).final_status == "qualified"
+        assert _superseded_qualification(db, run, old, manual) is None
+
+        new = RunRevision(
+            run_id=run.run_id,
+            revision_number=2,
+            source_hash="c" * 64,
+            review_hash="d" * 64,
+            snapshot_json=json.dumps({
+                "run": {"duration": "4780", "last-modified": "2026-09-28 10:40:31",
+                        "ver-stamp": "6", "execution-time": "09:07:37"}
+            }),
+        )
+        db.add(new)
+        db.flush()
+        run.current_revision_id = new.id
+        run.source_hash = new.source_hash
+        db.commit()
+
+        review = current_review(db, run)
+        notice = _superseded_qualification(db, run, new, review.manual_decision)
+        assert review.manual_decision is None
+        assert review.final_status == "pending_review"
+        assert notice is not None
+        assert notice["decision"].id == manual.id
+        assert notice["decision"].reason == "OS install does not need bay config"
+        assert (notice["previous_revision"], notice["current_revision"]) == (1, 2)
+        assert notice["changed_fields"] == ["运行时长", "ALM 修改时间", "ALM 版本戳"]
+
+        job = ReviewJob(run_id=run.run_id, revision_id=new.id, status="completed")
+        db.add(job)
+        db.flush()
+        db.add(ReviewResult(
+            job_id=job.id,
+            run_id=run.run_id,
+            revision_id=new.id,
+            prompt_version_id=1,
+            source_hash=run.source_hash,
+            review_policy_key=current_review_policy_key(db),
+            model_name="test-model",
+            verdict="unqualified",
+        ))
+        db.commit()
+        assert current_review(db, run).final_status == "unqualified"
+        assert _superseded_qualification(db, run, new, None) is not None
+
+        save_manual_decision(db, run, "override_qualified", "operator", "Reviewed new version")
+        review = current_review(db, run)
+        assert review.final_status == "qualified"
+        assert _superseded_qualification(db, run, new, review.manual_decision) is None
+
+
+def test_revoked_manual_qualification_is_not_shown_as_superseded() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        save_manual_decision(db, run, "override_qualified", "operator", "Checked")
+        assert revoke_manual_decision(db, run) == 1
+        new = RunRevision(
+            run_id=run.run_id,
+            revision_number=2,
+            source_hash="c" * 64,
+            review_hash="d" * 64,
+            snapshot_json="{}",
+        )
+        db.add(new)
+        db.flush()
+        run.current_revision_id = new.id
+        run.source_hash = new.source_hash
+        db.commit()
+        assert _superseded_qualification(db, run, new, None) is None
 
 
 @pytest.mark.parametrize(
@@ -729,6 +821,31 @@ def test_non_site_execution_location_changes_update_review_policy() -> None:
         location.enabled = False
         db.commit()
         assert current_review_policy_key(db) != renamed_key
+
+
+def test_location_history_update_changes_review_policy() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        first_key = current_review_policy_key(db)
+        identity = LocationIdentity(current_item="SY Bay17(CHESS-SCIM-0009)")
+        db.add(identity)
+        db.flush()
+        version = LocationVersion(
+            location_id=identity.id,
+            item=identity.current_item,
+            system_config="CT Tenara G5 Prem",
+            valid_from=datetime(2026, 9, 16),
+            operation="update",
+        )
+        db.add(version)
+        db.commit()
+        with_history = current_review_policy_key(db)
+        assert with_history != first_key
+
+        version.valid_to = datetime(2026, 9, 25)
+        db.commit()
+        assert current_review_policy_key(db) != with_history
 
 
 def test_review_policy_tracks_enabled_endpoint_identity_but_not_capacity() -> None:

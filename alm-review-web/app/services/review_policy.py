@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import desc, select, update
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models import (
     AiConfig,
     AlmRun,
@@ -21,7 +22,7 @@ from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.09.17.1"
+REVIEW_ENGINE_VERSION = "2026.09.28.1"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",
@@ -36,6 +37,8 @@ _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "services" / "non_site_locations.py",
     _APP_DIRECTORY / "services" / "review_pipeline.py",
     _APP_DIRECTORY / "services" / "skill_runner.py",
+    _APP_DIRECTORY / "services" / "test_locations.py",
+    _APP_DIRECTORY / "services" / "timezones.py",
     _APP_DIRECTORY / "services" / "reviews.py",
     # Skill instructions, schemas and examples steer the verdict as much as the code.
     *sorted(
@@ -59,6 +62,7 @@ def current_review_policy_key(
     workspace_id: int | None = None,
 ) -> str:
     workspace = resolve_workspace(db, workspace_id)
+    settings = get_settings()
     ai_pool = db.scalars(
         select(AiConfig)
         .where(AiConfig.enabled.is_(True))
@@ -118,6 +122,8 @@ def current_review_policy_key(
         "workspace_id": workspace.id,
         "project": workspace.project,
         "engine_version": REVIEW_ENGINE_VERSION,
+        "alm_timezone": settings.alm_timezone,
+        "app_timezone": settings.app_timezone,
         "implementation_hash": _review_implementation_hash(),
         "ai_pool": [
             {

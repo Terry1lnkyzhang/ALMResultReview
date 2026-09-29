@@ -4,14 +4,17 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.models import TestLocationVersion
 from app.services.non_site_locations import enabled_non_site_location_keys
+from app.services.test_locations import location_key, resolve_test_location_at
+from app.services.timezones import alm_execution_in_app_timezone
 
-_LOCATION_ALIAS_RE = re.compile(r"\((?P<identifier>[^()]*)\)\s*$")
 _LOCATION_CONFIG_QUERY = text(
     "SELECT Item AS item, Product AS product, "
     "`DMS Version` AS dms_version, `DMS Coverage` AS dms_coverage, "
@@ -43,14 +46,6 @@ class LocationConfig:
 
 def _string(value: Any) -> str:
     return str(value or "").strip()
-
-
-def location_key(value: str) -> str:
-    normalized = value.strip()
-    match = _LOCATION_ALIAS_RE.search(normalized)
-    if match is not None:
-        normalized = match.group("identifier").strip()
-    return normalized.casefold()
 
 
 def parent_name(folder_path: str) -> str:
@@ -185,18 +180,137 @@ def assess_location_config(
     }
 
 
-def load_location_assessment(
+def assess_location_history(
     db: Session,
     execution_location: str,
     folder_path: str,
+    execution_at: datetime | None,
+    non_site_location_keys: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    non_site_location_keys = enabled_non_site_location_keys(db)
-    if execution_location.strip().casefold() in non_site_location_keys:
+    location = execution_location.strip()
+    if not location or location.casefold() in non_site_location_keys:
         return assess_location_config(
             execution_location,
             folder_path,
             (),
             non_site_location_keys,
+        )
+    app_time = alm_execution_in_app_timezone(execution_at)
+    business_time = app_time.replace(tzinfo=None) if app_time else None
+    resolution = resolve_test_location_at(db, location, business_time)
+    base = {
+        "alm_location": location,
+        "folder_path": folder_path.strip(),
+        "parent_name": parent_name(folder_path),
+        "execution_at": business_time.isoformat(sep=" ") if business_time else None,
+        "candidate_count": len(resolution.candidates),
+        "candidate_items": [version.item for version in resolution.candidates],
+        "selected_config": None,
+        "selected_version": None,
+    }
+    if resolution.status == "matched":
+        version = resolution.version
+        assert version is not None
+        selected = LocationConfig(
+            item=version.item,
+            product=version.product,
+            dms_version=version.version,
+            dms_coverage=version.collimation,
+            couch=version.platform,
+            computer=version.system_config,
+        )
+        return {
+            **assess_location_config(location, folder_path, (selected,)),
+            "execution_at": base["execution_at"],
+            "selected_version": {
+                "id": version.id,
+                "location_id": version.location_id,
+                "valid_from": version.valid_from.isoformat(sep=" "),
+                "valid_to": (
+                    version.valid_to.isoformat(sep=" ") if version.valid_to else None
+                ),
+            },
+        }
+    if resolution.status == "ambiguous":
+        return {
+            **base,
+            "status": "fail",
+            "failure_code": "location_config_ambiguous",
+            "reason": "Multiple test-location history versions match the execution time.",
+        }
+    if resolution.status in {"not_found", "missing_execution_time"}:
+        current = [
+            config
+            for config in load_location_configs(db)
+            if location_key(config.item) == location_key(location)
+        ]
+        if resolution.status == "missing_execution_time" and (
+            len(current) == 1 or (not current and resolution.known_alias)
+        ):
+            return {
+                **base,
+                "candidate_count": len(current),
+                "candidate_items": [config.item for config in current],
+                "status": "manual",
+                "failure_code": "location_execution_time_missing",
+                "reason": (
+                    "The ALM execution time is missing; no historical location "
+                    "version can be selected."
+                ),
+            }
+        if not current or len(current) > 1:
+            return {
+                **base,
+                "candidate_count": len(current),
+                "candidate_items": [config.item for config in current],
+                "status": "fail",
+                "failure_code": (
+                    "location_config_not_found" if not current else "location_config_ambiguous"
+                ),
+                "reason": (
+                    f"No test-location configuration matches ALM Location {location}."
+                    if not current
+                    else "Multiple test-location configurations match the ALM Location."
+                ),
+            }
+        return {
+            **base,
+            "candidate_count": 1,
+            "candidate_items": [current[0].item],
+            "status": "manual",
+            "failure_code": "location_history_unknown",
+            "reason": (
+                "The location exists, but its execution-time configuration has no "
+                "recorded history; current configuration cannot be used."
+            ),
+        }
+    return {
+        **base,
+        "status": "manual",
+        "failure_code": {
+            "retired": "location_not_effective_at_execution",
+            "history_unknown": "location_history_unknown",
+        }[resolution.status],
+        "reason": {
+            "retired": "No location configuration was effective at the ALM execution time.",
+            "history_unknown": (
+                "The ALM execution time is outside the recorded location history; "
+                "current configuration cannot be used."
+            ),
+        }[resolution.status],
+    }
+
+
+def load_location_assessment(
+    db: Session,
+    execution_location: str,
+    folder_path: str,
+    execution_at: datetime | None,
+) -> dict[str, Any]:
+    non_site_location_keys = enabled_non_site_location_keys(db)
+    if execution_location.strip().casefold() in non_site_location_keys:
+        return assess_location_config(
+            execution_location, folder_path, (), non_site_location_keys
         )
     if db.bind is not None and db.bind.dialect.name != "mysql":
         return {
@@ -210,21 +324,50 @@ def load_location_assessment(
             "candidate_items": [],
             "selected_config": None,
         }
-    return assess_location_config(
+    return assess_location_history(
+        db,
         execution_location,
         folder_path,
-        load_location_configs(db),
+        execution_at,
         non_site_location_keys,
     )
 
 
 def location_config_policy_snapshot(db: Session) -> dict[str, Any]:
+    history = [
+        {
+            "id": version.id,
+            "location_id": version.location_id,
+            "item": version.item,
+            "product": version.product,
+            "dms_version": version.version,
+            "dms_coverage": version.collimation,
+            "couch": version.platform,
+            "computer": version.system_config,
+            "valid_from": version.valid_from.isoformat(),
+            "valid_to": version.valid_to.isoformat() if version.valid_to else None,
+        }
+        for version in db.scalars(
+            select(TestLocationVersion).order_by(TestLocationVersion.id)
+        )
+    ]
+    history_sha256 = hashlib.sha256(
+        json.dumps(
+            history, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
     if db.bind is not None and db.bind.dialect.name != "mysql":
-        return {"status": "unsupported", "row_count": 0, "sha256": ""}
+        return {
+            "status": "unsupported", "row_count": 0, "sha256": "",
+            "history_row_count": len(history), "history_sha256": history_sha256,
+        }
     try:
         rows = [config.as_dict() for config in load_location_configs(db)]
     except Exception:
-        return {"status": "unavailable", "row_count": 0, "sha256": ""}
+        return {
+            "status": "unavailable", "row_count": 0, "sha256": "",
+            "history_row_count": len(history), "history_sha256": history_sha256,
+        }
     serialized = json.dumps(
         rows,
         ensure_ascii=False,
@@ -235,6 +378,8 @@ def location_config_policy_snapshot(db: Session) -> dict[str, Any]:
         "status": "available",
         "row_count": len(rows),
         "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "history_row_count": len(history),
+        "history_sha256": history_sha256,
     }
 
 

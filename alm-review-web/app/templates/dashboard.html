@@ -26,11 +26,88 @@
           <input type="file" name="document" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required onchange="this.form.submit()">
         </label>
       </form>
-      <form method="post" action="/actions/sync-alm"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Sync from ALM</button></form>
-      <form method="post" action="/actions/sync-alm" onsubmit="return confirm('Re-read every Run from ALM? This ignores the unchanged-Run shortcut and takes much longer.');"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="full_refresh" value="true"><button class="button secondary" type="submit">Full resync</button></form>
+      <form method="post" action="/actions/sync-alm" data-confirm-workspace-sync="incremental"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Sync from ALM</button></form>
+      <form method="post" action="/actions/sync-alm" data-confirm-workspace-sync="full"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="full_refresh" value="true"><button class="button secondary" type="submit">Full resync</button></form>
     </div>
   </div>
 </section>
+
+<dialog class="sync-confirm-dialog" data-sync-explanation aria-labelledby="sync-explanation-title">
+  <div class="sync-confirm-content">
+    <p class="eyebrow">ALM 同步 · 第一步</p>
+    <h2 id="sync-explanation-title" data-sync-explanation-title></h2>
+    <div data-sync-mode="incremental">
+      <p>从当前工作区配置的 ALM 根文件夹递归查找各 Test Instance 最新的 Passed/Failed Run，导入新 Run 和变化的源版本。已确认未变化的 Run 会跳过步骤和附件读取，以减少请求。</p>
+      <p>这是全工作区数据同步，<strong>不会自动将所有 Run 加入 AI 评审队列</strong>；如需评审，请在同步后按需选择评审操作。</p>
+    </div>
+    <div data-sync-mode="full" hidden>
+      <p>从同一 ALM 根文件夹递归重新读取各 Test Instance 最新的 Passed/Failed Run；即使已有 Run 的修改时间未变，也会重新获取步骤及按配置启用的附件。范围更大、耗时更长，可用于排查遗漏的源数据变化。</p>
+      <p><strong>不会删除本地版本历史，也不会自动重评全部 Run。</strong>如果已有整个工作区的同步任务，新操作不会覆盖或升级该任务。</p>
+    </div>
+    <div class="sync-confirm-actions">
+      <button class="button secondary" type="button" data-close-sync-explanation>关闭</button>
+      <button class="button primary" type="button" data-continue-sync-explanation>继续</button>
+    </div>
+  </div>
+</dialog>
+<dialog class="sync-confirm-dialog" data-sync-resource-warning aria-labelledby="sync-resource-title">
+  <div class="sync-confirm-content">
+    <p class="eyebrow">资源占用 · 第二步</p>
+    <h2 id="sync-resource-title">确定要现在同步整个工作区吗？</h2>
+    <p>全范围同步会持续请求 ALM 并占用 Worker、网络和数据库资源，Full resync 尤其耗时。<strong>不建议在白天工作高峰启动。</strong></p>
+    {% if dashboard_sync_config and dashboard_sync_config.enabled %}
+    <p>当前已配置每天 {{ '%02d:%02d'|format(dashboard_sync_config.schedule_hour, dashboard_sync_config.schedule_minute) }}（{{ app_timezone }}）自动同步；Worker 在线且同步队列未暂停时会处理。若无需立即更新，建议等定时任务；如果当前时间设在白天，也可以到 Configuration 改为晚间低峰。{% if dashboard_sync_config.auto_review_after_sync %}定时同步完成后还会自动排入符合条件的 AI 评审。{% else %}当前没有开启定时同步后的自动 AI 评审。{% endif %}</p>
+    {% else %}
+    <p>当前工作区未启用每日自动同步。如希望在晚间低峰时段运行，请先到 Configuration 设置同步时间并启用定时同步。</p>
+    {% endif %}
+    <p>如果只需要处理自己的 Run：先在下方 Runs 按 Actual tester 等条件筛选，再点击 <strong>Sync ALM &amp; review</strong>（只刷新筛选出的 Run 并评审）或 <strong>Review these Runs</strong>（仅评审筛选出的本地 Run，不重新读取 ALM；已人工裁决的 Run 通常会跳过）。</p>
+    <div class="sync-confirm-actions">
+      <button class="button secondary" type="button" data-close-sync-resource>关闭</button>
+      <button class="button primary" type="button" data-submit-workspace-sync>仍要立即同步</button>
+    </div>
+  </div>
+</dialog>
+<script>
+  (() => {
+    const forms = document.querySelectorAll("[data-confirm-workspace-sync]");
+    const explanation = document.querySelector("[data-sync-explanation]");
+    const warning = document.querySelector("[data-sync-resource-warning]");
+    if (!forms.length || !explanation || !warning) return;
+    let pendingForm = null;
+    let approvedForm = null;
+    for (const form of forms) {
+      form.addEventListener("submit", (event) => {
+        if (approvedForm === form) {
+          approvedForm = null;
+          return;
+        }
+        event.preventDefault();
+        pendingForm = form;
+        const full = form.dataset.confirmWorkspaceSync === "full";
+        explanation.querySelector("[data-sync-explanation-title]").textContent = full ? "Full resync：重新读取整个范围" : "Sync from ALM：增量同步整个范围";
+        for (const section of explanation.querySelectorAll("[data-sync-mode]")) {
+          section.hidden = section.dataset.syncMode !== form.dataset.confirmWorkspaceSync;
+        }
+        explanation.showModal();
+      });
+    }
+    explanation.querySelector("[data-close-sync-explanation]").addEventListener("click", () => explanation.close());
+    explanation.querySelector("[data-continue-sync-explanation]").addEventListener("click", () => {
+      explanation.close();
+      warning.showModal();
+    });
+    warning.querySelector("[data-close-sync-resource]").addEventListener("click", () => warning.close());
+    warning.querySelector("[data-submit-workspace-sync]").addEventListener("click", () => {
+      if (!pendingForm) return;
+      const form = pendingForm;
+      pendingForm = null;
+      warning.close();
+      approvedForm = form;
+      form.requestSubmit();
+      approvedForm = null;
+    });
+  })();
+</script>
 
 <section class="status-panels" aria-label="Live progress">
   <article class="sync-progress" data-sync-progress aria-labelledby="sync-progress-title">
@@ -293,7 +370,7 @@
       <button class="button secondary" type="submit">Apply</button>
       <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export CSV</a>
     </form>
-    <div class="table-heading">
+    <div class="table-heading" id="runs-list">
       <h2>Runs</h2>
       <div class="table-heading-actions">
         <span>{{ runs|length }} shown</span>

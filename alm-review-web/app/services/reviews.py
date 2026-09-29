@@ -595,6 +595,11 @@ def _image_audit_metadata(image: ResolvedImage) -> dict[str, Any]:
 _IMAGE_EVIDENCE_ISSUES: dict[str, tuple[str, str, str]] = {
     "missing": ("fail", "path", "配置的证据路径不存在。"),
     "no_images": ("fail", "screenshot", "证据文件夹中没有可评审的图像。"),
+    "invalid_image": (
+        "manual",
+        "screenshot",
+        "图像文件损坏或内容不完整，未送交 AI 评审；请修复原始证据并人工复核。",
+    ),
     "no_usable_images": (
         "fail",
         "screenshot",
@@ -813,6 +818,10 @@ def _apply_capability_guards(
                     "source_kind": "alm_attachment",
                     "status": evidence.status,
                     "images": [_image_audit_metadata(image) for image in evidence.images],
+                    **(
+                        {"corrupt_images": list(evidence.corrupt_images)}
+                        if evidence.corrupt_images else {}
+                    ),
                 }
             )
             issue = _IMAGE_EVIDENCE_ISSUES.get(evidence.status)
@@ -824,6 +833,11 @@ def _apply_capability_guards(
                     issue_status,
                     issue_type,
                     issue_summary,
+                )
+            if evidence.status == "ready" and evidence.corrupt_images:
+                _append_step_issue(
+                    parsed, step_result["review_step"], "manual", "screenshot",
+                    _IMAGE_EVIDENCE_ISSUES["invalid_image"][2],
                 )
         for path in paths:
             path_status = validate_network_evidence_path(path["raw"], allowed_root)
@@ -864,6 +878,10 @@ def _apply_capability_guards(
                         "source_path": path["raw"],
                         "source_kind": evidence.source_kind,
                         "status": evidence.status,
+                        **(
+                            {"corrupt_images": list(evidence.corrupt_images)}
+                            if evidence.corrupt_images else {}
+                        ),
                         "images": [
                             _image_audit_metadata(image) for image in evidence.images
                         ],
@@ -878,6 +896,11 @@ def _apply_capability_guards(
                         issue_status,
                         issue_type,
                         issue_summary,
+                    )
+                if evidence.status == "ready" and evidence.corrupt_images:
+                    _append_step_issue(
+                        parsed, step_result["review_step"], "manual", "screenshot",
+                        _IMAGE_EVIDENCE_ISSUES["invalid_image"][2],
                     )
 
         for path in html_paths:
@@ -1480,8 +1503,8 @@ def _compact_html_quote(quote: str, max_chars: int = 400) -> str:
 def _reuse_verified_html_citations(
     observations: list[dict[str, Any]],
     assessment: dict[str, Any],
-) -> None:
-    verified_citations: dict[tuple[str, str], tuple[str, list[str]]] = {}
+) -> dict[str, Any]:
+    verified_citations: dict[tuple[str, str], dict[str, Any]] = {}
     for observation in observations:
         for citation in observation.get("evidence", []):
             key = (citation.get("report_id", ""), citation.get("block_id", ""))
@@ -1489,17 +1512,73 @@ def _reuse_verified_html_citations(
             if all(key) and quote:
                 verified_citations.setdefault(
                     key,
-                    (
-                        _compact_html_quote(quote),
-                        list(citation.get("supports", [])),
-                    ),
+                    {
+                        "report_id": key[0],
+                        "block_id": key[1],
+                        "quote": _compact_html_quote(quote),
+                        "supports": list(citation.get("supports", [])),
+                    },
                 )
+    reused: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    unverified: list[tuple[str, str]] = []
     for citation in assessment.get("evidence", []):
         key = (citation.get("report_id", ""), citation.get("block_id", ""))
-        if key in verified_citations:
-            quote, supports = verified_citations[key]
-            citation["quote"] = quote
-            citation["supports"] = list(supports)
+        if key not in verified_citations:
+            unverified.append(key)
+        elif key not in seen:
+            reused.append(dict(verified_citations[key]))
+            seen.add(key)
+    if unverified:
+        raise SkillFailure(
+            "HTML final synthesis cited report/block IDs not verified in evidence "
+            f"batches: {unverified[:8]!r}.",
+            retryable=False,
+        )
+    cited_reports = {citation["report_id"] for citation in reused}
+    appended_reports: list[str] = []
+    if assessment.get("status") in {"pass", "fail"}:
+        for citation in verified_citations.values():
+            report_id = citation["report_id"]
+            if report_id not in cited_reports:
+                reused.append(dict(citation))
+                cited_reports.add(report_id)
+                appended_reports.append(report_id)
+    assessment["evidence"] = reused
+    return {"reused": len(seen), "appended_report_ids": appended_reports}
+
+
+def _manual_html_assessment(skill_input: dict[str, Any]) -> dict[str, Any]:
+    step = skill_input["steps"][0]
+    release = step["automation_release"]
+    release_consistency = {
+        "disabled": "not_checked",
+        "matched": "matched",
+        "mismatch": "mismatched",
+        "not_found": "mismatched",
+    }.get(release["status"], "uncertain")
+    if release.get("failure_code") in {
+        "html_path_testcase_id_mismatch",
+        "actual_name_missing",
+        "actual_name_html_mismatch",
+    }:
+        release_consistency = {
+            "exact": "matched",
+            "compatible": "matched",
+            "not_checked": "uncertain",
+        }.get(release.get("script_name_match"), release_consistency)
+    return {
+        "review_step": step["review_step"],
+        "status": "manual",
+        "description_coverage": "uncertain",
+        "expected_coverage": "uncertain",
+        "actual_coverage": "uncertain",
+        "result_consistency": "uncertain",
+        "release_consistency": release_consistency,
+        "reviewed_report_ids": [],
+        "evidence": [],
+        "reason": "HTML 证据 AI 输出未通过格式或引用校验，未采信模型结论；需人工复核。",
+    }
 
 
 def _validate_html_assessment(
@@ -1629,6 +1708,9 @@ def _run_html_review_skill(
         output_validator=validate_output,
     )
     if trace.get("status") != "completed":
+        if trace.get("failure_kind") == "invalid_output":
+            trace["manual_fallback"] = "invalid_output"
+            return trace, _manual_html_assessment(skill_input)
         raise _skill_failure(trace, "HTML evidence Skill failed.")
     assessment = trace["output"]["assessments"][0]
     return trace, assessment
@@ -1656,15 +1738,21 @@ def _run_html_review_batches(
             assessment_validator=_validate_html_batch_assessment,
         )
         traces.append(trace)
+        if trace.get("manual_fallback"):
+            return traces, _manual_html_assessment(skill_input)
         observations.append(observation)
 
     final_input = _html_final_input(skill_input, observations)
+
+    citation_recovery: dict[str, Any] = {}
 
     def validate_final(
         _validated_input: dict[str, Any],
         assessment: dict[str, Any],
     ) -> None:
-        _reuse_verified_html_citations(observations, assessment)
+        citation_recovery.update(
+            _reuse_verified_html_citations(observations, assessment)
+        )
         _validate_html_assessment(skill_input, assessment)
 
     final_trace, assessment = _run_html_review_skill(
@@ -1672,6 +1760,10 @@ def _run_html_review_batches(
         final_input,
         assessment_validator=validate_final,
     )
+    if final_trace.get("manual_fallback"):
+        assessment = _manual_html_assessment(skill_input)
+    elif citation_recovery:
+        final_trace["citation_recovery"] = citation_recovery
     traces.append(final_trace)
     return traces, assessment
 
@@ -1739,9 +1831,10 @@ def _prepare_image_evidence(
                 ),
             )
             step_results[source] = ImageEvidenceResult(
-                status="ready" if image else "no_usable_images",
+                status="ready" if image else "invalid_image",
                 images=(image,) if image else (),
                 skipped_invalid=0 if image else 1,
+                corrupt_images=() if image else (str(attachment.get("name") or source),),
                 source_kind="alm_attachment",
             )
             if image:
@@ -1903,6 +1996,21 @@ def _run_image_review_skill(
             for review_step, images in images_by_step.items()
         ]
     }
+
+    def validate_image_output(
+        _validated_input: dict[str, Any], output: dict[str, Any]
+    ) -> None:
+        for assessment in output["assessments"]:
+            review_step = int(assessment["review_step"])
+            observed = assessment["observed_media_ids"]
+            if len(observed) != len(set(observed)) or set(observed) != allowed_media[
+                review_step
+            ]:
+                raise ValueError(
+                    "Image evidence Skill did not exactly cover supplied media "
+                    f"for Step {review_step}."
+                )
+
     trace = skill_runner.run(
         "image-evidence-review",
         skill_input,
@@ -1917,19 +2025,15 @@ def _run_image_review_skill(
         },
         media_parts=media_parts,
         request_post=httpx.post,
+        output_validator=validate_image_output,
     )
     if trace.get("status") != "completed":
+        if trace.get("failure_kind") == "invalid_output":
+            # Invalid JSON, duplicate Step assessments and missing media must
+            # never be treated as verified image evidence or a successful AI pass.
+            trace["manual_fallback"] = "invalid_output"
+            return trace
         raise _skill_failure(trace, "Image evidence Skill failed.")
-    for assessment in trace["output"]["assessments"]:
-        review_step = int(assessment["review_step"])
-        observed = assessment["observed_media_ids"]
-        if len(observed) != len(set(observed)) or set(observed) != allowed_media[
-            review_step
-        ]:
-            raise SkillFailure(
-                "Image evidence Skill did not exactly cover supplied media.",
-                retryable=False,
-            )
     return trace
 
 
@@ -2743,11 +2847,23 @@ def _plan_specialist_passes(ctx: ReviewContext) -> None:
 
 def _image_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     ai_calls = 0
+    manual_fallbacks = 0
     for batch in _image_review_batches(ctx.evidence):
         trace = _run_image_review_skill(ctx.ai_config, batch, ctx.content)
         ctx.evidence.image_skill_traces.append(trace)
-        _merge_image_skill_trace(ctx.text_result, trace)
-        ai_calls += 1
+        ai_calls += int(trace.get("ai_calls", 0))
+        if trace.get("manual_fallback") == "invalid_output":
+            manual_fallbacks += 1
+            for review_step in {step for step, _, _ in batch}:
+                _append_step_issue(
+                    ctx.text_result,
+                    review_step,
+                    "manual",
+                    "screenshot",
+                    "图像 AI 输出未通过格式或证据覆盖校验，未采信模型结论；请人工复核。",
+                )
+        else:
+            _merge_image_skill_trace(ctx.text_result, trace)
     ctx.text_result = _recalculate_result(ctx.text_result)
     if not ctx.evidence.external_review_enabled:
         status = "disabled"
@@ -2758,6 +2874,7 @@ def _image_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     return {
         "status": status,
         "ai_calls": ai_calls,
+        "manual_fallbacks": manual_fallbacks,
         "skills": ctx.evidence.image_skill_traces,
     }
 
@@ -3006,6 +3123,7 @@ def process_job(
         db,
         str(content.get("execution_location") or ""),
         str(content.get("folder_path") or ""),
+        run.execution_at,
     )
     evidence_config = workspace_evidence_config(db, workspace.id)
     release_assessments: dict[int, dict[str, Any]] = {}

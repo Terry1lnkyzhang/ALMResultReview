@@ -13,7 +13,9 @@ _PATH_PATTERNS = (
     re.compile(r'(?m)^[ \t]*(?P<path>\\\\[^\r\n<>"|?*]+)[ \t]*$'),
     re.compile(r'''(?m):[ \t]*(?P<path>\\\\[^\r\n<>"'|?*]+)[ \t]*$'''),
     re.compile(
-        r'''(?im)\b(?:refers?|referred|refered)\s+to[ \t]+'''
+        # ALM may write "refered to\\server\share\folder with spaces" without
+        # separating the introductory text from the UNC path.
+        r'''(?im)\b(?:refers?|referred|refered)\s+to[ \t]*'''
         r'''(?P<path>\\\\[^\r\n<>"'|?*]+)[ \t]*$'''
     ),
     re.compile(r"file:///[^\s<>\"']+", re.IGNORECASE),

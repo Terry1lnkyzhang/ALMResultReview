@@ -131,12 +131,26 @@ def test_unchanged_run_check_only_skips_runs_with_the_stored_last_modified() -> 
         assert run is not None
         is_unchanged = unchanged_run_check(db, run.workspace_id)
 
-        assert is_unchanged({"id": "152711", "last-modified": "2026-07-30 04:40:00"})
+        original = sample_data()["records"][0]["run"]
+        assert is_unchanged(original)
         assert not is_unchanged(
-            {"id": "152711", "last-modified": "2026-08-19 09:00:00"}
+            {**original, "last-modified": "2026-08-19 09:00:00"}
         )
-        assert not is_unchanged({"id": "999999", "last-modified": "2026-07-30 04:40:00"})
+        assert not is_unchanged({**original, "id": "999999"})
         assert not is_unchanged({"id": "152711"})
+        assert not is_unchanged({"id": "152711", "last-modified": original["last-modified"]})
+        assert not is_unchanged({**original, "execution-date": "2026-07-31"})
+        assert not is_unchanged({**original, "execution-time": "05:40:00"})
+
+        changed_time = deepcopy(sample_data())
+        changed_time["records"][0]["run"]["execution-time"] = "05:40:00"
+        result = import_data(changed_time, db)
+        db.refresh(run)
+        assert result.changed_runs == 1
+        assert run.execution_at.strftime("%Y-%m-%d %H:%M:%S") == "2026-07-30 05:40:00"
+        assert db.scalar(
+            select(func.count()).select_from(RunRevision).where(RunRevision.run_id == run.run_id)
+        ) == 2
 
 
 def test_import_preserves_step_rich_text_for_display() -> None:
