@@ -139,9 +139,21 @@
     <p>原裁决仅对版本 #{{ superseded_qualification.previous_revision }} 生效；当前版本 #{{ superseded_qualification.current_revision }} 需要重新评审或重新人工裁决。原记录仍保留，并非人工主动撤销。</p>
     <p><strong>上次裁决：{{ decision_labels.get(superseded_qualification.decision.decision, superseded_qualification.decision.decision) }}</strong> · {{ superseded_qualification.decision.operator }} · {{ superseded_qualification.decision_at.strftime('%Y-%m-%d %H:%M') if superseded_qualification.decision_at else '-' }}</p>
     <p>上次人工理由：{{ superseded_qualification.decision.reason }}</p>
-  </div>
-  <div class="review-advisory-reasons" aria-label="ALM 版本变化字段">
-    {% for field in superseded_qualification.changed_fields %}<span>{{ field }}</span>{% endfor %}
+    <p>AI 原始结论：旧版 {{ review_status_labels.get(superseded_qualification.decision.original_ai_verdict, superseded_qualification.decision.original_ai_verdict) }} → 当前 {{ review_status_labels.get(review.result.verdict, review.result.verdict) if review.result else '尚未评审' }}。</p>
+    <div class="superseded-manual-comparison" aria-label="上次人工裁决版本与当前 ALM 版本的源数据差异">
+      <h3>版本差异 · #{{ superseded_qualification.previous_revision }} → #{{ superseded_qualification.current_revision }}</h3>
+      <p>{{ superseded_qualification.summary }}</p>
+      {% for change in superseded_qualification.changes %}
+      <div class="superseded-manual-change">
+        <strong>{{ change.label }}</strong>
+        <div><small>上次裁决版本</small><span>{{ change.before }}</span></div>
+        <span class="superseded-manual-arrow" aria-hidden="true">→</span>
+        <div><small>当前版本</small><span>{{ change.after }}</span></div>
+      </div>
+      {% endfor %}
+      {% if superseded_qualification.omitted_changes %}<p>另有 {{ superseded_qualification.omitted_changes }} 项变化未在此展开，可核对 ALM 源数据。</p>{% endif %}
+      {% if superseded_qualification.unchanged_fields %}<p>已核对未变化：{{ superseded_qualification.unchanged_fields|join('、') }}。</p>{% endif %}
+    </div>
   </div>
 </section>
 {% endif %}

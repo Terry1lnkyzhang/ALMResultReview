@@ -1419,6 +1419,182 @@ def run_index() -> RedirectResponse:
     return RedirectResponse("/", status_code=307)
 
 
+def _source_value_preview(value: Any) -> str:
+    if value is None or value == "":
+        return "未记录"
+    text = str(value)
+    text = " ".join(text.split())
+    return text[:160] + ("…" if len(text) > 160 else "") if text else "未记录"
+
+
+def _changed_text_excerpt(value: str, change_at: int) -> str:
+    start = max(0, change_at - 40)
+    end = min(len(value), max(start + 160, change_at + 100))
+    return ("…" if start else "") + value[start:end] + ("…" if end < len(value) else "")
+
+
+def _source_revision_changes(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
+    old_run, new_run = old.get("run") or {}, new.get("run") or {}
+    changes: list[dict[str, str]] = []
+
+    def add(label: str, before: Any, after: Any, *, rich_text: bool = False) -> None:
+        if before == after:
+            return
+        if rich_text:
+            old_text = " ".join(normalize_text(before).split())
+            new_text = " ".join(normalize_text(after).split())
+            change_at = next(
+                (i for i, pair in enumerate(zip(old_text, new_text)) if pair[0] != pair[1]),
+                min(len(old_text), len(new_text)),
+            )
+            old_display = _changed_text_excerpt(old_text, change_at) or "未记录"
+            new_display = _changed_text_excerpt(new_text, change_at) or "未记录"
+            if old_text == new_text:
+                new_display += "（可见文字未变，原始标记或属性已变化）"
+        else:
+            old_display = _source_value_preview(before)
+            new_display = _source_value_preview(after)
+        changes.append({"label": label, "before": old_display, "after": new_display})
+
+    run_fields = (
+        ("execution-date", "执行日期"),
+        ("execution-time", "执行时间"),
+        ("location", "执行位置"),
+        ("status", "ALM 结果"),
+        ("duration", "运行时长"),
+        ("last-modified", "ALM 修改时间"),
+        ("ver-stamp", "ALM 版本戳"),
+        ("test-name", "Run 名称"),
+        ("owner", "Run 执行者"),
+    )
+    for field, label in run_fields:
+        before, after = old_run.get(field), new_run.get(field)
+        if field == "duration" and before != after:
+            add(label, f"{before} 秒" if before not in (None, "") else None,
+                f"{after} 秒" if after not in (None, "") else None)
+        else:
+            add(label, before, after)
+
+    old_folder, new_folder = old.get("folder") or {}, new.get("folder") or {}
+    add("测试文件夹", old_folder.get("path"), new_folder.get("path"))
+    for section, fields in (
+        ("testSet", (("name", "测试集名称"),)),
+        ("testInstance", (("owner", "指定测试人员"),
+                          ("actual-tester", "实际测试人员"))),
+    ):
+        old_section, new_section = old.get(section) or {}, new.get(section) or {}
+        for field, label in fields:
+            add(label, old_section.get(field), new_section.get(field))
+    add("测试负责人", old.get("testOwner"), new.get("testOwner"))
+
+    old_steps, new_steps = old_run.get("steps") or [], new_run.get("steps") or []
+    if len(old_steps) != len(new_steps):
+        add("步骤数量", len(old_steps), len(new_steps))
+    step_fields = (
+        ("id", "ID"), ("step-order", "顺序"), ("name", "名称"),
+        ("status", "结果"), ("description", "Description"),
+        ("expected", "Expected"), ("actual", "Actual"),
+    )
+    old_ids = [str(step.get("id") or "") for step in old_steps if isinstance(step, dict)]
+    new_ids = [str(step.get("id") or "") for step in new_steps if isinstance(step, dict)]
+    if (
+        len(old_ids) == len(old_steps)
+        and len(new_ids) == len(new_steps)
+        and all(old_ids + new_ids)
+        and len(set(old_ids)) == len(old_ids)
+        and len(set(new_ids)) == len(new_ids)
+    ):
+        new_by_id = dict(zip(new_ids, new_steps))
+        for step in old_steps:
+            if str(step["id"]) not in new_by_id:
+                add(f"步骤 {step.get('step-order') or step['id']} 已删除", "旧版存在", "当前已删除")
+        for step in new_steps:
+            if str(step["id"]) not in old_ids:
+                add(f"步骤 {step.get('step-order') or step['id']} 已新增", "旧版无", "当前新增")
+        paired_steps = [
+            (old_step, new_by_id[str(old_step["id"])])
+            for old_step in old_steps
+            if str(old_step["id"]) in new_by_id
+        ]
+    else:
+        paired_steps = list(zip(old_steps, new_steps))
+    for index, (old_step, new_step) in enumerate(paired_steps, start=1):
+        if not isinstance(old_step, dict) or not isinstance(new_step, dict):
+            if old_step != new_step:
+                add(f"步骤 {index} 内容", "旧版步骤", "当前步骤有变化")
+            continue
+        label = str(new_step.get("step-order") or old_step.get("step-order") or index)
+        for field, name in step_fields:
+            if field in {"description", "expected", "actual"}:
+                old_value = old_step.get(field + "Text", old_step.get(field))
+                new_value = new_step.get(field + "Text", new_step.get(field))
+                add(f"步骤 {label} {name}", old_value, new_value, rich_text=True)
+            else:
+                add(f"步骤 {label} {name}", old_step.get(field), new_step.get(field))
+        if old_step.get("attachmentContents") != new_step.get("attachmentContents"):
+            add(f"步骤 {label} 附件", f"{len(old_step.get('attachmentContents') or [])} 个附件",
+                f"{len(new_step.get('attachmentContents') or [])} 个附件（内容已变更）")
+        untracked_step_keys = (old_step.keys() | new_step.keys()) - {
+            "attachmentContents", *(field for field, _ in step_fields),
+            "descriptionText", "expectedText", "actualText",
+        }
+        if any(old_step.get(key) != new_step.get(key) for key in untracked_step_keys):
+            add(f"步骤 {label} 其他字段", "旧版记录", "字段内容已变化")
+
+    tracked_run_keys = {field for field, _ in run_fields} | {"steps"}
+    tracked_sections: dict[str, set[str]] = {
+        "folder": {"path"}, "testSet": {"name"},
+        "testInstance": {"owner", "actual-tester"},
+    }
+    untracked_run_keys = (old_run.keys() | new_run.keys()) - tracked_run_keys
+    untracked_changed = any(old_run.get(key) != new_run.get(key) for key in untracked_run_keys)
+    for section, tracked in tracked_sections.items():
+        old_section, new_section = old.get(section) or {}, new.get(section) or {}
+        keys = (old_section.keys() | new_section.keys()) - tracked
+        untracked_changed |= any(old_section.get(key) != new_section.get(key) for key in keys)
+    untracked_changed |= any(
+        old.get(key) != new.get(key)
+        for key in (old.keys() | new.keys()) - {"run", *tracked_sections, "testOwner"}
+    )
+    if untracked_changed:
+        add("其他 ALM 源字段", "旧版记录", "内容已变化（未展开）")
+
+    unchanged = []
+    if "steps" in old_run and "steps" in new_run and old_steps == new_steps:
+        unchanged.append("步骤和证据")
+    if (
+        "location" in old_run
+        and "location" in new_run
+        and old_run["location"] == new_run["location"]
+    ):
+        unchanged.append("执行位置")
+    if "path" in old_folder and "path" in new_folder and old_folder["path"] == new_folder["path"]:
+        unchanged.append("测试文件夹")
+    if (
+        {"execution-date", "execution-time"} <= old_run.keys()
+        and {"execution-date", "execution-time"} <= new_run.keys()
+        and old_run.get("execution-date") == new_run.get("execution-date")
+        and old_run.get("execution-time") == new_run.get("execution-time")
+    ):
+        unchanged.append("执行日期/时间")
+    metadata_only = {"步骤和证据", "执行位置", "测试文件夹"} <= set(unchanged)
+    metadata_only = metadata_only and bool(changes) and all(
+        change["label"] in {"运行时长", "ALM 修改时间", "ALM 版本戳"}
+        for change in changes
+    )
+    return {
+        "summary": (
+            "仅运行元数据发生变化；步骤、执行位置和测试文件夹未变。"
+            if metadata_only else
+            "以下是上次人工裁决所依据版本与当前版本的源数据差异。"
+        ),
+        "changes": changes[:12],
+        "changed_fields": [item["label"] for item in changes[:12]],
+        "omitted_changes": max(0, len(changes) - 12),
+        "unchanged_fields": unchanged,
+    }
+
+
 def _superseded_qualification(
     db: Session,
     run: AlmRun,
@@ -1449,32 +1625,22 @@ def _superseded_qualification(
     try:
         old = json.loads(old_revision.snapshot_json)
         new = json.loads(current_revision.snapshot_json)
-    except (TypeError, json.JSONDecodeError):
-        old, new = {}, {}
-    old_run, new_run = old.get("run") or {}, new.get("run") or {}
-    changes = [
-        label
-        for field, label in (
-            ("execution-date", "执行日期"),
-            ("execution-time", "执行时间"),
-            ("location", "执行位置"),
-            ("status", "ALM 结果"),
-            ("duration", "运行时长"),
-            ("last-modified", "ALM 修改时间"),
-            ("ver-stamp", "ALM 版本戳"),
-        )
-        if old_run.get(field) != new_run.get(field)
-    ]
-    if (old.get("folder") or {}).get("path") != (new.get("folder") or {}).get("path"):
-        changes.append("测试文件夹")
-    if old_run.get("steps") != new_run.get("steps"):
-        changes.append("步骤或证据内容")
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            raise ValueError("ALM snapshot must be an object")
+    except (TypeError, ValueError):
+        comparison = {
+            "summary": "无法读取旧版或当前版源快照，暂不能可靠比较差异。",
+            "changes": [], "changed_fields": [], "omitted_changes": 0,
+            "unchanged_fields": [],
+        }
+    else:
+        comparison = _source_revision_changes(old, new)
     return {
         "decision": manual,
         "previous_revision": old_revision.revision_number,
         "current_revision": current_revision.revision_number,
         "decision_at": _to_app_timezone(manual.created_at),
-        "changed_fields": changes or ["其他 ALM 源字段"],
+        **comparison,
     }
 
 

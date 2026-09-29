@@ -37,7 +37,12 @@ from app.services.reviews import (
     revoke_manual_decision,
     save_manual_decision,
 )
-from app.web import STATUS_LABELS, _matches_status, _superseded_qualification
+from app.web import (
+    STATUS_LABELS,
+    _matches_status,
+    _source_revision_changes,
+    _superseded_qualification,
+)
 
 
 def prepare_run(
@@ -124,8 +129,10 @@ def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision()
         old = db.get(RunRevision, run.current_revision_id)
         assert old is not None
         old.snapshot_json = json.dumps({
+            "folder": {"path": "Testing / Bay 1"},
             "run": {"duration": "4511", "last-modified": "2026-09-28 09:09:02",
-                    "ver-stamp": "5", "execution-time": "09:07:37"}
+                "ver-stamp": "5", "execution-date": "2026-09-27",
+                "execution-time": "09:07:37", "location": "Bay 1", "steps": []}
         })
         manual = save_manual_decision(
             db, run, "override_qualified", "operator", "OS install does not need bay config"
@@ -139,8 +146,10 @@ def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision()
             source_hash="c" * 64,
             review_hash="d" * 64,
             snapshot_json=json.dumps({
+                "folder": {"path": "Testing / Bay 1"},
                 "run": {"duration": "4780", "last-modified": "2026-09-28 10:40:31",
-                        "ver-stamp": "6", "execution-time": "09:07:37"}
+                    "ver-stamp": "6", "execution-date": "2026-09-27",
+                    "execution-time": "09:07:37", "location": "Bay 1", "steps": []}
             }),
         )
         db.add(new)
@@ -158,6 +167,17 @@ def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision()
         assert notice["decision"].reason == "OS install does not need bay config"
         assert (notice["previous_revision"], notice["current_revision"]) == (1, 2)
         assert notice["changed_fields"] == ["运行时长", "ALM 修改时间", "ALM 版本戳"]
+        assert notice["summary"] == "仅运行元数据发生变化；步骤、执行位置和测试文件夹未变。"
+        assert notice["changes"] == [
+            {"label": "运行时长", "before": "4511 秒", "after": "4780 秒"},
+            {
+                "label": "ALM 修改时间",
+                "before": "2026-09-28 09:09:02",
+                "after": "2026-09-28 10:40:31",
+            },
+            {"label": "ALM 版本戳", "before": "5", "after": "6"},
+        ]
+        assert notice["omitted_changes"] == 0
 
         job = ReviewJob(run_id=run.run_id, revision_id=new.id, status="completed")
         db.add(job)
@@ -180,6 +200,113 @@ def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision()
         review = current_review(db, run)
         assert review.final_status == "qualified"
         assert _superseded_qualification(db, run, new, review.manual_decision) is None
+
+
+def test_superseded_qualification_summarizes_step_and_location_changes() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "unqualified")
+        previous_revision = db.get(RunRevision, run.current_revision_id)
+        assert previous_revision is not None
+        previous_revision.snapshot_json = json.dumps({
+            "folder": {"path": "Testing / Bay 1"},
+            "run": {
+                "location": "Bay 1", "execution-date": "2026-09-20",
+                "execution-time": "10:00:00",
+                "steps": [{"id": "111", "step-order": "1", "name": "Step 1",
+                           "actualText": "<p>Old evidence result at the end: 12 mm</p>"}],
+            },
+        })
+        save_manual_decision(db, run, "override_qualified", "operator", "Checked")
+        new = RunRevision(
+            run_id=run.run_id, revision_number=2, source_hash="c" * 64,
+            review_hash="d" * 64,
+            snapshot_json=json.dumps({
+                "folder": {"path": "Testing / Bay 2"},
+                "run": {
+                    "location": "Bay 2", "execution-date": "2026-09-21",
+                    "execution-time": "10:30:00",
+                    "steps": [{"id": "111", "step-order": "1", "name": "Step 1",
+                               "actualText": "<p>New evidence result at the end: 14 mm</p>"}],
+                },
+            }),
+        )
+        db.add(new)
+        db.flush()
+        run.source_hash = new.source_hash
+        run.current_revision_id = new.id
+        db.commit()
+
+        notice = _superseded_qualification(db, run, new, None)
+        assert notice is not None
+        changes = {change["label"]: change for change in notice["changes"]}
+        assert changes["执行位置"] == {
+            "label": "执行位置", "before": "Bay 1", "after": "Bay 2"
+        }
+        assert changes["执行日期"] == {
+            "label": "执行日期", "before": "2026-09-20", "after": "2026-09-21"
+        }
+        assert changes["执行时间"] == {
+            "label": "执行时间", "before": "10:00:00", "after": "10:30:00"
+        }
+        assert changes["测试文件夹"] == {
+            "label": "测试文件夹", "before": "Testing / Bay 1", "after": "Testing / Bay 2"
+        }
+        assert changes["步骤 1 Actual"]["before"] == "Old evidence result at the end: 12 mm"
+        assert changes["步骤 1 Actual"]["after"] == "New evidence result at the end: 14 mm"
+        assert "仅运行元数据" not in notice["summary"]
+
+
+def test_version_comparison_highlights_late_step_edits_without_dumping_html() -> None:
+    old_step = {"id": "111", "step-order": "1", "actualText": "<p>" + "same " * 70 + "12 mm</p>"}
+    new_step = {"id": "111", "step-order": "1", "actualText": "<p>" + "same " * 70 + "14 mm</p>"}
+    compared = _source_revision_changes(
+        {"run": {"steps": [old_step]}}, {"run": {"steps": [new_step]}}
+    )
+
+    actual = next(item for item in compared["changes"] if item["label"] == "步骤 1 Actual")
+    assert "12 mm" in actual["before"] and "14 mm" in actual["after"]
+    assert "<p>" not in actual["before"]
+    assert len(actual["before"]) < 180
+    assert "仅运行元数据" not in compared["summary"]
+
+
+def test_version_comparison_keeps_markups_and_long_diff_counts_explicit() -> None:
+    old_steps = [
+        {"step-order": str(index), "actualText": f"<a href='old.html'>Report {index}</a>"}
+        for index in range(1, 19)
+    ]
+    new_steps = [
+        {"step-order": str(index), "actualText": f"<a href='new.html'>Report {index}</a>"}
+        for index in range(1, 19)
+    ]
+    compared = _source_revision_changes(
+        {"run": {"steps": old_steps}}, {"run": {"steps": new_steps}}
+    )
+
+    assert len(compared["changes"]) == 12
+    assert compared["omitted_changes"] == 6
+    assert "原始标记或属性已变化" in compared["changes"][0]["after"]
+    assert "步骤和证据" not in compared["unchanged_fields"]
+
+
+def test_version_comparison_matches_existing_steps_by_id_when_new_step_is_inserted() -> None:
+    compared = _source_revision_changes(
+        {"run": {"steps": [
+            {"id": "111", "step-order": "1", "actualText": "Existing evidence"}
+        ]}},
+        {"run": {"steps": [
+            {"id": "222", "step-order": "1", "actualText": "New evidence"},
+            {"id": "111", "step-order": "2", "actualText": "Existing evidence"},
+        ]}},
+    )
+
+    labels = [change["label"] for change in compared["changes"]]
+    assert "步骤数量" in labels
+    assert "步骤 1 已新增" in labels
+    assert "步骤 2 顺序" in labels
+    assert not any("Actual" in label for label in labels)
 
 
 def test_revoked_manual_qualification_is_not_shown_as_superseded() -> None:

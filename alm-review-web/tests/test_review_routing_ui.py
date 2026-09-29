@@ -105,6 +105,10 @@ def test_run_detail_explains_superseded_manual_qualification() -> None:
     assert "因 ALM 源版本变化已失效" in source
     assert "上次人工理由：{{ superseded_qualification.decision.reason }}" in source
     assert "原记录仍保留，并非人工主动撤销" in source
+    assert "superseded_qualification.summary" in source
+    assert "superseded_qualification.changes" in source
+    assert "change.before" in source
+    assert "change.after" in source
     notice = source.split("superseded-manual-advisory", maxsplit=1)[1].split(
         "</section>", maxsplit=1
     )[0]
