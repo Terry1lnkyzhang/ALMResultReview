@@ -5,6 +5,8 @@ import pytest
 
 from app.services.skill_runner import (
     SkillRunner,
+    _grammar_schema,
+    _request_output_schema,
     discover_skills,
     load_skill,
     skill_manifest_metadata,
@@ -83,7 +85,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
         "alm-text-review": "1.7.0",
         "equipment-role": "1.4.1",
-        "html-evidence-review": "1.7.1",
+        "html-evidence-review": "1.8.0",
         "image-evidence-review": "1.3.1",
         "location-consistency": "1.0.0",
     }
@@ -103,7 +105,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.7.1"
+    assert html["version"] == "1.8.0"
     assert load_skill("html-evidence-review").max_tokens == 32768
 
 
@@ -208,6 +210,211 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     assert requests[0]["messages"][1]["role"] == "user"
     assert "Screenshots saved" not in requests[0]["messages"][0]["content"]
     assert "Screenshots saved" in requests[0]["messages"][1]["content"]
+
+
+_TEXT_GRANTS = {
+    "review.step_text",
+    "review.text_format",
+    "review.numbered_comparison",
+    "evidence.path_metadata",
+    "equipment.registry.candidates",
+}
+
+
+def test_skill_runner_requests_thinking_and_strips_inline_thinking(monkeypatch) -> None:
+    requests = []
+    answer = json.dumps(
+        {
+            "assessments": [
+                {
+                    "review_step": 1,
+                    "applicability": "applicable",
+                    "findings": [],
+                    "reference_decisions": [
+                        {
+                            "candidate_id": "step-1-ref-1",
+                            "role": "result_evidence_location",
+                            "requires_check": True,
+                            "reason": "Actual identifies an evidence location.",
+                        }
+                    ],
+                    "summary": "Actual identifies the expected evidence.",
+                }
+            ]
+        }
+    )
+
+    def post(*args, **kwargs):
+        requests.append(kwargs["json"])
+        return StubResponse(f"<think>\nCheck the folder path {{}}.\n</think>\n\n{answer}")
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+
+    trace = SkillRunner().run(
+        "alm-text-review",
+        skill_input(),
+        endpoint="https://ai.example/v1/chat/completions",
+        model_name="test-model",
+        headers={},
+        timeout_seconds=30,
+        granted_capabilities=_TEXT_GRANTS,
+    )
+
+    assert trace["status"] == "completed"
+    assert trace["enable_thinking"] is True
+    assert trace["ai_calls"] == 1
+    assert requests[0]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert requests[0]["temperature"] == 1.0
+    assert requests[0]["top_p"] == 0.95
+    assert requests[0]["top_k"] == 20
+    assert requests[0]["presence_penalty"] == 0.0
+    assert requests[0]["seed"] == trace["seed"] == int(trace["input_hash"][:8], 16) & 0x7FFFFFFF
+    assert requests[0]["response_format"]["type"] == "json_schema"
+    assessments = requests[0]["response_format"]["json_schema"]["schema"][
+        "properties"
+    ]["assessments"]
+    assert assessments["items"] is False
+    assert assessments["minItems"] == assessments["maxItems"] == 1
+    step = assessments["prefixItems"][0]["properties"]
+    assert step["review_step"] == {"enum": [1]}
+    assert [
+        decision["properties"]["candidate_id"]
+        for decision in step["reference_decisions"]["prefixItems"]
+    ] == [{"enum": ["step-1-ref-1"]}]
+
+
+def test_request_schema_limits_ids_to_supplied_values() -> None:
+    html = _request_output_schema(
+        load_skill("html-evidence-review"),
+        {
+            "steps": [
+                {
+                    "review_step": 8,
+                    "batch_observations": [],
+                    "reports": [
+                        {"report_id": "r1", "blocks": [{"block_id": "b1"}, {"block_id": "b2"}]},
+                        {"report_id": "r2", "blocks": [{"block_id": "b9"}]},
+                    ],
+                }
+            ]
+        },
+    )
+    step = html["properties"]["assessments"]["prefixItems"][0]["properties"]
+    assert [item["enum"] for item in step["reviewed_report_ids"]["prefixItems"]] == [
+        ["r1"],
+        ["r2"],
+    ]
+    assert [
+        (option["properties"]["report_id"]["enum"], option["properties"]["block_id"]["enum"])
+        for option in step["evidence"]["items"]["anyOf"]
+    ] == [(["r1"], ["b1", "b2"]), (["r2"], ["b9"])]
+    assert "uniqueItems" not in json.dumps(html)
+
+    final = _request_output_schema(
+        load_skill("html-evidence-review"),
+        {
+            "steps": [
+                {
+                    "review_step": 8,
+                    "batch_observations": [
+                        {"evidence": [{"report_id": "r2", "block_id": "b9"}]}
+                    ],
+                    "reports": [
+                        {"report_id": "r1", "blocks": []},
+                        {"report_id": "r2", "blocks": []},
+                    ],
+                }
+            ]
+        },
+    )
+    final_step = final["properties"]["assessments"]["prefixItems"][0]["properties"]
+    assert [
+        option["properties"]["block_id"]["enum"]
+        for option in final_step["evidence"]["items"]["anyOf"]
+    ] == [["b9"]]
+
+    equipment = _request_output_schema(
+        load_skill("equipment-role"),
+        {
+            "registry_equipment_names": ["Stopwatch"],
+            "steps": [
+                {"review_step": 4, "candidate_equipment": [{"equipment_id": "EQ-1"}]},
+                {"review_step": 5, "candidate_equipment": []},
+            ],
+        },
+    )
+    first, second = equipment["properties"]["decisions"]["prefixItems"]
+    assert first["properties"]["selected_equipment_ids"]["items"]["enum"] == ["EQ-1"]
+    assert first["properties"]["selected_equipment_names"]["items"]["enum"] == [
+        "Stopwatch"
+    ]
+    assert second["properties"]["selected_equipment_ids"]["maxItems"] == 0
+
+    image = _request_output_schema(
+        load_skill("image-evidence-review"),
+        {"steps": [{"review_step": 3, "images": [{"media_id": "m1"}, {"media_id": "m2"}]}]},
+    )
+    observed = image["properties"]["assessments"]["prefixItems"][0]["properties"][
+        "observed_media_ids"
+    ]
+    assert [item["enum"] for item in observed["prefixItems"]] == [["m1"], ["m2"]]
+    assert observed["items"] is False
+
+
+def test_skill_runner_seed_is_stable_for_identical_input(monkeypatch) -> None:
+    seeds = []
+
+    def post(*args, **kwargs):
+        seeds.append(kwargs["json"]["seed"])
+        return StubResponse("{}")
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+    for _ in range(2):
+        SkillRunner().run(
+            "alm-text-review",
+            skill_input(),
+            endpoint="https://ai.example/v1/chat/completions",
+            model_name="test-model",
+            headers={},
+            timeout_seconds=30,
+            granted_capabilities=_TEXT_GRANTS,
+        )
+
+    assert len(set(seeds)) == 1
+
+
+def test_grammar_schema_drops_keywords_the_server_rejects() -> None:
+    schema = load_skill("html-evidence-review").output_schema
+
+    assert "uniqueItems" in json.dumps(schema)
+    assert "uniqueItems" not in json.dumps(_grammar_schema(schema))
+
+
+def test_skill_runner_reports_thinking_that_exhausts_the_token_budget(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(kwargs["json"])
+        return StubResponse("<think>\nStill reasoning about the evidence")
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+
+    trace = SkillRunner().run(
+        "alm-text-review",
+        skill_input(),
+        endpoint="https://ai.example/v1/chat/completions",
+        model_name="test-model",
+        headers={},
+        timeout_seconds=30,
+        granted_capabilities=_TEXT_GRANTS,
+    )
+
+    assert trace["status"] == "failed"
+    assert "while thinking" in trace["error"]
+    assert trace["retryable"] is False
+    assert len(calls) == 1
 
 
 def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) -> None:

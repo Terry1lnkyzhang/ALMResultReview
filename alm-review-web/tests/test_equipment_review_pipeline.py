@@ -25,11 +25,13 @@ from app.services.reviews import (
     _build_review_plan,
     _compact_html_quote,
     _equipment_source_field,
+    _guard_selected_html_fail,
     _html_skill_batch_inputs,
     _manual_html_assessment,
     _reuse_verified_html_citations,
     _run_html_review_batches,
     _run_html_review_skill,
+    _select_html_blocks,
     _validate_html_assessment,
     process_job,
 )
@@ -723,6 +725,80 @@ def test_html_skill_batches_cover_every_block_without_truncation() -> None:
         <= 10_000
         for batch in batches
     )
+
+
+def _selected_html_input(omitted: int) -> dict[str, Any]:
+    return {
+        "steps": [
+            {
+                "review_step": 8,
+                "automation_release": {"status": "disabled", "failure_code": ""},
+                "reports": [{"report_id": "r1", "omitted_block_count": omitted}],
+            }
+        ]
+    }
+
+
+def _html_fail(**overrides: str) -> dict[str, Any]:
+    return {
+        "status": "fail",
+        "description_coverage": "supported",
+        "expected_coverage": "not_found",
+        "actual_coverage": "supported",
+        "result_consistency": "consistent",
+        "release_consistency": "not_checked",
+        "reason": "报告未覆盖预期结果。",
+        **overrides,
+    }
+
+
+def test_not_found_in_selected_html_blocks_is_manual_not_fail() -> None:
+    guarded = _guard_selected_html_fail(_selected_html_input(3), _html_fail())
+
+    assert guarded["status"] == "manual"
+    assert guarded["reason"].endswith("报告未覆盖预期结果。")
+    assert _guard_selected_html_fail(_selected_html_input(0), _html_fail())["status"] == "fail"
+    assert _guard_selected_html_fail(
+        _selected_html_input(3), _html_fail(actual_coverage="contradicted")
+    )["status"] == "fail"
+    assert _guard_selected_html_fail(
+        _selected_html_input(3), _html_fail(result_consistency="inconsistent")
+    )["status"] == "fail"
+
+
+def test_html_block_selection_only_runs_when_reports_outgrow_one_call() -> None:
+    def skill_input(block_chars: int) -> dict[str, Any]:
+        return {
+            "steps": [
+                {
+                    "review_step": 1,
+                    "description": "Child head helical scan",
+                    "expected": "Circles visible",
+                    "actual": "Circles visible",
+                    "reports": [
+                        {
+                            "report_id": "r1",
+                            "blocks": [
+                                {"block_id": "block-1", "text": "Child head helical " + "x" * block_chars},
+                                {"block_id": "block-2", "text": "y" * block_chars},
+                                {"block_id": "block-3", "text": "z" * block_chars},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+    small = skill_input(100)
+    assert _select_html_blocks(small) == (small, None)
+
+    selected, stats = _select_html_blocks(skill_input(15_000))
+    report = selected["steps"][0]["reports"][0]
+    assert [block["block_id"] for block in report["blocks"]] == ["block-1"]
+    assert report["omitted_block_count"] == 2
+    assert stats is not None
+    assert stats["total_blocks"] == 3
+    assert stats["selected_blocks"] == 1
 
 
 def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None:

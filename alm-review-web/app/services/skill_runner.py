@@ -18,6 +18,27 @@ _SKILLS_ROOT = Path(__file__).resolve().parents[1] / "review_skills"
 REASON_CHAR_LIMIT = 1000
 MAX_OUTPUT_REPAIR_ATTEMPTS = 2
 _RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# Qwen's official sampling presets; top_k, min_p and repetition_penalty are vLLM/llama.cpp extensions.
+_SAMPLING_PARAMS: dict[bool, dict[str, float | int]] = {
+    True: {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
+    },
+    False: {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    },
+}
+# The vLLM structured-output grammar rejects these JSON Schema keywords.
+_GRAMMAR_UNSUPPORTED_KEYS = frozenset({"uniqueItems"})
 _REPAIR_INSTRUCTION = (
     "Your previous response was rejected by the output validator:\n{error}\n\n"
     "Return the corrected JSON object only. Keep every item you already assessed, "
@@ -196,6 +217,7 @@ class HtmlReport(BaseModel):
     filename: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     content_truncated: bool
+    omitted_block_count: int = Field(default=0, ge=0)
     blocks: list[HtmlBlock]
 
 
@@ -416,7 +438,7 @@ class SkillDefinition:
     name: str
     version: str
     stage: str
-    temperature: float
+    enable_thinking: bool
     max_tokens: int
     max_tokens_per_item: int
     instructions: str
@@ -454,6 +476,212 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _grammar_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _grammar_schema(item)
+            for key, item in value.items()
+            if key not in _GRAMMAR_UNSUPPORTED_KEYS
+        }
+    if isinstance(value, list):
+        return [_grammar_schema(item) for item in value]
+    return value
+
+
+def _with_properties(schema: dict[str, Any], **properties: Any) -> dict[str, Any]:
+    return {**schema, "properties": {**schema["properties"], **properties}}
+
+
+def _one_of(*values: Any) -> dict[str, Any]:
+    return {"enum": list(dict.fromkeys(values))}
+
+
+def _exact_array(
+    schema: dict[str, Any], items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """One item per entry, in order: nothing omitted, repeated or invented."""
+    base = {
+        key: value
+        for key, value in schema.items()
+        if key not in {"items", "minItems", "maxItems"}
+    }
+    return {
+        **base,
+        "prefixItems": items,
+        "items": False,
+        "minItems": len(items),
+        "maxItems": len(items),
+    }
+
+
+def _choice_array(schema: dict[str, Any], values: list[str]) -> dict[str, Any]:
+    if not values:
+        return {**schema, "maxItems": 0}
+    return {**schema, "items": {**schema["items"], **_one_of(*values)}}
+
+
+def _text_review_ids(
+    schema: dict[str, Any], data: dict[str, Any]
+) -> dict[str, Any]:
+    assessments = schema["properties"]["assessments"]
+    item = assessments["items"]
+    decisions = item["properties"]["reference_decisions"]
+    return _with_properties(
+        schema,
+        assessments=_exact_array(
+            assessments,
+            [
+                _with_properties(
+                    item,
+                    review_step=_one_of(step["review_step"]),
+                    reference_decisions=_exact_array(
+                        decisions,
+                        [
+                            _with_properties(
+                                decisions["items"],
+                                candidate_id=_one_of(candidate["candidate_id"]),
+                            )
+                            for candidate in step["reference_candidates"]
+                        ],
+                    ),
+                )
+                for step in data["steps"]
+            ],
+        ),
+    )
+
+
+def _image_review_ids(
+    schema: dict[str, Any], data: dict[str, Any]
+) -> dict[str, Any]:
+    assessments = schema["properties"]["assessments"]
+    item = assessments["items"]
+    observed = item["properties"]["observed_media_ids"]
+    return _with_properties(
+        schema,
+        assessments=_exact_array(
+            assessments,
+            [
+                _with_properties(
+                    item,
+                    review_step=_one_of(step["review_step"]),
+                    observed_media_ids=_exact_array(
+                        observed,
+                        [_one_of(image["media_id"]) for image in step["images"]],
+                    ),
+                )
+                for step in data["steps"]
+            ],
+        ),
+    )
+
+
+def _html_review_ids(
+    schema: dict[str, Any], data: dict[str, Any]
+) -> dict[str, Any]:
+    assessments = schema["properties"]["assessments"]
+    item = assessments["items"]
+    evidence = item["properties"]["evidence"]
+    narrowed_steps = []
+    for step in data["steps"]:
+        # Final synthesis may only reuse citations already verified in a batch.
+        pairs = (
+            [
+                (citation["report_id"], citation["block_id"])
+                for observation in step["batch_observations"]
+                for citation in observation["evidence"]
+            ]
+            if step["batch_observations"]
+            else [
+                (report["report_id"], block["block_id"])
+                for report in step["reports"]
+                for block in report["blocks"]
+            ]
+        )
+        blocks_by_report: dict[str, list[str]] = {}
+        for report_id, block_id in pairs:
+            blocks_by_report.setdefault(report_id, []).append(block_id)
+        citations = [
+            _with_properties(
+                evidence["items"],
+                report_id=_one_of(report_id),
+                block_id=_one_of(*block_ids),
+            )
+            for report_id, block_ids in blocks_by_report.items()
+        ]
+        narrowed_steps.append(
+            _with_properties(
+                item,
+                review_step=_one_of(step["review_step"]),
+                reviewed_report_ids=_exact_array(
+                    item["properties"]["reviewed_report_ids"],
+                    [_one_of(report["report_id"]) for report in step["reports"]],
+                ),
+                evidence=(
+                    {**evidence, "items": {"anyOf": citations}}
+                    if citations
+                    else {**evidence, "maxItems": 0}
+                ),
+            )
+        )
+    return _with_properties(
+        schema, assessments=_exact_array(assessments, narrowed_steps)
+    )
+
+
+def _equipment_role_ids(
+    schema: dict[str, Any], data: dict[str, Any]
+) -> dict[str, Any]:
+    decisions = schema["properties"]["decisions"]
+    item = decisions["items"]
+    return _with_properties(
+        schema,
+        decisions=_exact_array(
+            decisions,
+            [
+                _with_properties(
+                    item,
+                    review_step=_one_of(step["review_step"]),
+                    selected_equipment_ids=_choice_array(
+                        item["properties"]["selected_equipment_ids"],
+                        [
+                            candidate["equipment_id"]
+                            for candidate in step["candidate_equipment"]
+                        ],
+                    ),
+                    selected_equipment_names=_choice_array(
+                        item["properties"]["selected_equipment_names"],
+                        data["registry_equipment_names"],
+                    ),
+                )
+                for step in data["steps"]
+            ],
+        ),
+    )
+
+
+_OUTPUT_ID_CONSTRAINTS: dict[
+    str, Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
+] = {
+    "alm-text-review": _text_review_ids,
+    "image-evidence-review": _image_review_ids,
+    "html-evidence-review": _html_review_ids,
+    "equipment-role": _equipment_role_ids,
+}
+
+
+def _request_output_schema(
+    definition: SkillDefinition, validated_input: dict[str, Any]
+) -> dict[str, Any]:
+    narrow = _OUTPUT_ID_CONSTRAINTS.get(definition.skill_id)
+    schema = (
+        narrow(definition.output_schema, validated_input)
+        if narrow
+        else definition.output_schema
+    )
+    return _grammar_schema(schema)
+
+
 def _response_content(response: Any) -> str:
     try:
         response.raise_for_status()
@@ -465,8 +693,22 @@ def _response_content(response: Any) -> str:
             f"{exc} Response body: {detail[:600]}",
             retryable=status in _RETRYABLE_HTTP_STATUS,
         ) from exc
-    content = response.json()["choices"][0]["message"]["content"]
+    message = response.json()["choices"][0]["message"]
+    content = message.get("content")
+    thinking = bool(message.get("reasoning_content"))
+    # Without a server-side reasoning parser the thinking arrives inline in content.
+    if isinstance(content, str) and "</think>" in content:
+        thinking = True
+        content = content.partition("</think>")[2]
+    elif isinstance(content, str) and content.lstrip().startswith("<think>"):
+        thinking = True
+        content = ""
     if not isinstance(content, str) or not content.strip():
+        if thinking:
+            raise SkillFailure(
+                "Model used up max_tokens while thinking; raise the Skill max_tokens.",
+                retryable=False,
+            )
         raise SkillFailure("Skill did not return JSON content.", retryable=False)
     return content
 
@@ -606,7 +848,7 @@ def load_skill(skill_id: str) -> SkillDefinition:
         name=str(metadata.get("name", skill_id)),
         version=str(metadata["version"]),
         stage=str(metadata["stage"]),
-        temperature=float(model.get("temperature", 0)),
+        enable_thinking=bool(model.get("enable_thinking", True)),
         max_tokens=int(model.get("max_tokens", 1024)),
         max_tokens_per_item=int(model.get("max_tokens_per_item", 0)),
         instructions=paths["instructions"].read_text(encoding="utf-8").strip(),
@@ -699,6 +941,7 @@ class SkillRunner:
                 input_hash=_canonical_hash(validated_input),
                 stage=definition.stage,
                 contract_version=definition.contract_version,
+                enable_thinking=definition.enable_thinking,
                 capabilities={
                     "required": list(definition.required_capabilities),
                     "optional": list(definition.optional_capabilities),
@@ -737,15 +980,30 @@ class SkillRunner:
             trace["repairs"] = repairs
             max_tokens = _max_tokens(definition, validated_input)
             trace["max_tokens"] = max_tokens
+            # Same input, same seed: reruns reproduce the sampled answer as far as the server allows.
+            seed = int(trace["input_hash"][:8], 16) & 0x7FFFFFFF
+            trace["seed"] = seed
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": definition.skill_id,
+                    "schema": _request_output_schema(definition, validated_input),
+                    "strict": True,
+                },
+            }
             for attempt in range(1, MAX_OUTPUT_REPAIR_ATTEMPTS + 1):
                 trace["ai_calls"] = attempt
                 response = (request_post or httpx.post)(
                     endpoint,
                     json={
                         "model": model_name,
-                        "temperature": definition.temperature,
+                        **_SAMPLING_PARAMS[definition.enable_thinking],
+                        "seed": seed,
                         "max_tokens": max_tokens,
-                        "chat_template_kwargs": {"enable_thinking": False},
+                        "response_format": response_format,
+                        "chat_template_kwargs": {
+                            "enable_thinking": definition.enable_thinking
+                        },
                         "messages": messages,
                     },
                     headers=headers,
