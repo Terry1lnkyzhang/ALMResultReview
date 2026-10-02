@@ -129,6 +129,7 @@
                 "filename": {"type": "string", "minLength": 1},
                 "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 "content_truncated": {"type": "boolean"},
+                "omitted_block_count": {"type": "integer", "minimum": 0},
                 "blocks": {
                   "type": "array",
                   "items": {

@@ -4,7 +4,57 @@ from app.services.html_evidence import (
     HtmlEvidenceBlock,
     HtmlEvidenceResolver,
     actual_phantom_codes,
+    select_relevant_blocks,
 )
+
+
+def _row(index: int, scenario: str, description: str, status: str = "Pass") -> dict:
+    return {
+        "block_id": f"test-result-{index}",
+        "text": (
+            f"stepName: Script_104437_{scenario}_{index}\n"
+            f"description: {description}\nexpect: done\nactual: done\nstatus: {status}"
+        ),
+    }
+
+
+def test_block_selection_keeps_summary_failures_and_the_matching_scenario() -> None:
+    blocks = [
+        {"block_id": "report-summary", "text": "testStepsPass: 5\ntestStepsFail: 1"},
+        _row(1, "Data1", "Adult abdomen helical scan"),
+        _row(2, "Data1", "Check adult noise"),
+        _row(3, "Data2", "Child head helical scan of the Catphan phantom"),
+        _row(4, "Data2", "Check circles of 7 mm diameter"),
+        _row(5, "Data3", "Adult chest axial scan", status="Fail"),
+        _row(6, "Data4", "Adult spine axial scan"),
+    ]
+    report = {"report_id": "r1", "content_truncated": False, "blocks": blocks}
+
+    [selected] = select_relevant_blocks(
+        "Child head helical. Scan the Catphan phantom. A 7 mm circle is visible.",
+        [report],
+        char_budget=400,
+    )
+
+    assert [block["block_id"] for block in selected["blocks"]] == [
+        "report-summary",
+        "test-result-3",
+        "test-result-4",
+        "test-result-5",
+    ]
+    assert selected["omitted_block_count"] == 3
+
+
+def test_block_selection_keeps_a_report_whole_when_nothing_matches() -> None:
+    report = {
+        "report_id": "r1",
+        "blocks": [{"block_id": f"block-{index}", "text": "x" * 500} for index in range(4)],
+    }
+
+    [selected] = select_relevant_blocks("Child head helical", [report], char_budget=100)
+
+    assert selected["blocks"] == report["blocks"]
+    assert selected["omitted_block_count"] == 0
 
 
 def write_report(path: Path, result_values: list[str]) -> None:

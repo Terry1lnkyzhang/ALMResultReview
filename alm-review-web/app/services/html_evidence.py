@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
+import math
 import os
 import re
 import stat
+from collections import Counter
 from dataclasses import dataclass, replace
 from html.parser import HTMLParser
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from app.services.evidence import validate_network_evidence_path
 
@@ -56,6 +60,13 @@ _RESULT_FIELDS = (
     "log",
     "evidence",
 )
+_MARKUP_RE = re.compile(r"<[^>]+>")
+_QUERY_TERM_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)*|[\u4e00-\u9fff]")
+_RESULT_ROW_ID_RE = re.compile(r"^(test-result-\d+)(?:-part-\d+)?$")
+_STEP_NAME_LINE_RE = re.compile(r"(?m)^stepName:\s*(.*?)\s*$")
+_STATUS_LINE_RE = re.compile(r"(?im)^status:\s*(.*?)\s*$")
+_SCENARIO_SUFFIX_RE = re.compile(r"_\d+$")
+_PASSING_ROW_STATUSES = frozenset({"pass", "passed", "agentpass"})
 
 
 @dataclass(frozen=True)
@@ -194,6 +205,142 @@ def _result_data_blocks(document: str) -> tuple[HtmlEvidenceBlock, ...] | None:
 
 def _whitespace_key(value: str) -> str:
     return _WHITESPACE_RUN_RE.sub(" ", value).strip().casefold()
+
+
+def _terms(text: str) -> list[str]:
+    folded = html.unescape(_MARKUP_RE.sub(" ", text)).casefold()
+    return [
+        term
+        for term in _QUERY_TERM_RE.findall(folded)
+        if len(term) > 1 or term.isdigit() or not term.isascii()
+    ]
+
+
+def _bm25_scores(query: set[str], documents: list[list[str]]) -> list[float]:
+    count = len(documents)
+    average_length = sum(map(len, documents)) / count or 1.0
+    document_frequency = Counter(
+        term for document in documents for term in set(document)
+    )
+    scores = []
+    for document in documents:
+        term_counts = Counter(document)
+        length_norm = 0.25 + 0.75 * len(document) / average_length
+        score = 0.0
+        for term in query & term_counts.keys():
+            frequency = document_frequency[term]
+            idf = math.log(1 + (count - frequency + 0.5) / (frequency + 0.5))
+            tf = term_counts[term]
+            score += idf * tf * 2.2 / (tf + 1.2 * length_norm)
+        scores.append(score)
+    return scores
+
+
+def _report_units(
+    blocks: list[dict[str, Any]],
+) -> tuple[set[int], list[list[int]], set[int]]:
+    """Return always-kept block indexes, contiguous scoring units, and plain-text blocks."""
+    required: set[int] = set()
+    units: list[list[int]] = []
+    plain: set[int] = set()
+    scenario: str | None = None
+    row_id: str | None = None
+    for index, block in enumerate(blocks):
+        block_id = str(block["block_id"])
+        text = str(block["text"])
+        if block_id.startswith("report-summary"):
+            required.add(index)
+            scenario = row_id = None
+            continue
+        row = _RESULT_ROW_ID_RE.match(block_id)
+        if row is None:
+            plain.add(index)
+            units.append([index])
+            scenario = row_id = None
+            continue
+        status = _STATUS_LINE_RE.search(text)
+        if status and status.group(1).casefold().replace(" ", "") not in (
+            _PASSING_ROW_STATUSES
+        ):
+            required.add(index)
+        if row.group(1) == row_id:
+            units[-1].append(index)
+            continue
+        row_id = row.group(1)
+        step_name = _STEP_NAME_LINE_RE.search(text)
+        # Rows of one scripted scenario share a stepName prefix such as `..._Data7_`.
+        key = (
+            _SCENARIO_SUFFIX_RE.sub("", step_name.group(1)) if step_name else row_id
+        )
+        if units and key == scenario:
+            units[-1].append(index)
+        else:
+            units.append([index])
+            scenario = key
+    return required, units, plain
+
+
+def select_relevant_blocks(
+    query: str,
+    reports: list[dict[str, Any]],
+    char_budget: int,
+) -> list[dict[str, Any]]:
+    """Keep each report's summary, non-passing rows and the blocks most relevant to `query`.
+
+    A report with no block matching the query is kept whole, because nothing
+    supports dropping any of it.
+    """
+    query_terms = set(_terms(query))
+    share = max(1, char_budget // max(1, len(reports)))
+    selected_reports = []
+    for report in reports:
+        blocks = list(report["blocks"])
+        required, units, plain = _report_units(blocks)
+        scores = (
+            _bm25_scores(
+                query_terms,
+                [_terms("\n".join(blocks[i]["text"] for i in unit)) for unit in units],
+            )
+            if units
+            else []
+        )
+        if not any(score > 0 for score in scores):
+            selected_reports.append({**report, "omitted_block_count": 0})
+            continue
+        chosen = set(required)
+        used = sum(len(blocks[index]["text"]) for index in chosen)
+        ranked = sorted(range(len(units)), key=lambda unit: -scores[unit])
+        for position, unit_index in enumerate(ranked):
+            if scores[unit_index] <= 0:
+                break
+            size = sum(
+                len(blocks[index]["text"])
+                for index in units[unit_index]
+                if index not in chosen
+            )
+            if position == 0 or used + size <= share:
+                chosen.update(units[unit_index])
+                used += size
+        # Plain text is cut into fixed-size blocks, so a section can straddle two.
+        for index in sorted(chosen & plain):
+            for neighbour in (index - 1, index + 1):
+                if (
+                    0 <= neighbour < len(blocks)
+                    and neighbour not in chosen
+                    and used + len(blocks[neighbour]["text"]) <= share
+                ):
+                    chosen.add(neighbour)
+                    used += len(blocks[neighbour]["text"])
+        selected_reports.append(
+            {
+                **report,
+                "blocks": [
+                    block for index, block in enumerate(blocks) if index in chosen
+                ],
+                "omitted_block_count": len(blocks) - len(chosen),
+            }
+        )
+    return selected_reports
 
 
 class HtmlEvidenceResolver:

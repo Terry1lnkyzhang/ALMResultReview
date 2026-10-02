@@ -58,6 +58,7 @@ from app.services.html_evidence import (
     HtmlEvidenceResolver,
     HtmlEvidenceResult,
     actual_phantom_codes,
+    select_relevant_blocks,
 )
 from app.services.image_evidence import (
     IMAGE_TRANSPORT_MAX_BYTES,
@@ -1367,6 +1368,77 @@ def _html_skill_batch_inputs(
         }
         for batch_index, reports in enumerate(report_batches, start=1)
     ]
+
+
+def _html_block_stats(reports: list[dict[str, Any]]) -> tuple[int, int]:
+    return (
+        sum(len(report["blocks"]) for report in reports),
+        sum(len(block["text"]) for report in reports for block in report["blocks"]),
+    )
+
+
+def _select_html_blocks(
+    skill_input: dict[str, Any],
+    *,
+    char_budget: int = HTML_SKILL_CHAR_BUDGET,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Send only Step-relevant report blocks once the full reports outgrow one call."""
+    step = skill_input["steps"][0]
+    total_blocks, total_chars = _html_block_stats(step["reports"])
+    if total_chars <= char_budget:
+        return skill_input, None
+    reports = select_relevant_blocks(
+        "\n".join(
+            str(step.get(field_name) or "")
+            for field_name in ("description", "expected", "actual")
+        ),
+        step["reports"],
+        char_budget,
+    )
+    selected_blocks, selected_chars = _html_block_stats(reports)
+    return (
+        {**skill_input, "steps": [{**step, "reports": reports}]},
+        {
+            "total_blocks": total_blocks,
+            "selected_blocks": selected_blocks,
+            "total_chars": total_chars,
+            "selected_chars": selected_chars,
+        },
+    )
+
+
+def _guard_selected_html_fail(
+    skill_input: dict[str, Any],
+    assessment: dict[str, Any],
+) -> dict[str, Any]:
+    """A gap in pre-selected blocks does not prove the report lacks that content."""
+    step = skill_input["steps"][0]
+    coverages = [
+        assessment[field_name]
+        for field_name in (
+            "description_coverage",
+            "expected_coverage",
+            "actual_coverage",
+        )
+    ]
+    if (
+        assessment["status"] != "fail"
+        or not any(report.get("omitted_block_count") for report in step["reports"])
+        or "not_found" not in coverages
+        or "contradicted" in coverages
+        or assessment["result_consistency"] == "inconsistent"
+        or assessment["release_consistency"] == "mismatched"
+        or step["automation_release"].get("failure_code")
+    ):
+        return assessment
+    return {
+        **assessment,
+        "status": "manual",
+        "reason": (
+            "未找到的内容可能位于程序未选取的报告片段，改为人工复核。"
+            + assessment["reason"]
+        )[:1000],
+    }
 
 
 def _html_final_input(
@@ -2885,7 +2957,11 @@ def _report_review_stage(ctx: ReviewContext) -> dict[str, Any]:
         skill_input = _html_skill_input(ctx, request)
         if skill_input is None:
             continue
+        skill_input, selection = _select_html_blocks(skill_input)
         traces, assessment = _run_html_review_batches(ctx, skill_input)
+        if selection is not None:
+            traces[0]["html_block_selection"] = selection
+            assessment = _guard_selected_html_fail(skill_input, assessment)
         ctx.evidence.html_skill_traces.extend(traces)
         ctx.evidence.html_assessments[request.review_step] = assessment
         report_paths = {
