@@ -1,6 +1,6 @@
 # AI Review 当前规则说明
 
-> 整理日期：2026-09-29。本文说明**当前工作区源码**的行为，不代表历史已保存结果一定采用同一版本。评审规则与运行环境的配置、台账、Skill 文件共同决定实际结论；有冲突时，以执行该次评审时保存的 `ReviewResult` 和流水线记录为准。
+> 整理日期：2026-10-02。本文说明**当前工作区源码**的行为，不代表历史已保存结果一定采用同一版本。评审规则与运行环境的配置、台账、Skill 文件共同决定实际结论；有冲突时，以执行该次评审时保存的 `ReviewResult` 和流水线记录为准。
 >
 > 本文是规则及操作说明，不是 AI 提示词本身。阶段声明见 [review_pipeline.toml](../app/review_pipeline.toml)，实际执行见 [reviews.py](../app/services/reviews.py)；各 Skill 的正式指令见 [review_skills](../app/review_skills)。
 
@@ -19,7 +19,7 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 
 | 阶段 | 调用或规则 | 条件与输出 |
 | --- | --- | --- |
-| 文本评审 `text_review` | `alm-text-review` v1.7.0；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
+| 文本评审 `text_review` | `alm-text-review` v1.7.1；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
 | 路由 `routing` | 程序消费首轮返回的候选角色，生成路径/图像/HTML/设备检查请求 | 本阶段 `ai_calls=0`；ALM 图像附件强制进入相应检查 |
 | 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.0 | 非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
 | 图像 `image_review` | 安全解析 + `image-evidence-review` v1.3.1 | Workspace 启用外部证据且存在可审图片时调用；否则 disabled / not_applicable |
@@ -33,7 +33,7 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 
 ### 3.1 适用性优先
 
-模型先检查 Step 是否适用于当前 Workspace 的项目/产品环境。Description、Expected 或 Actual 明确排除当前项目、或明确只适用于另一产品/配置且有可信执行范围时，判 `not_applicable`，此 Step 不应再产生缺失 Actual 或 Expected/Actual 冲突。范围不明但存在限制时判 `manual`。Step 状态和 Run 状态由应用作为可信上下文传入；ALM 自由文本仍是不可信证据。见 [首轮指令](../app/review_skills/alm-text-review/instructions.md)。
+模型先检查 Step 是否适用于当前 Workspace 的项目/产品环境。Description、Expected 或 Actual 明确排除当前项目、或明确只适用于另一产品/配置且有可信执行范围时，判 `not_applicable`，此 Step 不应再产生缺失执行结果或 Expected/Actual 冲突；若 Actual 仅列出不支持的参数却未交代 N/A、未执行及配置依据，可另记 `manual/record_documentation_gap`。明确要求 Standard PC 却记成 Premium PC 执行而无替代说明时同样交人工，不自行假定批准。范围不明但存在限制时判 `manual`。Step 状态和 Run 状态由应用作为可信上下文传入；ALM 自由文本仍是不可信证据。见 [首轮指令](../app/review_skills/alm-text-review/instructions.md)。
 
 ### 3.2 文本和状态核对
 
@@ -41,9 +41,9 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 - **Failed Step**：Actual 应具体说明观察到的偏差、异常、超限值等；失败执行被完整记录**不是**评审 fail。只写笼统 `Failed` 且无法核查通常是不充分；写成完全满足 Expected 的成功结果与 Step 状态矛盾。
 - **No Run Step**：Failed Run 中未执行且 Actual 为空通常不算缺陷；若 Actual 却宣称执行，则不一致。其他 Run 状态下无法解释的未执行步骤通常需人工复核。
 - **语言/格式**：影响理解的语法、拼写、时态或严重格式问题可能成为 issue；不影响意义的细小语言问题最多 warning。正常列表、路径、单位、JSON、被动语态、轻微空格不应单独判不合格。
-- 引用图片、报告、附件或路径可作为 Actual 回答 Expected 的方式；文件名、脚本名或多个 Step 复用同一报告，不足以**单独**证明内容冲突。证据内容交后续阶段查验；如果 Step 文本自身明确出现数值矛盾，仍可直接 fail。
+- 引用图片、报告、附件或路径可作为 Actual 回答 Expected 的方式；文件名、脚本名或多个 Step 复用同一报告，不足以**单独**证明内容冲突。证据内容交后续阶段查验；如果 Step 文本自身明确出现数值矛盾，仍可直接 fail。受控文档检查涉及多个独立要求，但 Actual 只列文档、章节与笼统 Passed、没有逐项可复核的联系时，可产生 `manual/record_documentation_gap`；不要求将已路由图片/HTML 中的数值重抄到 Actual，也不宣称所引报告错误。
 
-程序检测候选路径/设备并分配稳定 ID；模型须给**每个候选恰好一个** `reference_decision`，不得遗漏、重复或编造 ID。结果证据、证据位置和受控设备标为需要检查；无法判断用途时保守交人工。程序验证覆盖和角色/检查标记的一致性：模型修复后仍**只遗漏候选**时可补为 `uncertain + requires_check=true`，额外/重复/不合法角色不能这样补过。`not_applicable` 的 finding 被忽略；已转交专项证据核查的“证据不足”或仅从元数据推断的冲突不再由首轮重复判定。见 [reviews.py](../app/services/reviews.py) 的 `_validate_text_references()`、`_fallback_missing_text_references()`、`_run_text_semantic_skills()`。
+程序检测候选路径/设备并分配稳定 ID；模型须给**每个候选恰好一个** `reference_decision`，不得遗漏、重复或编造 ID。结果证据、证据位置和受控设备标为需要检查；无法判断用途时保守交人工。程序验证覆盖和角色/检查标记的一致性：模型修复后仍**只遗漏候选**时可补为 `uncertain + requires_check=true`，额外/重复/不合法角色不能这样补过。`not_applicable` 的执行结果 finding 被忽略，但记录说明不足的人工项保留；已转交专项证据核查的内容缺失或仅从元数据推断的冲突不再由首轮重复判定。EarthFormal02 的 Failed Step 若 Actual 引用 ADS 却没有 PD 引用，另提示人工核对偏差追踪，不把 Failed 本身判为不合格。见 [reviews.py](../app/services/reviews.py) 的 `_validate_text_references()`、`_fallback_missing_text_references()`、`_run_text_semantic_skills()`。
 
 文本字段单项最多向首轮 AI 提供 6,000 字符，批次目标最多 24,000 字符或 15 Step；超长字段截断时会保留“已截断”提示，并给该 Step 追加 `manual`，不把局部文本视作全量通过。特别注意**一个 Review 不保证只有一次 AI 调用**，首轮可分批，输出不合规还可能额外修复。见 [reviews.py](../app/services/reviews.py) 的 `STEP_FIELD_CHAR_LIMIT` 和 `_text_skill_batches()`。
 
@@ -149,7 +149,7 @@ Step issue 等级 `fail > manual > pass > not_applicable`；任意 Step fail **�
 
 来自临时 fallback 的 HTML 证据会保留 `temporary_evidence_used` 标记，页面要求归档后重评；**这只是提醒，不是后端禁止人工强制合格的规则**。当前人工强制合格仍可记录，并且只要 Run 的 revision/source hash 未变且该裁决未撤销，重评后仍可继续影响最终显示结论；临时证据标记本身依旧保留。一般批量重评/推荐更新会跳过当前已有人工裁决的 Run；临时证据专用批量筛选可显式允许这类 Run 重评，单条 `Review now` 也可重评。见 [review_operations.py](../app/services/review_operations.py)、[run_detail.html](../app/templates/run_detail.html)。
 
-`review_policy_key` 纳入 Workspace、AI pool、Skill 版本与内容、位置/发布快照、设备台账及规则文件哈希；因此政策变化可显示**建议更新评审**，但不会自动删除旧结果，也不代表旧结果必然错误。当前 `REVIEW_ENGINE_VERSION` 为 `2026.09.28.1`，且 `reviews.py` 全文件参与实现哈希；**即使只调整任务续租代码，也可能触发更新建议**。比较两次历史结论时请同时看其 policy key、revision、源 hash 与 pipeline trace，而不要将当前规则反推到旧结果。见 [review_policy.py](../app/services/review_policy.py)、[review_status.py](../app/services/review_status.py)。
+`review_policy_key` 纳入 Workspace、AI pool、Skill 版本与内容、位置/发布快照、设备台账及规则文件哈希；因此政策变化可显示**建议更新评审**，但不会自动删除旧结果，也不代表旧结果必然错误。当前 `REVIEW_ENGINE_VERSION` 为 `2026.10.02.1`，且 `reviews.py` 全文件参与实现哈希；**即使只调整任务续租代码，也可能触发更新建议**。比较两次历史结论时请同时看其 policy key、revision、源 hash 与 pipeline trace，而不要将当前规则反推到旧结果。见 [review_policy.py](../app/services/review_policy.py)、[review_status.py](../app/services/review_status.py)。
 
 ---
 

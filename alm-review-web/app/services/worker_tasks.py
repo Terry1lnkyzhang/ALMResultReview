@@ -304,8 +304,6 @@ def _process_run_sync_job(
         data = collect_run(
             config,
             run_row.test_instance_id,
-            str(run_row.folder_id or ""),
-            run_row.folder_path,
             include_image_attachments=bool(
                 evidence_config and evidence_config.external_evidence_review_enabled
             ),

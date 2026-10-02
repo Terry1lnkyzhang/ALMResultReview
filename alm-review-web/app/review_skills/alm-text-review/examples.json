@@ -71,6 +71,50 @@
   },
   {
     "input": {
+      "review_step": 12,
+      "alm_step_status": "Passed",
+      "description": "Inspect the report for metal detection across FOV and Z range, 512x512 images, and 12/16-bit depth.",
+      "expected": "Record report name, revision, section, and conclusion.",
+      "actual": "D002566624 Rev A, Section 5.3: Passed.",
+      "actual_format": {"layout_text": "D002566624 Rev A, Section 5.3: Passed.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 12,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只给出报告章节和整体 Passed，无法对应 FOV、Z 范围、图像矩阵及位深的各项验证结果，需人工核对所引报告。"}
+      ],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "报告引用已标识，但多个验收要素缺少可复核的对应说明。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 13,
+      "alm_step_status": "Passed",
+      "description": "This step is only for configurations supporting 0.34s/r rotation. Perform a cardiac scan.",
+      "expected": "The scan completes at 0.34s/r.",
+      "actual": "Earth CT5300 only has 0.35s/0.40s/0.50s rotation time.",
+      "actual_format": {"layout_text": "Earth CT5300 only has 0.35s/0.40s/0.50s rotation time.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 13,
+      "applicability": "not_applicable",
+      "findings": [
+        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只列出了声称可用的转速，没有明确记载本步骤 N/A、未执行原因及配置依据，需人工核对。"}
+      ],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "可能不适用该配置，但执行记录没有清楚交代未执行的依据。"
+    }
+  },
+  {
+    "input": {
       "review_step": 4,
       "description": "Check the computer environment used.",
       "expected": "The computer parameters are the same or higher than the following: CPU 1.7GHZ, RAM 16G. Record computer parameters: ______.",

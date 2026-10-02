@@ -874,14 +874,10 @@ def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch
         def stub_collect_run(
             _config,
             test_instance_id,
-            folder_id,
-            folder_path,
             include_image_attachments=False,
         ):
             collected.update(
                 test_instance_id=test_instance_id,
-                folder_id=folder_id,
-                folder_path=folder_path,
                 include_image_attachments=include_image_attachments,
             )
             return {
@@ -912,8 +908,6 @@ def test_single_run_refresh_reimports_that_run_and_queues_its_review(monkeypatch
 
         assert collected == {
             "test_instance_id": 91,
-            "folder_id": "42",
-            "folder_path": "Project A",
             "include_image_attachments": True,
         }
         run = db.get(AlmRun, 1)

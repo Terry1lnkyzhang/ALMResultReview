@@ -132,17 +132,33 @@ def test_unchanged_run_check_only_skips_runs_with_the_stored_last_modified() -> 
         is_unchanged = unchanged_run_check(db, run.workspace_id)
 
         original = sample_data()["records"][0]["run"]
-        assert is_unchanged(original)
+        folder = sample_data()["records"][0]["folder"]
+        assert is_unchanged(original, folder)
+        assert not is_unchanged(original, {**folder, "path": "Testing / Renamed"})
+        assert not is_unchanged(original, {**folder, "id": "5175"})
         assert not is_unchanged(
-            {**original, "last-modified": "2026-08-19 09:00:00"}
+            {**original, "last-modified": "2026-08-19 09:00:00"}, folder
         )
-        assert not is_unchanged({**original, "id": "999999"})
-        assert not is_unchanged({"id": "152711"})
-        assert not is_unchanged({"id": "152711", "last-modified": original["last-modified"]})
-        assert not is_unchanged({**original, "execution-date": "2026-07-31"})
-        assert not is_unchanged({**original, "execution-time": "05:40:00"})
+        assert not is_unchanged({**original, "id": "999999"}, folder)
+        assert not is_unchanged({"id": "152711"}, folder)
+        assert not is_unchanged(
+            {"id": "152711", "last-modified": original["last-modified"]}, folder
+        )
+        assert not is_unchanged({**original, "execution-date": "2026-07-31"}, folder)
+        assert not is_unchanged({**original, "execution-time": "05:40:00"}, folder)
+
+        renamed = deepcopy(sample_data())
+        renamed["records"][0]["folder"]["path"] = "Testing / Renamed"
+        result = import_data(renamed, db)
+        db.refresh(run)
+        assert result.changed_runs == 1
+        assert run.folder_path == "Testing / Renamed"
+        assert db.scalar(
+            select(func.count()).select_from(RunRevision).where(RunRevision.run_id == run.run_id)
+        ) == 2
 
         changed_time = deepcopy(sample_data())
+        changed_time["records"][0]["folder"]["path"] = "Testing / Renamed"
         changed_time["records"][0]["run"]["execution-time"] = "05:40:00"
         result = import_data(changed_time, db)
         db.refresh(run)
@@ -150,7 +166,7 @@ def test_unchanged_run_check_only_skips_runs_with_the_stored_last_modified() -> 
         assert run.execution_at.strftime("%Y-%m-%d %H:%M:%S") == "2026-07-30 05:40:00"
         assert db.scalar(
             select(func.count()).select_from(RunRevision).where(RunRevision.run_id == run.run_id)
-        ) == 2
+        ) == 3
 
 
 def test_import_preserves_step_rich_text_for_display() -> None:

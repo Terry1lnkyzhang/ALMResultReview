@@ -212,17 +212,21 @@ def queue_latest_alm_changes(
 def unchanged_run_check(
     db: Session,
     workspace_id: int,
-) -> Callable[[dict[str, Any]], bool]:
-    """Skip only when both ALM's modified stamp and execution time match."""
+) -> Callable[[dict[str, Any], dict[str, Any]], bool]:
+    """Skip only when the Run header and its containing folder match."""
 
-    def is_unchanged(run: dict[str, Any]) -> bool:
+    def is_unchanged(run: dict[str, Any], folder: dict[str, Any]) -> bool:
         alm_run_id = _integer(run.get("id"))
         last_modified = _date_time(run.get("last-modified"))
+        folder_id = _integer(folder.get("id"))
+        folder_path = normalize_text(folder.get("path"))
         # A missing header is not proof that the Run did not change. In particular,
         # ALM may update execution time without advancing last-modified.
         if (
             alm_run_id is None
             or last_modified is None
+            or folder_id is None
+            or not folder_path
             or "execution-date" not in run
             or "execution-time" not in run
         ):
@@ -235,6 +239,8 @@ def unchanged_run_check(
                 AlmRun.alm_last_modified,
                 AlmRun.current_revision_id,
                 AlmRun.execution_at,
+                AlmRun.folder_id,
+                AlmRun.folder_path,
             ).where(
                 AlmRun.workspace_id == workspace_id,
                 AlmRun.alm_run_id == alm_run_id,
@@ -245,6 +251,8 @@ def unchanged_run_check(
             and row[1] is not None
             and row[0] == last_modified
             and row[2] == execution_at
+            and row[3] == folder_id
+            and row[4] == folder_path
         )
 
     return is_unchanged

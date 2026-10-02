@@ -46,7 +46,7 @@ class FolderBatch:
 
 
 ProgressCallback = Callable[[FolderCollectionProgress, bool], None]
-UnchangedRunCheck = Callable[[dict[str, Any]], bool]
+UnchangedRunCheck = Callable[[dict[str, Any], dict[str, Any]], bool]
 
 
 class AlmClient:
@@ -340,8 +340,6 @@ def _location_field(alm: AlmClient) -> str | None:
 def collect_run(
     config: SyncConfig,
     test_instance_id: int,
-    folder_id: str,
-    folder_path: str,
     include_image_attachments: bool = False,
 ) -> dict[str, Any]:
     """Fetch one Run so a single record can be refreshed without walking folders."""
@@ -349,11 +347,28 @@ def collect_run(
         location_field = _location_field(alm)
         instance = alm.entity("test-instances", test_instance_id)
         test_set = alm.entity("test-sets", instance["cycle-id"])
-        test_set["folderPath"] = folder_path
         runs = alm.entities("runs", query=_query("testcycl-id", instance["id"]))
         run = _latest_run(runs)
         if run is None:
             return {"users": [], "records": []}
+        folder_id = str(test_set.get("parent-id") or "")
+        current_id = folder_id
+        ancestor_names: list[str] = []
+        visited: set[str] = set()
+        while current_id and current_id != str(config.folder_id):
+            if current_id in visited:
+                break
+            visited.add(current_id)
+            folder = alm.entity("test-set-folders", current_id)
+            ancestor_names.append(str(folder.get("name") or current_id))
+            current_id = str(folder.get("parent-id") or "")
+        if current_id != str(config.folder_id):
+            raise ValueError("The ALM Test Set is outside the configured root folder.")
+        root_path = config.folder_path or str(
+            alm.entity("test-set-folders", config.folder_id).get("name") or config.folder_id
+        )
+        folder_path = " / ".join([root_path, *reversed(ancestor_names)])
+        test_set["folderPath"] = folder_path
         record = _run_record(
             alm,
             {"id": folder_id, "path": folder_path},
@@ -463,7 +478,7 @@ def iter_folder_batches(
                     run = _latest_run(runs)
                     if run is None:
                         continue
-                    if is_unchanged_run is not None and is_unchanged_run(run):
+                    if is_unchanged_run is not None and is_unchanged_run(run, folder):
                         runs_skipped += 1
                         report("collecting", str(folder["path"]))
                         continue

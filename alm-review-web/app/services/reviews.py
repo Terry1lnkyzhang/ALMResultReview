@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -12,7 +13,7 @@ import httpx
 from sqlalchemy import case, desc, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from app.hashing import review_payload
+from app.hashing import normalize_text, review_payload
 from app.models import (
     AiConfig,
     AlmRun,
@@ -102,6 +103,11 @@ _RESULT_EVIDENCE_ROLES = {"result_evidence", "result_evidence_location"}
 # Whether the cited evidence really answers Expected is decided by the later
 # path/image/HTML stages, so the text pass must not pre-empt them.
 _EVIDENCE_SUPERSEDED_CODES = {"actual_insufficient", "evidence_reference_missing"}
+_ADS_REFERENCE_RE = re.compile(r"\bADS\s*[:：#-]\s*[A-Za-z0-9]+\b", re.IGNORECASE)
+_PD_REFERENCE_RE = re.compile(
+    r"\bPD(?:\s*(?:No\.?|Number))?\s*[:：#-]\s*[A-Za-z0-9.-]*\d[A-Za-z0-9.-]*\b",
+    re.IGNORECASE,
+)
 # Prompt budgets that keep a single Skill call inside the model context window.
 STEP_FIELD_CHAR_LIMIT = 6000
 TEXT_BATCH_CHAR_BUDGET = 24000
@@ -201,6 +207,7 @@ class ReviewContext:
     evidence_config: EvidenceConfig | None
     equipment_enabled: bool
     project: str = ""
+    workspace_name: str = ""
     equipment_registry: list[EquipmentRegistry] = field(default_factory=list)
     automation_release_assessments: dict[int, dict[str, Any]] = field(
         default_factory=dict
@@ -2578,6 +2585,7 @@ def _run_text_semantic_skills(
     ai_config: AiConfig,
     content: dict[str, Any],
     project: str = "",
+    workspace_name: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     steps = _text_skill_steps(content)
     truncated_steps: set[int] = set()
@@ -2672,6 +2680,15 @@ def _run_text_semantic_skills(
         for finding in assessment["findings"]:
             code = finding["code"]
             severity = finding["severity"]
+            if code == "record_documentation_gap":
+                target["issues"].append(
+                    {
+                        "status": "manual",
+                        "type": "expected_actual",
+                        "summary": finding["reason"][:200],
+                    }
+                )
+                continue
             if assessment["applicability"] == "not_applicable":
                 suppressed.append(
                     _suppressed_finding(finding, "step_not_applicable")
@@ -2716,6 +2733,26 @@ def _run_text_semantic_skills(
             )
         if suppressed:
             target["suppressed_findings"] = suppressed
+    if workspace_name.casefold() == "earthformal02":
+        for step in steps:
+            review_step = int(step["review_step"])
+            if (
+                str(step.get("status") or "").casefold() != "failed"
+                or step_results[review_step]["applicability"] == "not_applicable"
+            ):
+                continue
+            actual = normalize_text(step.get("actual"))
+            if _ADS_REFERENCE_RE.search(actual) and not _PD_REFERENCE_RE.search(actual):
+                step_results[review_step]["issues"].append(
+                    {
+                        "status": "manual",
+                        "type": "expected_actual",
+                        "summary": (
+                            "失败记录引用了 ADS 但未注明对应 PD，"
+                            "请核对偏差追踪及正式记录用语。"
+                        ),
+                    }
+                )
     for review_step in sorted(truncated_steps):
         step_results[review_step]["issues"].append(
             {
@@ -2782,6 +2819,7 @@ def _text_review_stage(ctx: ReviewContext) -> dict[str, Any]:
         ctx.ai_config,
         ctx.content,
         ctx.project,
+        ctx.workspace_name,
     )
     ctx.content["text_skill_traces"] = traces
     ctx.raw_response = json.dumps(
@@ -3267,6 +3305,7 @@ def process_job(
         ai_config=ai_config,
         content=content,
         project=workspace.project,
+        workspace_name=workspace.name,
         evidence_config=evidence_config,
         equipment_enabled=workspace.equipment_review_enabled,
         equipment_registry=equipment_registry,

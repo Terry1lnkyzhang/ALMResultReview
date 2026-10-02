@@ -549,6 +549,222 @@ def test_not_applicable_step_drops_text_findings(monkeypatch) -> None:
     ]
 
 
+@pytest.mark.parametrize("reported_severity", ["manual", "fail"])
+def test_not_applicable_keeps_record_documentation_gap(
+    monkeypatch, reported_severity
+) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Only for systems supporting 0.34s/r rotation.",
+                "expected": "Set rotation to 0.34s/r and scan.",
+                "actual": "Earth CT5300 only supports 0.35s/0.40s/0.50s rotation.",
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *args, **kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "not_applicable",
+                            "findings": [
+                                {
+                                    "code": "record_documentation_gap",
+                                    "severity": reported_severity,
+                                    "basis": "direct_step_text",
+                                    "reason": "Actual does not explicitly record N/A or its basis.",
+                                }
+                            ],
+                            "reference_decisions": [],
+                            "summary": "The rotation is not supported, but N/A is undocumented.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    assert parsed["verdict"] == "needs_manual_review"
+    assert parsed["step_results"][0]["applicability"] == "not_applicable"
+    assert parsed["step_results"][0]["issues"] == [
+        {
+            "status": "manual",
+            "type": "expected_actual",
+            "summary": "Actual does not explicitly record N/A or its basis.",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("description", "actual", "reference_candidates", "reference_decisions"),
+    [
+        (
+            "Check FOV, Z range, image depth, and metal detection in the TRR.",
+            "D002566624 Rev A Section 5.3: Passed. See the attached screenshot.",
+            [
+                {
+                    "candidate_id": "step-1-ref-1",
+                    "type": "image",
+                    "value": "report.png",
+                    "source_field": "attachment",
+                    "detection_source": "alm_attachment",
+                }
+            ],
+            [
+                {
+                    "candidate_id": "step-1-ref-1",
+                    "role": "result_evidence",
+                    "requires_check": True,
+                    "reason": "Screenshot of the report conclusion.",
+                }
+            ],
+        ),
+        (
+            "Use a Standard PC to execute the test.",
+            "This test was performed on a Premium PC; Standard PC was not used.",
+            [],
+            [],
+        ),
+    ],
+)
+def test_record_documentation_gap_is_manual_with_or_without_evidence(
+    monkeypatch, description, actual, reference_candidates, reference_decisions
+) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "description": description,
+                "expected": "Confirm every requirement and record the result.",
+                "actual": actual,
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": reference_candidates,
+                "attachment_contents": [{}] if reference_candidates else [],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *args, **kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [
+                                {
+                                    "code": "record_documentation_gap",
+                                    "severity": "manual",
+                                    "basis": "direct_step_text",
+                                    "reason": (
+                                        "The record does not explain its coverage "
+                                        "or configuration."
+                                    ),
+                                }
+                            ],
+                            "reference_decisions": reference_decisions,
+                            "summary": "Record needs verification.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    assert parsed["verdict"] == "needs_manual_review"
+    assert parsed["step_results"][0]["issues"] == [
+        {
+            "status": "manual",
+            "type": "expected_actual",
+            "summary": "The record does not explain its coverage or configuration.",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("workspace_name", "step_status", "actual", "needs_manual"),
+    [
+        ("EarthFormal02", "Failed", "Could not import data, ADS: 955116", True),
+        ("EarthFormal02", "Failed", "ADS: 955116; PD: 12345", False),
+        ("EarthFormal02", "Failed", "ADS: 955116; PD: pending", True),
+        ("OtherWorkspace", "Failed", "Could not import data, ADS: 955116", False),
+        ("EarthFormal02", "Passed", "ADS: 955116 appears in a log", False),
+    ],
+)
+def test_ads_without_pd_requires_review_only_for_earthformal02_failed_step(
+    monkeypatch, workspace_name, step_status, actual, needs_manual
+) -> None:
+    content = {
+        "run_status": "Failed",
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "status": step_status,
+                "description": "Import patient data.",
+                "expected": "Patient data imports successfully.",
+                "actual": actual,
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+                "reference_candidates": [],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *args, **kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [],
+                            "reference_decisions": [],
+                            "summary": "Failed execution is documented.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+        workspace_name=workspace_name,
+    )
+
+    assert parsed["verdict"] == (
+        "needs_manual_review" if needs_manual else "qualified"
+    )
+    assert len(parsed["step_results"][0]["issues"]) == int(needs_manual)
+    if needs_manual:
+        assert "PD" in parsed["step_results"][0]["issues"][0]["summary"]
+
+
 def test_text_review_sends_workspace_project_and_alm_status_context(monkeypatch) -> None:
     content = {
         "run_status": "Failed",

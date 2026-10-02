@@ -111,6 +111,7 @@ class AlmTextFinding(BaseModel):
         "expected_actual_mismatch",
         "language_quality",
         "evidence_reference_missing",
+        "record_documentation_gap",
     ]
     severity: Literal["warning", "fail", "manual"]
     basis: Literal["direct_step_text", "reference_metadata_inference"]
