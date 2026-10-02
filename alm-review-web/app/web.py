@@ -43,6 +43,17 @@ from app.models import (
     Workspace,
 )
 from app.services.ai_transport import ai_endpoint_available, ai_endpoint_health_status
+from app.services.decision_reason import (
+    CATEGORY_HINTS,
+    CATEGORY_LABELS,
+    DecisionAnswer,
+    DecisionRow,
+    compose_reason,
+    decision_items_json,
+    decision_rows,
+    load_decision_items,
+    validate_answers,
+)
 from app.services.docx_import import MAX_DOCX_BYTES, parse_alm_docx
 from app.services.equipment_registry import (
     import_equipment_workbook,
@@ -75,6 +86,7 @@ from app.services.review_status import (
 )
 from app.services.reviews import (
     FORCE_QUALIFIED_DECISIONS,
+    CurrentReview,
     allowed_manual_decisions,
     current_review,
     revoke_manual_decision,
@@ -1676,6 +1688,38 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    return _run_detail_response(request, run, db)
+
+
+def _latest_review_job(db: Session, run: AlmRun) -> ReviewJob | None:
+    return db.scalar(
+        select(ReviewJob)
+        .where(
+            ReviewJob.run_id == run.run_id,
+            ReviewJob.revision_id == run.current_revision_id,
+        )
+        .order_by(desc(ReviewJob.id))
+        .limit(1)
+    )
+
+
+def _manual_decision_rows(
+    review: CurrentReview,
+    latest_job: ReviewJob | None,
+) -> list[DecisionRow]:
+    failure_detail = _public_job_error(latest_job.error_message if latest_job else None)
+    return decision_rows(review.result, failure_detail or "")
+
+
+def _run_detail_response(
+    request: Request,
+    run: AlmRun,
+    db: Session,
+    *,
+    decision_draft: dict[str, Any] | None = None,
+    status_code: int = 200,
+) -> Response:
+    run_id = run.run_id
     execution_at = alm_execution_in_app_timezone(run.execution_at)
     business_execution_at = (
         execution_at.replace(tzinfo=None) if execution_at is not None else None
@@ -1822,18 +1866,11 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
         .limit(1)
     )
     active_review_job = active_run_review_job(db, run)
-    latest_review_job = db.scalar(
-        select(ReviewJob)
-        .where(
-            ReviewJob.run_id == run.run_id,
-            ReviewJob.revision_id == run.current_revision_id,
-        )
-        .order_by(desc(ReviewJob.id))
-        .limit(1)
-    )
+    latest_review_job = _latest_review_job(db, run)
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
+        status_code=status_code,
         context={
             "run": run,
             "execution_at": execution_at,
@@ -1853,6 +1890,25 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
             "revisions": revisions,
             "results": results,
             "allowed_decisions": allowed_decisions,
+            "decision_rows": (
+                _manual_decision_rows(review, latest_review_job)
+                if allowed_decisions
+                else []
+            ),
+            "decision_categories": list(CATEGORY_LABELS.items()),
+            "decision_category_hints": CATEGORY_HINTS,
+            "decision_draft": {
+                "decision": "",
+                "answers": [],
+                "row_errors": {},
+                "errors": [],
+                **(decision_draft or {}),
+            },
+            "manual_decision_items": (
+                load_decision_items(review.manual_decision.items_json)
+                if review.manual_decision
+                else []
+            ),
             "review_criteria": review_criteria,
             "review_pipeline": review_pipeline,
             "review_skill_traces": review_skill_traces,
@@ -1874,8 +1930,12 @@ def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
 def decide_run(
     request: Request,
     run_id: int,
-    decision: str = Form(...),
-    reason: str = Form(...),
+    decision: Annotated[str, Form()],
+    reason: Annotated[str, Form()] = "",
+    review_result_id: Annotated[str, Form()] = "",
+    category: Annotated[list[str], Form()] = [],
+    explanation: Annotated[list[str], Form()] = [],
+    evidence: Annotated[list[str], Form()] = [],
     db: Session = Depends(get_db),
 ):
     run = db.get(AlmRun, run_id)
@@ -1883,10 +1943,49 @@ def decide_run(
         raise HTTPException(status_code=404, detail="Run not found")
     # No login exists, so the caller address is the only attributable identity.
     operator = request.client.host if request.client else "web"
+    items_json = None
+    review = current_review(db, run)
+    if (
+        decision in FORCE_QUALIFIED_DECISIONS
+        and decision in allowed_manual_decisions(review)
+    ):
+        rows = _manual_decision_rows(review, _latest_review_job(db, run))
+        current_result_id = str(review.result.id) if review.result else ""
+        if review_result_id != current_result_id or not (
+            len(category) == len(explanation) == len(evidence) == len(rows)
+        ):
+            return _redirect(
+                f"/runs/{run_id}",
+                "AI 评审结果已更新，请按最新结果重新填写人工裁决。",
+                "error",
+            )
+        answers = [
+            DecisionAnswer(*fields)
+            for fields in zip(category, explanation, evidence, strict=True)
+        ]
+        row_errors = validate_answers(rows, answers)
+        if row_errors:
+            return _run_detail_response(
+                request,
+                run,
+                db,
+                decision_draft={
+                    "decision": decision,
+                    "answers": answers,
+                    "row_errors": row_errors,
+                    "errors": ["部分项目填写不完整或过于笼统，请按提示修改后重新提交。"],
+                },
+                status_code=422,
+            )
+        reason = compose_reason(rows, answers)
+        items_json = decision_items_json(rows, answers)
     try:
-        save_manual_decision(db, run, decision, operator, reason)
+        manual = save_manual_decision(db, run, decision, operator, reason)
     except ValueError as exc:
         return _redirect(f"/runs/{run_id}", str(exc), "error")
+    if items_json is not None:
+        manual.items_json = items_json
+        db.commit()
     return _redirect(f"/runs/{run_id}", "人工裁决已记录。")
 
 
