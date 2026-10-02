@@ -159,11 +159,13 @@ def queue_run_review(db: Session, run: AlmRun) -> ReviewJob | None:
         return job
     job = db.scalar(
         select(ReviewJob)
+        .outerjoin(ReviewResult, ReviewResult.job_id == ReviewJob.id)
         .where(
             ReviewJob.run_id == run.run_id,
             ReviewJob.revision_id == run.current_revision_id,
             ReviewJob.status == "failed",
             ReviewJob.attempt_count < MAX_REVIEW_JOB_ATTEMPTS,
+            ReviewResult.id.is_(None),
         )
         .order_by(desc(ReviewJob.id))
         .limit(1)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -16,6 +17,7 @@ from app.services.reviews import (
     claim_next_review_job,
     process_claimed_review_job,
     reap_abandoned_review_jobs,
+    renew_review_job_lease,
 )
 from app.services.worker_lease import (
     fence_worker_lease,
@@ -65,8 +67,16 @@ def process_review_queue(
     if worker_count == 0:
         return 0, 0
 
-    def process_claimed(job_id: int) -> tuple[int, int]:
+    def process_claimed(job_id: int, attempt: int | None) -> tuple[int, int]:
         with SessionLocal() as db:
+            if attempt is not None:
+                return process_claimed_review_job(
+                    db,
+                    job_id,
+                    worker_owner_token=owner_token,
+                    expected_attempt=attempt,
+                    expected_claimed_by=worker_id,
+                )
             return (
                 process_claimed_review_job(db, job_id, owner_token)
                 if owner_token is not None
@@ -78,7 +88,9 @@ def process_review_queue(
     claimed_count = 0
     claims_allowed = True
     poll_timeout = min(5.0, max(0.01, float(get_settings().worker_poll_seconds)))
-    pending: dict[Future[tuple[int, int]], int] = {}
+    renewal_interval = min(60, max(1, lease_seconds // 3))
+    next_renewal = time.monotonic() + renewal_interval
+    pending: dict[Future[tuple[int, int]], tuple[int, int, int | None]] = {}
     with ThreadPoolExecutor(
         max_workers=worker_count,
         thread_name_prefix="ai-review",
@@ -107,7 +119,10 @@ def process_review_queue(
                         available_slots.appendleft(config_id)
                         break
                     claimed_count += 1
-                    pending[executor.submit(process_claimed, job.id)] = config_id
+                    attempt = getattr(job, "attempt_count", None)
+                    pending[executor.submit(process_claimed, job.id, attempt)] = (
+                        config_id, job.id, attempt
+                    )
             if not pending:
                 break
             # Also wake periodically so work queued after the last claim can use idle slots.
@@ -116,8 +131,37 @@ def process_review_queue(
                 timeout=poll_timeout,
                 return_when=FIRST_COMPLETED,
             )
+            if time.monotonic() >= next_renewal:
+                if (
+                    (lease_guard is not None and not lease_guard())
+                    or (owner_token is not None and lease_guard is None
+                        and not _still_owns_worker(owner_token))
+                ):
+                    claims_allowed = False
+                    available_slots.clear()
+                elif claims_allowed:
+                    with SessionLocal() as db:
+                        for future, (_, job_id, attempt) in pending.items():
+                            if future in done or future.done() or attempt is None:
+                                continue
+                            try:
+                                if not renew_review_job_lease(
+                                    db, job_id, worker_id, attempt, lease_seconds,
+                                    worker_owner_token=owner_token,
+                                ):
+                                    logger.warning(
+                                        "Review job lease was lost job=%s attempt=%s",
+                                        job_id, attempt,
+                                    )
+                            except Exception:
+                                db.rollback()
+                                logger.exception(
+                                    "Could not renew review job lease job=%s attempt=%s",
+                                    job_id, attempt,
+                                )
+                next_renewal = time.monotonic() + renewal_interval
             for future in done:
-                config_id = pending.pop(future)
+                config_id, _, _ = pending.pop(future)
                 job_completed, job_failed = future.result()
                 if claims_allowed and not job_failed:
                     available_slots.append(config_id)
@@ -129,6 +173,11 @@ def process_review_queue(
                 completed += job_completed
                 failed += job_failed
     return completed, failed
+
+
+def _still_owns_worker(owner_token: str) -> bool:
+    with SessionLocal() as db:
+        return owns_worker_lease(db, owner_token)
 
 
 def scheduled_heartbeat(

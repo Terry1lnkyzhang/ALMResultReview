@@ -82,6 +82,352 @@ def test_review_job_claim_records_the_selected_endpoint() -> None:
         assert job.ai_config_id == 2
 
 
+def test_review_job_renewal_only_extends_the_current_attempt() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(ReviewJob(run_id=42, revision_id=7, status="queued"))
+        db.commit()
+        first = claim_next_review_job(db, "worker-one", lease_seconds=60)
+        assert first is not None
+        old_expiry = first.lease_expires_at
+
+        assert reviews.renew_review_job_lease(db, first.id, "worker-one", 1, 120)
+        db.refresh(first)
+        assert first.lease_expires_at > old_expiry
+        assert claim_next_review_job(db, "worker-two", lease_seconds=60) is None
+
+        first.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+        second = claim_next_review_job(db, "worker-two", lease_seconds=60)
+        assert second is not None and second.attempt_count == 2
+        new_expiry = second.lease_expires_at
+
+        assert not reviews.renew_review_job_lease(db, first.id, "worker-one", 1, 120)
+        assert not reviews.renew_review_job_lease(db, first.id, "worker-two", 1, 120)
+        db.refresh(second)
+        assert second.lease_expires_at == new_expiry
+
+
+def test_review_renewal_rejects_lost_worker_singleton(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(ReviewJob(run_id=42, revision_id=7, status="queued"))
+        db.commit()
+        job = claim_next_review_job(db, "worker-one", lease_seconds=60)
+        assert job is not None
+        expiry = job.lease_expires_at
+        monkeypatch.setattr(reviews, "fence_worker_lease", lambda *_args: False)
+
+        assert not reviews.renew_review_job_lease(
+            db, job.id, "worker-one", 1, 120, worker_owner_token="former-owner"
+        )
+        db.refresh(job)
+        assert job.lease_expires_at == expiry
+
+
+def test_stale_review_failure_does_not_fail_a_reclaimed_job(monkeypatch) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(ReviewJob(run_id=42, revision_id=7, status="queued"))
+        db.commit()
+        first = claim_next_review_job(db, "worker-one", lease_seconds=60)
+        assert first is not None
+
+        def fail_after_reclaim(_db, _job, **_kwargs):
+            current = _db.get(ReviewJob, first.id)
+            current.claimed_by = "worker-two"
+            current.attempt_count = 2
+            _db.commit()
+            raise RuntimeError("old attempt failed")
+
+        monkeypatch.setattr(reviews, "process_job", fail_after_reclaim)
+        assert reviews.process_claimed_review_job(
+            db, first.id, expected_attempt=1, expected_claimed_by="worker-one"
+        ) == (0, 0)
+        db.refresh(first)
+        assert first.status == "running"
+        assert first.claimed_by == "worker-two"
+        assert first.attempt_count == 2
+
+
+def test_review_claim_skips_a_job_that_already_saved_its_result() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        job = ReviewJob(
+            run_id=42,
+            revision_id=7,
+            status="failed",
+            attempt_count=1,
+            completed_at=utcnow() - timedelta(minutes=5),
+        )
+        db.add(job)
+        db.flush()
+        db.add(ReviewResult(
+            job_id=job.id, run_id=42, revision_id=7, prompt_version_id=1,
+            source_hash="a" * 64, model_name="test", verdict="qualified",
+        ))
+        db.commit()
+
+        assert claim_next_review_job(db, "worker-one", lease_seconds=60) is None
+
+
+def test_expired_attempt_cannot_save_a_result_after_reclaim(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'review.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(AlmRun(
+            run_id=42, workspace_id=workspace.id, run_status="Passed",
+            source_hash="a" * 64, review_hash="b" * 64, raw_json="{}",
+        ))
+        revision = RunRevision(
+            run_id=42, revision_number=1, source_hash="a" * 64,
+            review_hash="b" * 64, snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        db.get(AlmRun, 42).current_revision_id = revision.id
+        db.add_all((
+            ReviewJob(workspace_id=workspace.id, run_id=42, revision_id=revision.id),
+            reviews.AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
+            reviews.PromptVersion(name="test", template="test", is_active=True),
+        ))
+        db.commit()
+        old = claim_next_review_job(db, "worker-one", lease_seconds=60)
+        assert old is not None
+
+        monkeypatch.setattr(reviews, "load_location_assessment", lambda *_args: {})
+
+        def finish_after_reclaim(_ctx):
+            with Session(engine) as competing_db:
+                current = competing_db.get(ReviewJob, old.id)
+                current.lease_expires_at = utcnow() - timedelta(seconds=1)
+                competing_db.commit()
+                replacement = claim_next_review_job(
+                    competing_db, "worker-two", lease_seconds=60
+                )
+                assert replacement is not None and replacement.attempt_count == 2
+            return reviews.PipelineOutcome(
+                parsed={
+                    "verdict": "qualified", "issue_summary": "", "criteria": {},
+                    "step_results": [], "warnings": [],
+                },
+                pipeline={},
+                raw_response="{}",
+            )
+
+        monkeypatch.setattr(reviews, "execute_review", finish_after_reclaim)
+        with pytest.raises(reviews.ReviewJobLeaseLost):
+            reviews.process_job(
+                db, old, expected_attempt=1, expected_claimed_by="worker-one"
+            )
+        db.refresh(old)
+        assert (old.status, old.attempt_count, old.claimed_by) == (
+            "running", 2, "worker-two"
+        )
+        assert db.scalars(select(ReviewResult).where(ReviewResult.job_id == old.id)).all() == []
+
+
+def test_review_can_finish_after_renewal_from_another_session(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'renewed.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        workspace = Workspace(name="Project A", slug="project-a")
+        db.add(workspace)
+        db.flush()
+        db.add(AlmRun(
+            run_id=42, workspace_id=workspace.id, run_status="Passed",
+            source_hash="a" * 64, review_hash="b" * 64, raw_json="{}",
+        ))
+        revision = RunRevision(
+            run_id=42, revision_number=1, source_hash="a" * 64,
+            review_hash="b" * 64, snapshot_json="{}",
+        )
+        db.add(revision)
+        db.flush()
+        db.get(AlmRun, 42).current_revision_id = revision.id
+        db.add_all((
+            ReviewJob(workspace_id=workspace.id, run_id=42, revision_id=revision.id),
+            reviews.AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
+            reviews.PromptVersion(name="test", template="test", is_active=True),
+        ))
+        db.commit()
+        claimed = claim_next_review_job(db, "worker-one", lease_seconds=60)
+        assert claimed is not None
+        monkeypatch.setattr(reviews, "load_location_assessment", lambda *_args: {})
+
+        def finish_after_renewal(_ctx):
+            with Session(engine) as heartbeat_db:
+                assert reviews.renew_review_job_lease(
+                    heartbeat_db, claimed.id, "worker-one", 1, 120,
+                )
+            return reviews.PipelineOutcome(
+                parsed={
+                    "verdict": "qualified", "issue_summary": "", "criteria": {},
+                    "step_results": [], "warnings": [],
+                },
+                pipeline={},
+                raw_response="{}",
+            )
+
+        monkeypatch.setattr(reviews, "execute_review", finish_after_renewal)
+        result = reviews.process_job(
+            db, claimed, expected_attempt=1, expected_claimed_by="worker-one"
+        )
+        db.refresh(claimed)
+        assert claimed.status == "completed"
+        assert claimed.lease_expires_at is None
+        assert result.job_id == claimed.id
+        assert db.scalars(
+            select(ReviewResult).where(ReviewResult.job_id == claimed.id)
+        ).all() == [result]
+
+
+def test_renewed_terminal_attempt_is_not_reaped() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        job = ReviewJob(run_id=42, revision_id=7, status="queued", attempt_count=2)
+        db.add(job)
+        db.commit()
+        claimed = claim_next_review_job(db, "worker-one", lease_seconds=1)
+        assert claimed is not None and claimed.attempt_count == 3
+
+        assert reviews.renew_review_job_lease(db, job.id, "worker-one", 3, 60)
+        assert reviews.reap_abandoned_review_jobs(db) == 0
+        db.refresh(job)
+        assert job.status == "running"
+
+
+def test_reaper_does_not_fail_a_job_renewed_after_its_scan(tmp_path, monkeypatch) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'reaper.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        job = ReviewJob(
+            run_id=42, revision_id=7, status="running", attempt_count=3,
+            claimed_by="worker-one", lease_expires_at=utcnow() - timedelta(seconds=1),
+        )
+        db.add(job)
+        db.commit()
+        original_scalars = db.scalars
+
+        def scan_then_renew(*args, **kwargs):
+            rows = original_scalars(*args, **kwargs).all()
+            db.rollback()  # SQLite holds a shared read lock until the scan transaction ends.
+            with Session(engine) as heartbeat_db:
+                current = heartbeat_db.get(ReviewJob, job.id)
+                current.lease_expires_at = utcnow() + timedelta(seconds=60)
+                heartbeat_db.commit()
+            return SimpleNamespace(all=lambda: rows)
+
+        monkeypatch.setattr(db, "scalars", scan_then_renew)
+        assert reviews.reap_abandoned_review_jobs(db) == 0
+        db.refresh(job)
+        assert job.status == "running"
+
+
+def test_review_queue_renews_a_slow_job_while_other_slots_are_free(monkeypatch) -> None:
+    clock = [0.0]
+    release = Event()
+    renewals = []
+    claims = iter((SimpleNamespace(id=42, attempt_count=1), None))
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def rollback(self):
+            return None
+
+    def fake_wait(pending, *, timeout, return_when):
+        clock[0] += timeout
+        if clock[0] >= 25:
+            release.set()
+            return scheduler.wait_original(pending, timeout=2, return_when=return_when)
+        return set(), set()
+
+    def process_claimed(_db, job_id, **kwargs):
+        assert job_id == 42
+        assert kwargs["expected_attempt"] == 1
+        assert release.wait(timeout=5)
+        return 1, 0
+
+    monkeypatch.setattr(scheduler, "wait_original", scheduler.wait, raising=False)
+    monkeypatch.setattr(scheduler, "wait", fake_wait)
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(
+        scheduler, "claim_next_review_job",
+        lambda *_args, **_kwargs: next(claims, None),
+    )
+    monkeypatch.setattr(scheduler, "process_claimed_review_job", process_claimed)
+    monkeypatch.setattr(
+        scheduler, "renew_review_job_lease",
+        lambda _db, job_id, worker_id, attempt, seconds, **_kwargs: renewals.append(
+            (job_id, worker_id, attempt, seconds)
+        ) or True,
+    )
+
+    assert scheduler.process_review_queue(
+        limit=1, worker_id="worker-one", lease_seconds=60, concurrency=2,
+    ) == (1, 0)
+    assert renewals == [(42, "worker-one", 1, 60)]
+
+
+def test_review_queue_stops_renewing_after_worker_ownership_is_lost(monkeypatch) -> None:
+    clock = [0.0]
+    release = Event()
+    renewals = []
+    singleton_checks = iter((True, False))
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_wait(pending, *, timeout, return_when):
+        clock[0] += timeout
+        if clock[0] >= 25:
+            release.set()
+            return scheduler.wait_original(pending, timeout=2, return_when=return_when)
+        return set(), set()
+
+    def process_claimed(_db, _job_id, **_kwargs):
+        assert release.wait(timeout=5)
+        return 1, 0
+
+    monkeypatch.setattr(scheduler, "wait_original", scheduler.wait, raising=False)
+    monkeypatch.setattr(scheduler, "wait", fake_wait)
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(scheduler, "SessionLocal", FakeSession)
+    monkeypatch.setattr(
+        scheduler, "claim_next_review_job",
+        lambda *_args, **_kwargs: SimpleNamespace(id=42, attempt_count=1),
+    )
+    monkeypatch.setattr(scheduler, "process_claimed_review_job", process_claimed)
+    monkeypatch.setattr(
+        scheduler, "renew_review_job_lease",
+        lambda *_args: renewals.append(True),
+    )
+
+    assert scheduler.process_review_queue(
+        limit=1, worker_id="worker-one", lease_seconds=60,
+        lease_guard=lambda: next(singleton_checks),
+    ) == (1, 0)
+    assert not renewals
+
+
 def test_review_queue_concurrency_uses_independent_sessions(monkeypatch) -> None:
     sessions = []
     processing_sessions = []

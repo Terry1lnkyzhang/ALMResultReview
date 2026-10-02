@@ -118,6 +118,10 @@ from committing stale work. Job-level row locks and leases still provide interru
 recovery. Restart the Worker after changing the configured daily schedule so it reloads the
 Cron trigger.
 
+Long AI reviews renew their own job lease while running; the default 15-minute lease
+still controls recovery after a Worker stops. Each claim's attempt number fences result
+writes and error handling, so an expired attempt cannot overwrite a replacement attempt.
+
 `Enable daily sync` creates the Workspace's scheduled ALM synchronization. When
 `Auto-review after scheduled sync` is also enabled, a successful scheduled folder sync queues
 both Runs whose review content was added or changed by that sync and completed Runs marked
@@ -274,6 +278,11 @@ Set-Location .\alm-review-web
 ```
 
 ## Review Rules
+
+Current detailed review rules, deterministic guards, AI Skill boundaries, verdict
+aggregation and known limitations are documented in
+[AI Review rules](docs/ai-review-rules.md). The detailed document follows the
+current source when the short overview below is outdated.
 
 - `run_id` is the global primary key for the configured ALM project.
 - A changed source hash creates an immutable Run revision without queuing a review.

@@ -140,6 +140,7 @@ def test_run_detail_keeps_review_job_status_and_errors_visible() -> None:
     )
 
     assert "latest_review_job.status == 'failed'" in source
+    assert "review.result.job_id != latest_review_job.id" in source
     assert "latest_review_job_error" in source
     assert "最近一次评审没有生成新结果" in source
     assert "正在排队" in source

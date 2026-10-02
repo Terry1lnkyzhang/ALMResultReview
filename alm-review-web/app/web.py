@@ -1644,6 +1644,33 @@ def _superseded_qualification(
     }
 
 
+def _workspace_run_id(db: Session, workspace_id: int, alm_run_id: int) -> int | None:
+    run_id = db.scalar(
+        select(AlmRun.run_id).where(
+            AlmRun.workspace_id == workspace_id,
+            AlmRun.alm_run_id == alm_run_id,
+        )
+    )
+    if run_id is not None:
+        return run_id
+    return db.scalar(
+        select(AlmRun.run_id).where(
+            AlmRun.workspace_id == workspace_id,
+            AlmRun.run_id == alm_run_id,
+        )
+    )
+
+
+@router.get("/workspaces/{workspace_id}/runs/{alm_run_id}")
+def workspace_run_detail(
+    workspace_id: int, alm_run_id: int, db: Session = Depends(get_db)
+) -> RedirectResponse:
+    run_id = _workspace_run_id(db, workspace_id, alm_run_id)
+    if run_id is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return RedirectResponse(f"/runs/{run_id}")
+
+
 @router.get("/runs/{run_id}")
 def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)

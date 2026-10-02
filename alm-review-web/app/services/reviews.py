@@ -9,7 +9,7 @@ from pathlib import PureWindowsPath
 from typing import Any
 
 import httpx
-from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.hashing import review_payload
@@ -118,6 +118,10 @@ FORCE_QUALIFIED_DECISIONS = frozenset(
 DEFAULT_JOB_LEASE_SECONDS = 15 * 60
 MAX_REVIEW_JOB_ATTEMPTS = 3
 FAILED_JOB_RETRY_BACKOFF_SECONDS = 60
+
+
+class ReviewJobLeaseLost(WorkerLeaseLost):
+    """The review attempt lost its job lease, regardless of Worker ownership."""
 
 
 @dataclass
@@ -3072,7 +3076,16 @@ def process_job(
     job: ReviewJob,
     allow_disabled: bool = False,
     worker_owner_token: str | None = None,
+    expected_attempt: int | None = None,
+    expected_claimed_by: str | None = None,
 ) -> ReviewResult:
+    job_id = job.id
+    if expected_attempt is not None and (
+        job.status != "running"
+        or job.attempt_count != expected_attempt
+        or job.claimed_by != expected_claimed_by
+    ):
+        raise ReviewJobLeaseLost("Review job was reclaimed before execution began.")
     run = db.get(AlmRun, job.run_id)
     revision = db.get(RunRevision, job.revision_id)
     if run is None or revision is None:
@@ -3087,6 +3100,12 @@ def process_job(
             raise ValueError("Completed review job belongs to an outdated review policy.")
         return existing
     if run.current_revision_id != revision.id or run.source_hash != revision.source_hash:
+        if expected_attempt is not None:
+            db.rollback()
+            job = _owned_review_job(db, job_id, expected_attempt, expected_claimed_by)
+            if job is None:
+                db.rollback()
+                raise ReviewJobLeaseLost("Review job was reclaimed before becoming outdated.")
         job.status = "outdated"
         job.completed_at = utcnow()
         db.commit()
@@ -3105,6 +3124,8 @@ def process_job(
         job.attempt_count += 1
         job.error_message = ""
         db.commit()
+    attempt = job.attempt_count
+    claimant = job.claimed_by
 
     snapshot = json.loads(revision.snapshot_json)
     equipment_registry: list[EquipmentRegistry] = []
@@ -3181,13 +3202,11 @@ def process_job(
         if worker_owner_token and not owns_worker_lease(db, worker_owner_token):
             raise WorkerLeaseLost("Worker singleton lease was lost before review execution.")
         outcome = execute_review(ctx)
-        if worker_owner_token and not fence_worker_lease(db, worker_owner_token):
-            raise WorkerLeaseLost("Worker singleton lease was lost during review execution.")
         parsed = outcome.parsed
         duration_ms = round((time.perf_counter() - started) * 1000)
         result = ReviewResult(
             workspace_id=workspace.id,
-            job_id=job.id,
+            job_id=job_id,
             run_id=run.run_id,
             revision_id=revision.id,
             prompt_version_id=prompt.id,
@@ -3206,35 +3225,107 @@ def process_job(
             raw_response=outcome.raw_response,
             duration_ms=duration_ms,
         )
-        db.add(result)
-        job.status = "completed"
-        job.claimed_by = None
-        job.lease_expires_at = None
-        job.completed_at = utcnow()
+        # Claimed jobs use their own Session; drop its long-lived read transaction
+        # before taking final locks. Direct callers may bind a Session to a shared
+        # test/outer connection, where rollback would discard their fixture data.
+        if expected_attempt is not None:
+            db.rollback()
+        if worker_owner_token and not fence_worker_lease(db, worker_owner_token):
+            raise WorkerLeaseLost("Worker singleton lease was lost during review execution.")
+        current_job = _owned_review_job(db, job_id, attempt, claimant)
+        if current_job is None:
+            raise ReviewJobLeaseLost("Review job was reclaimed during execution.")
+        existing = db.scalar(select(ReviewResult).where(ReviewResult.job_id == job_id))
+        if existing is not None:
+            # Repair a pre-existing result/failed-job mismatch, without another insert.
+            result = existing
+        else:
+            db.add(result)
+        current_job.status = "completed"
+        current_job.claimed_by = None
+        current_job.lease_expires_at = None
+        current_job.completed_at = utcnow()
         db.commit()
         db.refresh(result)
         return result
+    except ReviewJobLeaseLost:
+        db.rollback()
+        raise
     except WorkerLeaseLost:
         db.rollback()
-        interrupted_job = db.get(ReviewJob, job.id)
-        if interrupted_job is not None and interrupted_job.status == "running":
-            interrupted_job.status = "queued"
+        interrupted_job = _owned_review_job(db, job_id, attempt, claimant)
+        if interrupted_job is not None:
+            if db.scalar(select(ReviewResult.id).where(ReviewResult.job_id == job_id)):
+                db.rollback()
+                raise
+            # The attempt count is a fencing generation: never decrement/reuse it.
+            retryable = attempt < MAX_REVIEW_JOB_ATTEMPTS
+            interrupted_job.status = "queued" if retryable else "failed"
             interrupted_job.ai_config_id = None
             interrupted_job.claimed_by = None
             interrupted_job.lease_expires_at = None
             interrupted_job.started_at = None
-            interrupted_job.completed_at = None
-            interrupted_job.attempt_count = max(0, interrupted_job.attempt_count - 1)
-            interrupted_job.error_message = ""
+            interrupted_job.completed_at = None if retryable else utcnow()
+            interrupted_job.error_message = (
+                "" if retryable else "Worker lease lost during review."
+            )
             db.commit()
         raise
     except Exception as exc:
         db.rollback()
-        failed_job = db.get(ReviewJob, job.id)
-        if failed_job is not None:
-            _mark_job_failed(failed_job, exc)
-            db.commit()
+        failed_job = _owned_review_job(db, job_id, attempt, claimant)
+        if failed_job is None:
+            db.rollback()
+            raise ReviewJobLeaseLost("Review job was reclaimed after an error.") from exc
+        _mark_job_failed(failed_job, exc)
+        db.commit()
         raise
+
+
+def _owned_review_job(
+    db: Session, job_id: int, attempt: int, claimant: str | None
+) -> ReviewJob | None:
+    statement = select(ReviewJob).where(
+        ReviewJob.id == job_id,
+        ReviewJob.status == "running",
+        ReviewJob.attempt_count == attempt,
+        ReviewJob.claimed_by == claimant,
+    )
+    if claimant is not None:
+        statement = statement.where(ReviewJob.lease_expires_at > utcnow())
+    return db.scalar(statement.with_for_update().execution_options(populate_existing=True))
+
+
+def renew_review_job_lease(
+    db: Session,
+    job_id: int,
+    worker_id: str,
+    attempt: int,
+    lease_seconds: int,
+    worker_owner_token: str | None = None,
+) -> bool:
+    """Renew only an unexpired claim from this exact review attempt."""
+    if worker_owner_token and not fence_worker_lease(db, worker_owner_token):
+        db.rollback()
+        return False
+    now = utcnow()
+    renewed = db.execute(
+        update(ReviewJob)
+        .where(
+            ReviewJob.id == job_id,
+            ReviewJob.status == "running",
+            ReviewJob.claimed_by == worker_id,
+            ReviewJob.attempt_count == attempt,
+            ReviewJob.lease_expires_at > now,
+        )
+        .values(lease_expires_at=now + timedelta(seconds=max(1, lease_seconds)))
+        .execution_options(synchronize_session=False)
+    ).rowcount == 1
+    if renewed:
+        db.commit()
+    else:
+        db.rollback()
+    return renewed
 
 
 def _mark_job_failed(job: ReviewJob, exc: Exception) -> None:
@@ -3257,20 +3348,37 @@ def reap_abandoned_review_jobs(db: Session) -> int:
             ReviewJob.lease_expires_at.is_not(None),
             ReviewJob.lease_expires_at <= now,
             ReviewJob.attempt_count >= MAX_REVIEW_JOB_ATTEMPTS,
+            ~select(ReviewResult.id).where(ReviewResult.job_id == ReviewJob.id).exists(),
         )
     ).all()
+    reaped = 0
     for job in jobs:
-        job.status = "failed"
-        job.error_message = (
-            f"Abandoned after {MAX_REVIEW_JOB_ATTEMPTS} attempts; the Worker lease "
-            "expired while the job was running."
-        )
-        job.claimed_by = None
-        job.lease_expires_at = None
-        job.completed_at = now
-    if jobs:
+        reaped += db.execute(
+            update(ReviewJob)
+            .where(
+                ReviewJob.id == job.id,
+                ReviewJob.status == "running",
+                ReviewJob.attempt_count == job.attempt_count,
+                ReviewJob.lease_expires_at <= now,
+                ~select(ReviewResult.id).where(ReviewResult.job_id == ReviewJob.id).exists(),
+            )
+            .values(
+                status="failed",
+                error_message=(
+                    f"Abandoned after {MAX_REVIEW_JOB_ATTEMPTS} attempts; the Worker "
+                    "lease expired while the job was running."
+                ),
+                claimed_by=None,
+                lease_expires_at=None,
+                completed_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        ).rowcount
+    if reaped:
         db.commit()
-    return len(jobs)
+    else:
+        db.rollback()
+    return reaped
 
 
 def claim_next_review_job(
@@ -3284,7 +3392,9 @@ def claim_next_review_job(
     job = db.scalar(
         select(ReviewJob)
         .outerjoin(Workspace, Workspace.id == ReviewJob.workspace_id)
+        .outerjoin(ReviewResult, ReviewResult.job_id == ReviewJob.id)
         .where(
+            ReviewResult.id.is_(None),
             or_(
                 ReviewJob.status == "queued",
                 (
@@ -3356,7 +3466,10 @@ def process_queued_jobs(
         )
         if job is None:
             break
-        job_completed, job_failed = process_claimed_review_job(db, job.id)
+        job_completed, job_failed = process_claimed_review_job(
+            db, job.id, expected_attempt=job.attempt_count,
+            expected_claimed_by=worker_id,
+        )
         completed += job_completed
         failed += job_failed
     return completed, failed
@@ -3366,24 +3479,50 @@ def process_claimed_review_job(
     db: Session,
     job_id: int,
     worker_owner_token: str | None = None,
+    expected_attempt: int | None = None,
+    expected_claimed_by: str | None = None,
 ) -> tuple[int, int]:
     job = db.get(ReviewJob, job_id)
     if job is None or job.status != "running":
         return 0, 0
+    if expected_attempt is not None and (
+        job.attempt_count != expected_attempt
+        or job.claimed_by != expected_claimed_by
+    ):
+        return 0, 0
+    attempt = job.attempt_count
+    claimant = job.claimed_by
+    ai_config_id = job.ai_config_id
     try:
-        if worker_owner_token is None:
+        if worker_owner_token is None and expected_attempt is None:
             process_job(db, job)
         else:
-            process_job(db, job, worker_owner_token=worker_owner_token)
-        record_ai_endpoint_success(db, job.ai_config_id)
+            process_job(
+                db,
+                job,
+                worker_owner_token=worker_owner_token,
+                expected_attempt=attempt,
+                expected_claimed_by=claimant,
+            )
+        record_ai_endpoint_success(db, ai_config_id)
         return 1, 0
     except WorkerLeaseLost:
         return 0, 0
     except Exception as exc:
         db.rollback()
-        failed_job = db.get(ReviewJob, job_id)
-        if failed_job is not None and failed_job.status == "running":
+        failed_job = _owned_review_job(db, job_id, attempt, claimant)
+        if failed_job is not None:
             _mark_job_failed(failed_job, exc)
             db.commit()
-        record_ai_endpoint_failure(db, job.ai_config_id, exc)
+        db.rollback()
+        latest_job = db.get(ReviewJob, job_id)
+        if latest_job is None or (
+            latest_job.status != "failed"
+            or latest_job.claimed_by is not None
+            or latest_job.attempt_count not in (attempt, MAX_REVIEW_JOB_ATTEMPTS)
+        ):
+            db.rollback()
+            return 0, 0
+        db.rollback()
+        record_ai_endpoint_failure(db, ai_config_id, exc)
         return 0, 1

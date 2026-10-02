@@ -19,6 +19,7 @@ from app.services.review_operations import (
     queue_recommended_review_updates,
     queue_rereviews,
     queue_rereviews_for_run_ids,
+    queue_run_review,
     workspace_review_progress,
 )
 from app.services.review_policy import current_review_policy_key
@@ -104,6 +105,24 @@ def test_delete_local_run_leaves_no_orphaned_rows() -> None:
         assert result_id is not None
         assert db.get(AlmRun, kept.run_id) is not None
         assert db.scalars(select(ReviewJob).where(ReviewJob.run_id == 2)).all() != []
+
+
+def test_queue_run_review_does_not_reuse_a_failed_job_with_a_saved_result() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = add_reviewed_run(db, 42, "unqualified")
+        old_job = db.scalar(select(ReviewJob).where(ReviewJob.run_id == run.run_id))
+        old_job.status = "failed"
+        old_job.attempt_count = 1
+        db.commit()
+
+        fresh_job = queue_run_review(db, run)
+
+        assert fresh_job is not None and fresh_job.id != old_job.id
+        assert fresh_job.status == "queued"
+        assert old_job.status == "failed"
+        assert db.scalar(select(ReviewResult.job_id).where(ReviewResult.run_id == 42)) == old_job.id
 
 
 def test_queue_rereviews_filters_final_status_and_preserves_history() -> None:

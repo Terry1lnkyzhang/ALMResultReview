@@ -1,13 +1,16 @@
 import json
 from datetime import datetime
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
-from app.database import Base
+from app.database import Base, get_db
 from app.models import AlmRun, ReviewJob, ReviewResult, RunRevision, Workspace
 from app.services.workspace_insights import workspace_equipment_insights
-from app.web import _workspace_run_id, export_equipment_usage, templates
+from app.web import _workspace_run_id, export_equipment_usage, router, templates
 
 
 def _reviewed_run(
@@ -236,6 +239,65 @@ def test_workspace_run_id_resolves_the_displayed_alm_id_with_legacy_fallback() -
         assert _workspace_run_id(db, 1, 156098) == 156201
         assert _workspace_run_id(db, 1, 42) == 42
         assert _workspace_run_id(db, 2, 156098) is None
+
+
+def test_insights_reference_links_redirect_to_the_workspace_run_detail() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add_all(
+            [
+                AlmRun(
+                    run_id=156201,
+                    workspace_id=1,
+                    alm_run_id=156098,
+                    source_hash="1" * 64,
+                    review_hash="2" * 64,
+                    raw_json="{}",
+                ),
+                AlmRun(
+                    run_id=42,
+                    workspace_id=1,
+                    source_hash="3" * 64,
+                    review_hash="4" * 64,
+                    raw_json="{}",
+                ),
+                AlmRun(
+                    run_id=156098,
+                    workspace_id=2,
+                    alm_run_id=777,
+                    source_hash="5" * 64,
+                    review_hash="6" * 64,
+                    raw_json="{}",
+                ),
+            ]
+        )
+        db.commit()
+
+    def override_get_db():
+        with Session(engine) as db:
+            yield db
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app, follow_redirects=False) as client:
+        matching = client.get("/workspaces/1/runs/156098")
+        legacy = client.get("/workspaces/1/runs/42")
+        other_workspace = client.get("/workspaces/2/runs/156098")
+        missing = client.get("/workspaces/2/runs/42")
+
+    assert matching.status_code == 307
+    assert matching.headers["location"] == "/runs/156201"
+    assert legacy.status_code == 307
+    assert legacy.headers["location"] == "/runs/42"
+    assert other_workspace.status_code == 307
+    assert other_workspace.headers["location"] == "/runs/156098"
+    assert missing.status_code == 404
 
 
 def test_equipment_usage_csv_has_one_row_per_run_step_reference() -> None:

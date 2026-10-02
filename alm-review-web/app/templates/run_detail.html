@@ -18,7 +18,7 @@
     <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
     {% if active_sync_job %}<span class="queue-tag">ALM 刷新：{{ queue_status_labels.get(active_sync_job.status, active_sync_job.status) }}</span>{% endif %}
     {% if active_review_job %}<span class="queue-tag">AI 评审：{{ queue_status_labels.get(active_review_job.status, active_review_job.status) }}</span>{% endif %}
-    {% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job %}<span class="queue-tag queue-tag-failed">AI 评审：失败</span>{% endif %}
+    {% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job and (not review.result or review.result.job_id != latest_review_job.id) %}<span class="queue-tag queue-tag-failed">AI 评审：失败</span>{% endif %}
   </div>
 </section>
 
@@ -113,7 +113,7 @@
 </section>
 {% endif %}
 
-{% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job %}
+{% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job and (not review.result or review.result.job_id != latest_review_job.id) %}
 <section class="review-job-state review-job-failed" aria-label="AI review job failed">
   <div><p class="eyebrow">AI 评审任务失败</p><h2>最近一次评审没有生成新结果</h2><p>{{ latest_review_job_error or 'Worker 未返回错误详情。' }}</p><small>任务 {{ latest_review_job.id }} &middot; 已尝试 {{ latest_review_job.attempt_count }} 次</small></div>
   <form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button secondary" type="submit">重新加入评审队列</button></form>
