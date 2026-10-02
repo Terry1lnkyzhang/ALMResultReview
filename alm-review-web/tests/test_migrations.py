@@ -306,6 +306,7 @@ def test_manual_decision_review_result_becomes_optional() -> None:
         for column in inspect(engine).get_columns("manual_decisions")
     }
     assert columns["review_result_id"]["nullable"]
+    assert columns["items_json"]["nullable"]
 
 
 def test_ai_review_settings_are_added_to_existing_config() -> None:

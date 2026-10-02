@@ -392,6 +392,8 @@ class ManualDecision(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     original_ai_verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Per-item answers behind `reason`; NULL for free-text and legacy decisions.
+    items_json: Mapped[str | None] = mapped_column(LongText)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 

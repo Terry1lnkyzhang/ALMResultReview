@@ -272,6 +272,14 @@ def ensure_compatible_schema(engine: Engine) -> None:
                             "review_result_id DROP NOT NULL"
                         )
                     )
+            if "items_json" not in columns:
+                items_type = "LONGTEXT" if engine.dialect.name == "mysql" else "TEXT"
+                connection.execute(
+                    text(
+                        "ALTER TABLE manual_decisions ADD COLUMN items_json "
+                        f"{items_type} NULL"
+                    )
+                )
 
         if "sync_configs" in table_names:
             columns = {

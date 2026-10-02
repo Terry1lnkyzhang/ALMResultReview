@@ -9,6 +9,7 @@
 {% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'location-consistency': '测试位置一致性评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
 {% set queue_status_labels = {'queued': '排队中', 'running': '执行中', 'completed': '已完成', 'failed': '失败'} %}
 {% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'location_review': '测试位置校验', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
+{% macro manual_reason(decision, items) %}{% if items %}<ul class="manual-reason-items">{% for item in items %}<li><strong>{{ item.get('step_label', '') }} · {{ item.get('label', '') }} · {{ item.get('category_label', '') }}</strong><p>{{ item.get('explanation', '') }}</p><small>证据：{{ item.get('evidence', '') }}</small></li>{% endfor %}</ul>{% else %}<p class="manual-reason-text">{{ decision.reason }}</p>{% endif %}{% endmacro %}
 {% block title %}运行 {{ run.alm_run_id or run.run_id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; 返回仪表板</a>
@@ -138,7 +139,7 @@
     <h2>之前人工确认合格，因 ALM 源版本变化已失效</h2>
     <p>原裁决仅对版本 #{{ superseded_qualification.previous_revision }} 生效；当前版本 #{{ superseded_qualification.current_revision }} 需要重新评审或重新人工裁决。原记录仍保留，并非人工主动撤销。</p>
     <p><strong>上次裁决：{{ decision_labels.get(superseded_qualification.decision.decision, superseded_qualification.decision.decision) }}</strong> · {{ superseded_qualification.decision.operator }} · {{ superseded_qualification.decision_at.strftime('%Y-%m-%d %H:%M') if superseded_qualification.decision_at else '-' }}</p>
-    <p>上次人工理由：{{ superseded_qualification.decision.reason }}</p>
+    <p class="manual-reason-text">上次人工理由：{{ superseded_qualification.decision.reason }}</p>
     <p>AI 原始结论：旧版 {{ review_status_labels.get(superseded_qualification.decision.original_ai_verdict, superseded_qualification.decision.original_ai_verdict) }} → 当前 {{ review_status_labels.get(review.result.verdict, review.result.verdict) if review.result else '尚未评审' }}。</p>
     <div class="superseded-manual-comparison" aria-label="上次人工裁决版本与当前 ALM 版本的源数据差异">
       <h3>版本差异 · #{{ superseded_qualification.previous_revision }} → #{{ superseded_qualification.current_revision }}</h3>
@@ -161,7 +162,7 @@
 {% if review.result %}
 <section class="review-band">
   <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
-  {% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示 AI 评审判定结果。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% endif %}
+  {% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示 AI 评审判定结果。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small>{{ manual_reason(review.manual_decision, manual_decision_items) }}</div>{% endif %}
 </section>
 {% if review_pipeline %}
 <section class="pipeline-section">
@@ -257,19 +258,61 @@
   </div>
 </section>
 {% endif %}
-{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>{% if active_review_job %}此版本已加入评审队列。{% elif latest_review_job and latest_review_job.status == 'failed' %}最近一次评审失败，可查看上方错误并重新加入队列。{% else %}此版本尚未执行 AI 评审。{% endif %}</p></div>{% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示评审失败状态。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small><p>{{ review.manual_decision.reason }}</p></div>{% else %}<form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入评审队列' }}</button></form>{% endif %}</section>{% endif %}
+{% else %}<section class="review-band review-empty"><div><h2>暂无当前 AI 评审</h2><p>{% if active_review_job %}此版本已加入评审队列。{% elif latest_review_job and latest_review_job.status == 'failed' %}最近一次评审失败，可查看上方错误并重新加入队列。{% else %}此版本尚未执行 AI 评审。{% endif %}</p></div>{% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示评审失败状态。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small>{{ manual_reason(review.manual_decision, manual_decision_items) }}</div>{% else %}<form method="post" action="/runs/{{ run.run_id }}/review-now"><button class="button primary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入评审队列' }}</button></form>{% endif %}</section>{% endif %}
 
 {% if allowed_decisions %}
-<section class="decision-panel"><div><p class="eyebrow">人工裁决</p><h2>{{ '处理此评审结果' if review.result else '人工处理评审失败' }}</h2><p>{% if review.result %}确认后不再计入待处理警告；原始警告、原因和源数据哈希仍会保留，可随时撤销裁决。{% else %}AI 未生成评审结果。人工核验证据后可确认合格；失败任务、错误详情和裁决原因仍会保留，可随时撤销裁决。{% endif %}</p></div><form method="post" action="/runs/{{ run.run_id }}/manual-decision"><label><span>裁决</span><select name="decision">{% for value, label in allowed_decisions %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label><label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入人工处理此结果的原因"></textarea></label><button class="button primary" type="submit">记录裁决</button></form></section>
+{% set selected_decision = decision_draft.decision or allowed_decisions[0][0] %}
+{% set decision_values = allowed_decisions|map('first')|list %}
+<section class="decision-panel decision-panel-structured" id="manual-decision"><div><p class="eyebrow">人工裁决</p><h2>{{ '处理此评审结果' if review.result else '人工处理评审失败' }}</h2><p>{% if review.result %}确认后不再计入待处理警告；原始警告、原因和源数据哈希仍会保留，可随时撤销裁决。{% else %}AI 未生成评审结果。人工核验证据后可确认合格；失败任务、错误详情和裁决原因仍会保留，可随时撤销裁决。{% endif %}</p></div>
+  <form method="post" action="/runs/{{ run.run_id }}/manual-decision">
+    {% if decision_draft.errors %}<div class="decision-errors" role="alert">{% for error in decision_draft.errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
+    <label class="decision-choice"><span>裁决</span><select name="decision" data-decision-select>{% for value, label in allowed_decisions %}<option value="{{ value }}"{% if value == selected_decision %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <input type="hidden" name="review_result_id" value="{{ review.result.id if review.result else '' }}">
+    <fieldset class="decision-items" data-decision-items{% if selected_decision == 'confirmed_unqualified' %} disabled hidden{% endif %}>
+      <legend>逐项填写：每一项都要选判定类别，并写清 AI 哪里错了或为什么不影响、以及人工核对的证据，不能只写“合格”“没问题”。{% if decision_rows|rejectattr('required')|list %}标为“选填”的警告可以留空，填写时三项都要填。{% endif %}</legend>
+      <dl class="decision-category-legend">{% for key, label in decision_categories %}<div><dt>{{ label }}</dt><dd>{{ decision_category_hints[key] }}</dd></div>{% endfor %}</dl>
+      {% for row in decision_rows %}
+      {% set answer = decision_draft.answers[loop.index0] if loop.index0 < decision_draft.answers|length else none %}
+      {% set row_errors = decision_draft.row_errors.get(loop.index0, []) %}
+      <article class="decision-item decision-item-{{ row.kind }}{% if row_errors %} decision-item-invalid{% endif %}">
+        <header><strong>{{ row.step_label }}</strong><span>{{ row.label }}</span><em>{{ row.kind_label }}</em>{% if not row.required %}<small>选填</small>{% endif %}</header>
+        <p class="decision-item-summary">AI 结论：{{ row.summary }}</p>
+        <div class="decision-item-fields">
+          <label><span>判定类别</span><select name="category"{% if row.required %} required{% endif %}><option value="">请选择</option>{% for key, label in decision_categories %}<option value="{{ key }}" title="{{ decision_category_hints[key] }}"{% if answer and answer.category == key %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+          <label><span>AI 哪里错了 / 为什么不影响</span><textarea name="explanation" rows="2"{% if row.required %} required{% endif %} placeholder="{{ row.explanation_hint }}">{{ answer.explanation if answer else '' }}</textarea></label>
+          <label><span>人工核对的证据</span><textarea name="evidence" rows="2"{% if row.required %} required{% endif %} placeholder="{{ row.evidence_hint }}">{{ answer.evidence if answer else '' }}</textarea></label>
+        </div>
+        {% if row_errors %}<ul class="decision-item-errors">{% for error in row_errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+      </article>
+      {% endfor %}
+    </fieldset>
+    {% if 'confirmed_unqualified' in decision_values %}
+    <fieldset class="decision-free-text" data-decision-free-text{% if selected_decision != 'confirmed_unqualified' %} disabled hidden{% endif %}>
+      <label class="reason-field"><span>原因</span><textarea name="reason" rows="3" required placeholder="请输入确认不合格的原因"></textarea></label>
+    </fieldset>
+    {% endif %}
+    <button class="button primary" type="submit">记录裁决</button>
+  </form>
+</section>
 {% endif %}
 <script>
   (() => {
     const form = document.querySelector(".decision-panel form");
     if (!form) return;
-    const reason = form.querySelector("textarea[name='reason']");
-    const submit = form.querySelector("button[type='submit']");
-    const sync = () => { submit.disabled = !reason.value.trim(); };
-    reason.addEventListener("input", sync);
+    const select = form.querySelector("[data-decision-select]");
+    const sections = [
+      [form.querySelector("[data-decision-items]"), (value) => value !== "confirmed_unqualified"],
+      [form.querySelector("[data-decision-free-text]"), (value) => value === "confirmed_unqualified"],
+    ];
+    const sync = () => {
+      for (const [fieldset, isActive] of sections) {
+        if (!fieldset) continue;
+        const active = isActive(select.value);
+        fieldset.disabled = !active;
+        fieldset.hidden = !active;
+      }
+    };
+    select.addEventListener("change", sync);
     sync();
   })();
 </script>
