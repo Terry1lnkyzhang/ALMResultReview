@@ -1,7 +1,7 @@
 [skill]
 id = "equipment-role"
 name = "Equipment Role Review"
-version = "1.4.1"
+version = "1.4.2"
 stage = "equipment_review"
 enabled = true
 
@@ -17,7 +17,7 @@ optional = ["equipment.previous_matches"]
 forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry.write"]
 
 [model]
-enable_thinking = true
+enable_thinking = false
 # Thinking tokens count against max_tokens.
 max_tokens = 8192
 max_tokens_per_item = 1024

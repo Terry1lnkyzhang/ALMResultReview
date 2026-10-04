@@ -19,9 +19,9 @@ from app.services.run_status import is_reviewable_run_status
 
 IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-MAX_IMAGES_PER_STEP = 4
+MAX_IMAGES_PER_STEP = 10
 MAX_IMAGE_BYTES_PER_STEP = 10 * 1024 * 1024
-MAX_IMAGES_PER_RUN = 12
+MAX_IMAGES_PER_RUN = 24
 MAX_IMAGE_BYTES_PER_RUN = 15 * 1024 * 1024
 logger = logging.getLogger(__name__)
 

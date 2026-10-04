@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -68,7 +69,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.7.1"
+    assert definition.version == "1.7.4"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -76,24 +77,25 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.7.1",
+        "version": "1.7.4",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.7.1",
-        "equipment-role": "1.4.1",
-        "html-evidence-review": "1.8.0",
-        "image-evidence-review": "1.3.1",
-        "location-consistency": "1.0.0",
+        "alm-text-review": "1.7.4",
+        "equipment-role": "1.4.2",
+        "html-evidence-review": "1.8.1",
+        "image-evidence-review": "1.3.2",
+        "location-consistency": "1.0.1",
     }
 
     assert set(discover_skills()) == set(active)
     for skill_id, version in active.items():
         definition = load_skill(skill_id)
         assert definition.version == version
+        assert definition.enable_thinking is False
         assert definition.contract_version == "1"
         assert len(definition.skill_hash) == 64
         assert definition.required_capabilities
@@ -105,7 +107,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.8.0"
+    assert html["version"] == "1.8.1"
     assert load_skill("html-evidence-review").max_tokens == 32768
 
 
@@ -147,6 +149,39 @@ def test_review_skill_examples_cover_failed_run_record_consistency() -> None:
     )
     assert image_failed["output"]["status"] == "pass"
     assert html_failed["output"]["status"] == "pass"
+
+
+def test_alm_text_examples_distinguish_explained_and_unexplained_na() -> None:
+    examples = load_skill("alm-text-review").examples
+    explained = next(
+        example for example in examples
+        if "service laptop" in example["input"]["actual"]
+    )
+    unexplained = next(
+        example for example in examples
+        if "0.34s/r rotation" in example["input"]["description"]
+    )
+
+    assert explained["output"]["applicability"] == "not_applicable"
+    assert explained["output"]["findings"] == []
+    assert unexplained["output"]["findings"][0]["code"] == "record_documentation_gap"
+
+
+def test_alm_text_examples_keep_active_dms_failure_separate_from_missing_na() -> None:
+    examples = load_skill("alm-text-review").examples
+    dms_examples = [
+        example for example in examples
+        if example["input"].get("execution_location_config", {}).get("dms_coverage")
+        == "4cm"
+    ]
+
+    assert len(dms_examples) == 2
+    assert [example["output"]["applicability"] for example in dms_examples] == [
+        "applicable", "applicable"
+    ]
+    assert [example["output"]["findings"][0]["severity"] for example in dms_examples] == [
+        "manual", "fail"
+    ]
 
 
 def test_skill_runner_validates_input_output_and_separates_untrusted_data(
@@ -198,7 +233,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.7.1"
+    assert trace["skill_version"] == "1.7.4"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64
@@ -221,7 +256,15 @@ _TEXT_GRANTS = {
 }
 
 
-def test_skill_runner_requests_thinking_and_strips_inline_thinking(monkeypatch) -> None:
+@pytest.fixture
+def thinking_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.skill_runner.load_skill",
+        lambda skill_id: replace(load_skill(skill_id), enable_thinking=True),
+    )
+
+
+def test_skill_runner_disables_thinking_and_strips_inline_thinking(monkeypatch) -> None:
     requests = []
     answer = json.dumps(
         {
@@ -261,13 +304,10 @@ def test_skill_runner_requests_thinking_and_strips_inline_thinking(monkeypatch) 
     )
 
     assert trace["status"] == "completed"
-    assert trace["enable_thinking"] is True
+    assert trace["enable_thinking"] is False
     assert trace["ai_calls"] == 1
-    assert requests[0]["chat_template_kwargs"] == {"enable_thinking": True}
-    assert requests[0]["temperature"] == 1.0
-    assert requests[0]["top_p"] == 0.95
-    assert requests[0]["top_k"] == 20
-    assert requests[0]["presence_penalty"] == 0.0
+    assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert requests[0]["temperature"] == 0.7
     assert requests[0]["seed"] == trace["seed"] == int(trace["input_hash"][:8], 16) & 0x7FFFFFFF
     assert requests[0]["response_format"]["type"] == "json_schema"
     assessments = requests[0]["response_format"]["json_schema"]["schema"][
@@ -391,7 +431,7 @@ def test_grammar_schema_drops_keywords_the_server_rejects() -> None:
 
 
 def test_skill_runner_reports_thinking_that_exhausts_the_token_budget(
-    monkeypatch,
+    monkeypatch, thinking_enabled,
 ) -> None:
     calls = []
 
@@ -414,7 +454,123 @@ def test_skill_runner_reports_thinking_that_exhausts_the_token_budget(
     assert trace["status"] == "failed"
     assert "while thinking" in trace["error"]
     assert trace["retryable"] is False
-    assert len(calls) == 1
+    assert trace["ai_calls"] == 2
+    assert [call["chat_template_kwargs"]["enable_thinking"] for call in calls] == [
+        True, False
+    ]
+
+
+def test_skill_runner_retries_empty_thinking_once_without_thinking(
+    monkeypatch, thinking_enabled,
+) -> None:
+    calls = []
+    answer = json.dumps(
+        {
+            "assessments": [
+                {
+                    "review_step": 1,
+                    "applicability": "applicable",
+                    "findings": [],
+                    "reference_decisions": [
+                        {
+                            "candidate_id": "step-1-ref-1",
+                            "role": "result_evidence_location",
+                            "requires_check": True,
+                            "reason": "Actual cites the screenshot folder.",
+                        }
+                    ],
+                    "summary": "Screenshot folder identified.",
+                }
+            ]
+        }
+    )
+
+    def post(*args, **kwargs):
+        calls.append(kwargs["json"])
+        return StubResponse("<think>Still reasoning") if len(calls) == 1 else StubResponse(answer)
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+
+    trace = SkillRunner().run(
+        "alm-text-review",
+        skill_input(),
+        endpoint="https://ai.example/v1/chat/completions",
+        model_name="test-model",
+        headers={},
+        timeout_seconds=30,
+        granted_capabilities=_TEXT_GRANTS,
+    )
+
+    assert trace["status"] == "completed"
+    assert trace["ai_calls"] == 2
+    assert trace["thinking_fallback"] == "disabled"
+    assert trace["repairs"] == []
+    assert [call["chat_template_kwargs"]["enable_thinking"] for call in calls] == [
+        True, False
+    ]
+    assert calls[0]["messages"] == calls[1]["messages"]
+    assert calls[0]["response_format"] == calls[1]["response_format"]
+    assert calls[0]["max_tokens"] == calls[1]["max_tokens"]
+    assert trace["output"]["assessments"][0]["review_step"] == 1
+
+
+def test_skill_runner_retries_reasoning_content_without_visible_answer(
+    monkeypatch, thinking_enabled,
+) -> None:
+    calls = []
+    answer = json.dumps(
+        {
+            "assessments": [
+                {
+                    "review_step": 1,
+                    "applicability": "applicable",
+                    "findings": [],
+                    "reference_decisions": [
+                        {
+                            "candidate_id": "step-1-ref-1",
+                            "role": "result_evidence_location",
+                            "requires_check": True,
+                            "reason": "Actual cites the screenshot folder.",
+                        }
+                    ],
+                    "summary": "Screenshot folder identified.",
+                }
+            ]
+        }
+    )
+
+    class ThinkingResponse(StubResponse):
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "", "reasoning_content": "Still thinking"},
+                        "finish_reason": "length",
+                    }
+                ]
+            }
+
+    def post(*_args, **kwargs):
+        calls.append(kwargs["json"])
+        return ThinkingResponse("") if len(calls) == 1 else StubResponse(answer)
+
+    monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
+
+    trace = SkillRunner().run(
+        "alm-text-review",
+        skill_input(),
+        endpoint="https://ai.example/v1/chat/completions",
+        model_name="test-model",
+        headers={},
+        timeout_seconds=30,
+        granted_capabilities=_TEXT_GRANTS,
+    )
+
+    assert trace["thinking_fallback"] == "disabled"
+    assert trace["status"] == "completed"
+    assert trace["ai_calls"] == 2
+    assert calls[1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "while thinking" not in trace.get("error", "")
 
 
 def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) -> None:

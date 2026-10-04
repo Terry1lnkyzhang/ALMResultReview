@@ -1069,6 +1069,228 @@ def test_shared_name_reuses_unique_equipment_verified_in_prior_step() -> None:
     assert checks[0]["matches"][0]["matched_by"] == ["previous_step_equipment"]
 
 
+def test_prior_verified_device_name_reuses_chinese_registry_row_across_steps() -> None:
+    registry = [
+        equipment(
+            "PCCSY-RD-CT-1-0175", "", description="心电模拟器", equipment_pk=1
+        ),
+        equipment(
+            "PHSZ-RD-VV-1-0300", "6818005", equipment_pk=2,
+            calibration_due_date=date(2027, 2, 5),
+        ),
+        equipment(
+            "PHSZ-RD-VV-1-0301", "6853041", equipment_pk=3,
+            calibration_due_date=date(2027, 4, 2),
+        ),
+        equipment(
+            None, "CN52105243", description="PIM", equipment_pk=4,
+            calibration_interval="No calibration required",
+        ),
+    ]
+    content = {
+        "execution_date": "2026-10-01",
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Record the ECG simulator serial number.",
+                "expected": "ECG simulator SN:__",
+                "actual": "ECG simulator SN: PCCSY-RD-CT-1-0175",
+            },
+            {
+                "review_step": 2,
+                "description": "Record the PIM serial number.",
+                "expected": "PIM SN:__",
+                "actual": "PIM SN: CN52105243",
+            },
+            {
+                "review_step": 3,
+                "description": "Set the ECG simulator HR to 60 BPM.",
+                "expected": "The ECG waveform is displayed.",
+                "actual": "The ECG waveform was displayed.",
+            },
+        ],
+    }
+    checks, _ = analyze_equipment_steps(content, registry)
+    assert checks[0]["status"] == "pass"
+    assert checks[2]["previously_matched_equipment_ids"] == [
+        "PCCSY-RD-CT-1-0175", "SN:CN52105243"
+    ]
+
+    resolved, pending = apply_extracted_equipment(
+        content,
+        checks,
+        {
+            1: [
+                _extracted(
+                    device_name="ECG simulator",
+                    serial_number="PCCSY-RD-CT-1-0175",
+                    source_text="ECG simulator SN: PCCSY-RD-CT-1-0175",
+                )
+            ],
+            3: [
+                _extracted(
+                    device_name="ECG simulator",
+                    source_text="Set the ECG simulator HR to 60 BPM.",
+                )
+            ],
+        },
+        registry,
+    )
+
+    assert 3 in resolved
+    assert 3 not in pending
+    assert checks[2]["status"] == "pass"
+    assert checks[2]["matches"][0]["equipment_id"] == "PCCSY-RD-CT-1-0175"
+    assert "previous_step_equipment" in checks[2]["matches"][0]["matched_by"]
+
+
+def test_bilingual_name_does_not_pick_one_of_two_verified_prior_devices() -> None:
+    registry = [
+        equipment("ECG-1", "", description="心电模拟器", equipment_pk=1),
+        equipment(
+            "ECG-2", "", description="心电模拟器", equipment_pk=2,
+            calibration_due_date=date(2027, 4, 2),
+        ),
+        equipment(
+            "ECG-3", "", equipment_pk=3,
+            calibration_due_date=date(2027, 2, 5),
+        ),
+        equipment(
+            "ECG-4", "", equipment_pk=4,
+            calibration_due_date=date(2027, 4, 2),
+        ),
+    ]
+    content = {
+        "execution_date": "2026-08-01",
+        "steps": [
+            {
+                "review_step": index,
+                "description": "Record the ECG simulator identity.",
+                "expected": "ECG simulator ID:__",
+                "actual": f"ECG simulator ID: ECG-{index}",
+            }
+            for index in (1, 2)
+        ] + [
+            {
+                "review_step": 3,
+                "description": "Set the ECG simulator HR to 60 BPM.",
+                "expected": "The ECG waveform is displayed.",
+                "actual": "The ECG waveform was displayed.",
+            }
+        ],
+    }
+    checks, _ = analyze_equipment_steps(content, registry)
+    assert all(check["status"] == "pass" for check in checks[:2])
+
+    apply_extracted_equipment(
+        content,
+        checks,
+        {
+            3: [
+                _extracted(
+                    device_name="ECG simulator",
+                    source_text="Set the ECG simulator HR to 60 BPM.",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert checks[2]["status"] != "pass"
+    assert checks[2]["matches"] == []
+
+
+def test_bilingual_name_does_not_reuse_prior_failed_calibration() -> None:
+    registry = [
+        equipment(
+            "ECG-1", "", description="心电模拟器", equipment_pk=1,
+            calibration_due_date=date(2026, 7, 31),
+        ),
+        equipment("ECG-2", "", equipment_pk=2),
+        equipment("ECG-3", "", equipment_pk=3,
+                  calibration_due_date=date(2027, 4, 2)),
+    ]
+    content = {
+        "execution_date": "2026-08-01",
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Record the ECG simulator identity.",
+                "expected": "ECG simulator ID:__",
+                "actual": "ECG simulator ID: ECG-1",
+            },
+            {
+                "review_step": 2,
+                "description": "Set the ECG simulator HR to 60 BPM.",
+                "expected": "The ECG waveform is displayed.",
+                "actual": "The ECG waveform was displayed.",
+            },
+        ],
+    }
+    checks, _ = analyze_equipment_steps(content, registry)
+    assert checks[0]["status"] == "fail"
+
+    apply_extracted_equipment(
+        content,
+        checks,
+        {
+            2: [
+                _extracted(
+                    device_name="ECG simulator",
+                    source_text="Set the ECG simulator HR to 60 BPM.",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert checks[1]["status"] != "pass"
+    assert checks[1]["matches"] == []
+
+
+def test_bilingual_name_does_not_reuse_prior_when_actual_identifies_new_device() -> None:
+    registry = [
+        equipment("ECG-1", "", description="心电模拟器", equipment_pk=1),
+        equipment("ECG-2", "", equipment_pk=2),
+        equipment("ECG-3", "", equipment_pk=3,
+                  calibration_due_date=date(2027, 4, 2)),
+    ]
+    content = {
+        "execution_date": "2026-08-01",
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Record the ECG simulator identity.",
+                "expected": "ECG simulator ID:__",
+                "actual": "ECG simulator ID: ECG-1",
+            },
+            {
+                "review_step": 2,
+                "description": "Set the ECG simulator HR to 60 BPM.",
+                "expected": "The ECG waveform is displayed.",
+                "actual": "New device ID: ECG-2. The ECG waveform was displayed.",
+            },
+        ],
+    }
+    checks, _ = analyze_equipment_steps(content, registry)
+
+    apply_extracted_equipment(
+        content,
+        checks,
+        {
+            2: [
+                _extracted(
+                    device_name="ECG simulator",
+                    source_text="Set the ECG simulator HR to 60 BPM.",
+                )
+            ]
+        },
+        registry,
+    )
+
+    assert [match["equipment_id"] for match in checks[1]["matches"]] == ["ECG-2"]
+
+
 def test_actual_only_shared_name_does_not_reuse_prior_equipment() -> None:
     registry = [
         equipment(
@@ -1560,6 +1782,108 @@ def test_second_pass_registry_name_resolves_the_check() -> None:
 
     assert checks[0]["status"] == "pass"
     assert checks[0]["matches"][0]["matched_by"] == ["ai_registry_name"]
+
+
+def test_two_unidentified_injector_candidates_do_not_count_as_recorded_equipment() -> None:
+    registry = [
+        equipment("INJ-SAS", "SAS-1", description="Smart Injector-SAS", equipment_pk=1),
+        equipment("INJ-SYNC", "SYNC-2", description="SyncRight Injector", equipment_pk=2),
+    ]
+    content = review_content(
+        "The injector connected to the console.",
+        description="Connect an injector to the console.",
+        expected="The injector is connected.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["pending_device_names"] = ["injector"]
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": [],
+                "selected_equipment_names": ["Smart Injector-SAS", "SyncRight Injector"],
+                "reason": "The Step does not identify which injector model was used.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["reported_identifiers"] == []
+    assert checks[0]["status"] == "manual"
+    assert checks[0]["matches"] == []
+
+
+def test_unrelated_actual_candidate_does_not_ground_two_injector_names() -> None:
+    registry = [
+        equipment("INJ-SAS", "SAS-1", description="Smart Injector-SAS", equipment_pk=1),
+        equipment("INJ-SYNC", "SYNC-2", description="SyncRight Injector", equipment_pk=2),
+        equipment("OTHER", "OTHER-1", description="Console Interface", equipment_pk=3),
+    ]
+    content = review_content(
+        "The Console Interface displayed that the injector connected.",
+        description="Connect an injector to the console.",
+        expected="The injector is connected.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["pending_device_names"] = ["injector"]
+    assert checks[0]["actual_candidate_equipment_ids"] == ["OTHER"]
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": [],
+                "selected_equipment_names": ["Smart Injector-SAS", "SyncRight Injector"],
+                "reason": "The Step does not say which injector was used.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "manual"
+    assert checks[0]["matches"] == []
+
+
+def test_two_injectors_named_in_actual_can_both_match() -> None:
+    registry = [
+        equipment("INJ-SAS", "SAS-1", description="Smart Injector-SAS", equipment_pk=1),
+        equipment("INJ-SYNC", "SYNC-2", description="SyncRight Injector", equipment_pk=2),
+    ]
+    content = review_content(
+        "Smart Injector-SAS and SyncRight Injector were used.",
+        description="Connect both injectors to the console.",
+        expected="Both injectors are connected.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["pending_device_names"] = ["injector"]
+    assert set(checks[0]["actual_candidate_equipment_ids"]) == {"INJ-SAS", "INJ-SYNC"}
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": [],
+                "selected_equipment_names": ["Smart Injector-SAS", "SyncRight Injector"],
+                "reason": "Both devices are named in Actual.",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "pass"
+    assert {match["equipment_id"] for match in checks[0]["matches"]} == {
+        "INJ-SAS", "INJ-SYNC"
+    }
 
 
 def test_name_only_match_with_conflicting_part_number_requires_manual_review() -> None:

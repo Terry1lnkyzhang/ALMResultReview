@@ -75,6 +75,7 @@ from app.services.location_review import (
     load_location_assessment,
     validate_location_skill_output,
 )
+from app.services.qwen_code_agent import build_review_bundle, run_shadow_review
 from app.services.review_pipeline import build_pipeline_trace
 from app.services.review_policy import current_review_policy_key
 from app.services.skill_runner import SkillFailure, skill_runner
@@ -1865,7 +1866,7 @@ def _prepare_image_evidence(
             results=results,
         )
 
-    remaining_run_images = 12
+    remaining_run_images = 24
     remaining_run_bytes = 15 * 1024 * 1024
     path_review_steps: dict[str, set[int]] = {}
     for step in content.get("steps", []):
@@ -1880,7 +1881,7 @@ def _prepare_image_evidence(
         actions = _evidence_actions(step["evidence_profile"])
         if "load_images" not in actions and "review_attachment" not in actions:
             continue
-        remaining_step_images = 4
+        remaining_step_images = 10
         remaining_step_bytes = 10 * 1024 * 1024
         step_order = str(step.get("order") or "").strip()
         matching_step_numbers = {
@@ -2586,6 +2587,7 @@ def _run_text_semantic_skills(
     content: dict[str, Any],
     project: str = "",
     workspace_name: str = "",
+    location_assessment: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     steps = _text_skill_steps(content)
     truncated_steps: set[int] = set()
@@ -2611,12 +2613,18 @@ def _run_text_semantic_skills(
 
     traces: list[dict[str, Any]] = []
     assessments: dict[int, dict[str, Any]] = {}
+    execution_config = (
+        location_assessment.get("selected_config")
+        if location_assessment and location_assessment.get("status") == "ready"
+        else None
+    )
     for batch in _text_skill_batches(payloads):
         trace = skill_runner.run(
             "alm-text-review",
             {
                 "project": project,
                 "alm_run_status": str(content.get("run_status") or "Passed"),
+                "execution_location_config": execution_config,
                 "steps": batch,
             },
             endpoint=_completion_url(ai_config.base_url),
@@ -2629,6 +2637,7 @@ def _run_text_semantic_skills(
                 "review.numbered_comparison",
                 "evidence.path_metadata",
                 "equipment.registry.candidates",
+                "location.configuration.metadata",
             },
             request_post=httpx.post,
             output_validator=_validate_text_references,
@@ -2820,6 +2829,7 @@ def _text_review_stage(ctx: ReviewContext) -> dict[str, Any]:
         ctx.content,
         ctx.project,
         ctx.workspace_name,
+        ctx.location_assessment,
     )
     ctx.content["text_skill_traces"] = traces
     ctx.raw_response = json.dumps(
@@ -2829,7 +2839,7 @@ def _text_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     )
     return {
         "status": "completed",
-        "ai_calls": len(traces),
+        "ai_calls": sum(int(trace.get("ai_calls", 0)) for trace in traces),
         "steps": len(ctx.content["review_plan"]["text_steps"]),
         "skills": traces,
     }
@@ -3318,6 +3328,20 @@ def process_job(
             raise WorkerLeaseLost("Worker singleton lease was lost before review execution.")
         outcome = execute_review(ctx)
         parsed = outcome.parsed
+        if workspace.review_mode == "compare":
+            try:
+                outcome.pipeline["agent_shadow"] = run_shadow_review(
+                    content,
+                    parsed["step_results"],
+                    location_assessment,
+                    ai_config,
+                    bundle=build_review_bundle(ctx, parsed),
+                )
+            except Exception:
+                outcome.pipeline["agent_shadow"] = {
+                    "status": "unavailable",
+                    "reason": "Qwen Code pilot failed; the original verdict is unchanged",
+                }
         duration_ms = round((time.perf_counter() - started) * 1000)
         result = ReviewResult(
             workspace_id=workspace.id,

@@ -1,7 +1,7 @@
 [skill]
 id = "html-evidence-review"
 name = "HTML Evidence Review"
-version = "1.8.0"
+version = "1.8.1"
 stage = "report_review"
 enabled = true
 
@@ -17,7 +17,7 @@ optional = []
 forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry", "database.read", "verdict.write"]
 
 [model]
-enable_thinking = true
+enable_thinking = false
 # Thinking tokens count against max_tokens.
 max_tokens = 32768
 max_tokens_per_item = 1024

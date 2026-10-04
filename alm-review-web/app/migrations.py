@@ -116,6 +116,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
                     "project VARCHAR(255) NOT NULL DEFAULT '', "
                     f"equipment_review_enabled {boolean_type} NOT NULL DEFAULT 1, "
                     "equipment_area_filter VARCHAR(255) NOT NULL DEFAULT '', "
+                    "review_mode VARCHAR(32) NOT NULL DEFAULT 'standard', "
                     f"legacy_policy_adopted {boolean_type} NOT NULL DEFAULT 0, "
                     f"review_queue_paused {boolean_type} NOT NULL DEFAULT 0, "
                     f"sync_queue_paused {boolean_type} NOT NULL DEFAULT 0, "
@@ -137,6 +138,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 )
             )
         workspace_added_columns = {
+            "review_mode": "VARCHAR(32) NOT NULL DEFAULT 'standard'",
             "review_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
             "sync_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
             "queue_priority": "INTEGER NOT NULL DEFAULT 0",

@@ -11,21 +11,6 @@ from typing import Any
 
 from app.models import ReviewResult
 
-CATEGORY_LABELS: dict[str, str] = {
-    "ai_error": "AI 判断错误",
-    "ai_unable": "AI 无法检查",
-    "reference_data": "参考数据问题",
-    "test_case": "用例问题",
-    "accepted": "属实不影响",
-}
-CATEGORY_HINTS: dict[str, str] = {
-    "ai_error": "AI 误读或误解了步骤、截图或报告内容",
-    "ai_unable": "因格式、大小、权限等原因 AI 没能检查，已人工核对",
-    "reference_data": "设备台账、测试位置等参考数据缺失或过期",
-    "test_case": "用例步骤编号、描述有误，或步骤不适用于本产品",
-    "accepted": "问题确实存在，但不影响本次合格判定",
-}
-
 _BLOCKING_STATUSES = frozenset({"fail", "manual"})
 _KIND_LABELS = {
     "fail": "失败",
@@ -54,26 +39,14 @@ _TYPE_LABELS = {
     "summary": "AI 结论",
 }
 _HINTS = {
-    "equipment": (
-        "如：免校准模体 / 系统自带部件 / Bay 编号不是设备",
-        "设备编号或 SN，如 PCCSY-RD-CT-0-0002",
-    ),
-    "evidence": (
-        "如：证据为 MP4 视频 / 截图编号 1-1 对应 Step1",
-        "核对的文件名或路径",
-    ),
-    "path": (
-        "如：该路径是 Expected 要求记录的本地保存位置",
-        "实际可访问的完整路径",
-    ),
-    "text": ("AI 误解了什么，正确的理解是什么", "Actual 中对应的原文或数值"),
-    "report": (
-        "报告哪部分覆盖了该步骤，或哪部分为人工执行",
-        "报告文件名或 test-result 编号",
-    ),
-    "language": ("如：已在 ALM 修正 / 原文就是协议名称", "对应的原文"),
-    "location": ("执行时的实际配置，或配置更换的时间", "Bay、计算机型号或更换记录"),
-    "default": ("AI 哪里错了，或为什么不影响合格", "人工核对的文件、路径、编号或原文"),
+    "equipment": "如：免校准模体 / 系统自带部件 / Bay 编号不是设备",
+    "evidence": "如：证据为 MP4 视频 / 截图编号 1-1 对应 Step1",
+    "path": "如：该路径是 Expected 要求记录的本地保存位置",
+    "text": "AI 误解了什么，正确的理解是什么",
+    "report": "报告哪部分覆盖了该步骤，或哪部分为人工执行",
+    "language": "如：已在 ALM 修正 / 原文就是协议名称",
+    "location": "执行时的实际配置，或配置更换的时间",
+    "default": "AI 哪里错了，或为什么不影响合格",
 }
 _HINT_GROUPS = {
     "equipment": "equipment",
@@ -152,24 +125,16 @@ class DecisionRow:
 
     @property
     def explanation_hint(self) -> str:
-        return _HINTS[_HINT_GROUPS.get(self.type, "default")][0]
-
-    @property
-    def evidence_hint(self) -> str:
-        return _HINTS[_HINT_GROUPS.get(self.type, "default")][1]
+        return _HINTS[_HINT_GROUPS.get(self.type, "default")]
 
 
 @dataclass(frozen=True)
 class DecisionAnswer:
-    category: str = ""
     explanation: str = ""
-    evidence: str = ""
 
     @property
     def is_blank(self) -> bool:
-        return not (
-            self.category.strip() or self.explanation.strip() or self.evidence.strip()
-        )
+        return not self.explanation.strip()
 
 
 def decision_rows(
@@ -208,8 +173,6 @@ def answer_problems(row: DecisionRow, answer: DecisionAnswer) -> list[str]:
     if not row.required and answer.is_blank:
         return []
     problems = []
-    if answer.category not in CATEGORY_LABELS:
-        problems.append("请选择判定类别。")
     explanation = _normalized(answer.explanation)
     if _substance(answer.explanation) < MIN_SUBSTANCE:
         problems.append(
@@ -218,10 +181,6 @@ def answer_problems(row: DecisionRow, answer: DecisionAnswer) -> list[str]:
         )
     elif len(explanation) >= 10 and explanation in _normalized(row.summary):
         problems.append("“AI 哪里错了 / 为什么不影响”不能直接复制 AI 结论。")
-    if _substance(answer.evidence) < MIN_SUBSTANCE:
-        problems.append(
-            "“人工核对的证据”过于笼统，请写明核对的文件名、路径、设备编号或原文。"
-        )
     return problems
 
 
@@ -241,8 +200,7 @@ def compose_reason(
     answers: Sequence[DecisionAnswer],
 ) -> str:
     return "\n".join(
-        f"[{row.step_label} · {row.label}] {CATEGORY_LABELS[answer.category]}："
-        f"{answer.explanation.strip()}；证据：{answer.evidence.strip()}"
+        f"[{row.step_label} · {row.label}] {answer.explanation.strip()}"
         for row, answer in zip(rows, answers, strict=True)
         if not answer.is_blank
     )
@@ -261,10 +219,7 @@ def decision_items_json(
                 "steps": list(row.steps),
                 "step_label": row.step_label,
                 "ai_summary": row.summary,
-                "category": answer.category,
-                "category_label": CATEGORY_LABELS[answer.category],
                 "explanation": answer.explanation.strip(),
-                "evidence": answer.evidence.strip(),
             }
             for row, answer in zip(rows, answers, strict=True)
             if not answer.is_blank

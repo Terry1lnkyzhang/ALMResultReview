@@ -106,11 +106,85 @@
       "review_step": 13,
       "applicability": "not_applicable",
       "findings": [
-        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只列出了声称可用的转速，没有明确记载本步骤 N/A、未执行原因及配置依据，需人工核对。"}
+        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只列出了可用转速，没有明确记载本步骤不适用的结论及原因，需人工核对。"}
       ],
       "reference_decisions": [],
       "extracted_equipment": [],
-      "summary": "可能不适用该配置，但执行记录没有清楚交代未执行的依据。"
+      "summary": "可能不适用该配置，但 Actual 没有明确的 N/A 结论和原因。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 14,
+      "alm_step_status": "Passed",
+      "description": "Record the 12NC and version of Service Tool file defined in the plan.",
+      "expected": "Record Service Tool 12NC, Rev and Version.",
+      "actual": "This step does not apply because Service Tool is installed on the service laptop, so the environment check is performed there and does not depend on the Test bay.",
+      "actual_format": {"layout_text": "This step does not apply because Service Tool is installed on the service laptop.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 14,
+      "applicability": "not_applicable",
+      "findings": [],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "Actual 已明确说明本 Test bay 不适用及原因；不要求在此步骤记录版本值或另附批准依据。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 15,
+      "alm_step_status": "Passed",
+      "execution_location_config": {
+        "item": "SY Bay09(CHESS-SCIM-0338)", "product": "IncisiveCT V7.0",
+        "dms_version": "V2", "dms_coverage": "4cm",
+        "couch": "Incisive STD", "computer": "Incisive G4 STD"
+      },
+      "description": "Record the max IPS of the executed DMS configuration.",
+      "expected": "For 4cm DMS configuration: max IPS>=80. For 2cm DMS configuration: max IPS>=60.",
+      "actual": "For 4cm DMS configuration: max IPS was 87.5, meeting the 80 IPS requirement.",
+      "actual_format": {"layout_text": "For 4cm DMS configuration: max IPS was 87.5.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 15,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "执行时 Location 为 4cm DMS，Actual 只记录了 4cm 分支的合格数值，未明确说明本次执行配置是 4cm，也未说明 2cm 配置不适用及原因，需人工确认记录范围。"}
+      ],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "4cm 分支有结果；Actual 未明确本次配置及 2cm 分支 N/A，不以缺少 2cm 数值直接判失败。"
+    }
+  },
+  {
+    "input": {
+      "review_step": 16,
+      "alm_step_status": "Passed",
+      "execution_location_config": {
+        "item": "SY Bay09(CHESS-SCIM-0338)", "product": "IncisiveCT V7.0",
+        "dms_version": "V2", "dms_coverage": "4cm",
+        "couch": "Incisive STD", "computer": "Incisive G4 STD"
+      },
+      "description": "Record the max IPS of the executed DMS configuration.",
+      "expected": "For 4cm DMS configuration: max IPS>=80. For 2cm DMS configuration: max IPS>=60.",
+      "actual": "For 4cm DMS configuration: max IPS was 70. The 2cm branch is N/A because this Location has 4cm DMS.",
+      "actual_format": {"layout_text": "For 4cm DMS configuration: max IPS was 70.", "signals": []},
+      "numbered_comparison": [],
+      "reference_candidates": []
+    },
+    "output": {
+      "review_step": 16,
+      "applicability": "applicable",
+      "findings": [
+        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "当前 Location 为 4cm DMS，Actual 的 max IPS=70 小于适用要求 80；2cm 已说明 N/A，不能抵消 4cm 的明确失败。"}
+      ],
+      "reference_decisions": [],
+      "extracted_equipment": [],
+      "summary": "当前 4cm 分支结果与 Expected 冲突，因此记录不合格。"
     }
   },
   {

@@ -766,6 +766,14 @@ def test_ads_without_pd_requires_review_only_for_earthformal02_failed_step(
 
 
 def test_text_review_sends_workspace_project_and_alm_status_context(monkeypatch) -> None:
+    location_config = {
+        "item": "SY Bay09(CHESS-SCIM-0338)",
+        "product": "IncisiveCT V7.0",
+        "dms_version": "V2",
+        "dms_coverage": "4cm",
+        "couch": "Incisive STD",
+        "computer": "Incisive G4 STD",
+    }
     content = {
         "run_status": "Failed",
         "review_plan": {"text_steps": [1]},
@@ -808,16 +816,26 @@ def test_text_review_sends_workspace_project_and_alm_status_context(monkeypatch)
         AiConfig(base_url="https://ai.example/v1", model_name="test"),
         content,
         project="earth_kylin",
+        location_assessment={"status": "ready", "selected_config": location_config},
     )
 
     assert len(supplied_inputs) == 1
     assert supplied_inputs[0]["project"] == "earth_kylin"
     assert supplied_inputs[0]["alm_run_status"] == "Failed"
+    assert supplied_inputs[0]["execution_location_config"] == location_config
     assert supplied_inputs[0]["steps"][0]["alm_step_status"] == "Failed"
     assert supplied_inputs[0]["steps"][0]["description"] == (
         "This step not for Earth."
     )
     assert parsed["step_results"][0]["applicability"] == "not_applicable"
+
+    _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+        project="earth_kylin",
+        location_assessment={"status": "manual", "selected_config": location_config},
+    )
+    assert supplied_inputs[1]["execution_location_config"] is None
 
 
 def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> None:

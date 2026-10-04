@@ -1096,6 +1096,7 @@ def test_every_verdict_module_is_hashed_into_the_review_policy() -> None:
     # Transport and orchestration cannot change a verdict, so they stay out.
     exempt = {
         "ai_transport",
+        "qwen_code_agent",
         "review_policy",
         "worker_lease",
         "workspaces",

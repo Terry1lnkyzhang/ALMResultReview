@@ -19,27 +19,28 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 
 | 阶段 | 调用或规则 | 条件与输出 |
 | --- | --- | --- |
-| 文本评审 `text_review` | `alm-text-review` v1.7.1；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
+| 文本评审 `text_review` | `alm-text-review` v1.7.4；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
 | 路由 `routing` | 程序消费首轮返回的候选角色，生成路径/图像/HTML/设备检查请求 | 本阶段 `ai_calls=0`；ALM 图像附件强制进入相应检查 |
-| 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.0 | 非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
-| 图像 `image_review` | 安全解析 + `image-evidence-review` v1.3.1 | Workspace 启用外部证据且存在可审图片时调用；否则 disabled / not_applicable |
-| HTML `report_review` | 安全解析、发布信息硬规则 + `html-evidence-review` v1.7.1 | Workspace 启用外部证据且 Actual 引用 HTML 时审查；可能多批调用 |
-| 设备 `equipment_review` | 台账确定性判断 + 未解问题用 `equipment-role` v1.4.1 | Workspace 启用设备审查时执行；明确结果无须第二轮 AI |
+| 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.1 | 非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
+| 图像 `image_review` | 安全解析 + `image-evidence-review` v1.3.2 | Workspace 启用外部证据且存在可审图片时调用；否则 disabled / not_applicable |
+| HTML `report_review` | 安全解析、发布信息硬规则 + `html-evidence-review` v1.8.1 | Workspace 启用外部证据且 Actual 引用 HTML 时审查；可能多批调用 |
+| 设备 `equipment_review` | 台账确定性判断 + 未解问题用 `equipment-role` v1.4.2 | Workspace 启用设备审查时执行；明确结果无须第二轮 AI |
 | 汇总 `aggregation` | 程序合并 issue、warning、criterion 和 verdict | 不调用 AI |
 
-外部证据开关 `external_evidence_review_enabled` 控制**实际**读取 HTML、图片及对应专项 AI；禁用后，程序仍可识别引用、执行基础路径/文件名规则，对不能完成的受控检查按现有 guard 保守处理。设备审查有独立开关及可选区域过滤。位置审查独立于这两项开关；非 MySQL 环境实体位置审查返回 disabled。每个 Skill 使用绑定的 AI endpoint、模型和配置；同一个 Review 的各次调用使用同一 endpoint 配置。详见 [reviews.py](../app/services/reviews.py)、[scheduler.py](../app/services/scheduler.py)。
+外部证据开关 `external_evidence_review_enabled` 控制**实际**读取 HTML、图片及对应专项 AI；禁用后，程序仍可识别引用、执行基础路径/文件名规则，对不能完成的受控检查按现有 guard 保守处理。设备审查有独立开关及可选区域过滤。位置审查独立于这两项开关；非 MySQL 环境实体位置审查返回 disabled。全部五个 Skill 的 `enable_thinking` 均为 `false`，未显式配置时也默认关闭；网页配置页不提供该开关。每个 Skill 使用绑定的 AI endpoint、模型和配置；同一个 Review 的各次调用使用同一 endpoint 配置。详见 [reviews.py](../app/services/reviews.py)、[scheduler.py](../app/services/scheduler.py)。
 
 ## 3. 首轮 ALM 文本规则与引用路由
 
 ### 3.1 适用性优先
 
-模型先检查 Step 是否适用于当前 Workspace 的项目/产品环境。Description、Expected 或 Actual 明确排除当前项目、或明确只适用于另一产品/配置且有可信执行范围时，判 `not_applicable`，此 Step 不应再产生缺失执行结果或 Expected/Actual 冲突；若 Actual 仅列出不支持的参数却未交代 N/A、未执行及配置依据，可另记 `manual/record_documentation_gap`。明确要求 Standard PC 却记成 Premium PC 执行而无替代说明时同样交人工，不自行假定批准。范围不明但存在限制时判 `manual`。Step 状态和 Run 状态由应用作为可信上下文传入；ALM 自由文本仍是不可信证据。见 [首轮指令](../app/review_skills/alm-text-review/instructions.md)。
+模型先检查 Step 是否适用于当前 Workspace 的项目/产品环境。Actual 明确给出不适用结论及具体原因时，判 `not_applicable`，不再要求本步骤的执行结果、截图、额外批准或配置基线；即使 ALM Step 状态为 Passed 也如此。Actual 仅列出不支持的参数却没有明确不适用结论或原因时，记 `manual/record_documentation_gap`。明确要求 Standard PC 却记成 Premium PC 执行而无替代说明时仍交人工，不自行假定批准。范围不明但存在限制时判 `manual`。Step 状态和 Run 状态由应用作为可信上下文传入；ALM 自由文本仍是不可信证据。见 [首轮指令](../app/review_skills/alm-text-review/instructions.md)。
 
 ### 3.2 文本和状态核对
 
 - **Passed Step**：Actual 要有可核验结果并满足每个适用的 Expected 要求；逐项比较值、范围、公差、标识符、状态转移及编号要求。Expected 明确要求 `Failed`、`Timeout`、`disabled` 等看似负面的状态时，Actual 真正记录该状态可以是正确结果，不得用一般产品直觉改写 Expected。
 - **Failed Step**：Actual 应具体说明观察到的偏差、异常、超限值等；失败执行被完整记录**不是**评审 fail。只写笼统 `Failed` 且无法核查通常是不充分；写成完全满足 Expected 的成功结果与 Step 状态矛盾。
 - **No Run Step**：Failed Run 中未执行且 Actual 为空通常不算缺陷；若 Actual 却宣称执行，则不一致。其他 Run 状态下无法解释的未执行步骤通常需人工复核。
+- **互斥配置分支**：首轮只在执行时点的物理 Location 配置唯一有效时读取其 Product、DMS 覆盖范围、Couch、Computer 等字段；若 Expected 按 4cm/2cm 等互斥配置列要求，仍须核验本次配置对应的数值。Actual 只记其中一套配置，却未明确本次执行采用的配置及另一套配置 N/A 的原因时为 `manual/record_documentation_gap`，不因缺另一配置数值直接 fail；本次配置数值明确不达标仍 fail。Expected 要求一次执行同时覆盖多种配置时不适用该豁免；Location 无可信配置时不从 Actual 或目录猜测。
 - **语言/格式**：影响理解的语法、拼写、时态或严重格式问题可能成为 issue；不影响意义的细小语言问题最多 warning。正常列表、路径、单位、JSON、被动语态、轻微空格不应单独判不合格。
 - 引用图片、报告、附件或路径可作为 Actual 回答 Expected 的方式；文件名、脚本名或多个 Step 复用同一报告，不足以**单独**证明内容冲突。证据内容交后续阶段查验；如果 Step 文本自身明确出现数值矛盾，仍可直接 fail。受控文档检查涉及多个独立要求，但 Actual 只列文档、章节与笼统 Passed、没有逐项可复核的联系时，可产生 `manual/record_documentation_gap`；不要求将已路由图片/HTML 中的数值重抄到 Actual，也不宣称所引报告错误。
 
@@ -67,9 +68,9 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 
 ## 6. 图像证据（网络图像与 ALM 附件）
 
-网络图像只读取支持的 PNG、JPEG、WebP/JFIF，最多递归两级、扫描 500 个目录项，单图最大 5 MiB；每 Step 最多 4 张/10 MiB，每 Run 最多 12 张/15 MiB。文件名或相对路径应能与 Step 对应；多个 Step 共用无 Step 标记文件夹属于不确定映射。ALM 图片附件已由 ALM 指定所属 Step，无须用文件名猜测，也不走 UNC 路径校验；仍要核验 base64、MIME、签名、SHA-256、完整解码、尺寸与预算。损坏图不送 AI，留下审计信息并需人工复核；若同目录还有完好图，可送完好的图，损坏项仍保留人工问题。见 [image_evidence.py](../app/services/image_evidence.py)、[图片流程](image-evidence-review-flow.md)。
+网络图像只读取支持的 PNG、JPEG、WebP/JFIF，最多递归两级、扫描 500 个目录项，单图最大 5 MiB；每 Step 最多 10 张/10 MiB，每 Run 最多 24 张/15 MiB。文件名或相对路径应能与 Step 对应；文件名开头的 `3.PNG`、`11-CPU.PNG`、`third.PNG` 等数字/序数及原有 `Step3` 均可作为步骤标记，父目录里的编号不算。多个 Step 共用无 Step 标记文件夹属于不确定映射；明确匹配的目录内图片多于可用配额时需人工复核，不会静默取前几张算作完整。ALM 图片附件最多同步每 Step 10 张，并由 ALM 指定所属 Step，无须用文件名猜测，也不走 UNC 路径校验；仍要核验 base64、MIME、签名、SHA-256、完整解码、尺寸与预算。损坏图不送 AI，留下审计信息并需人工复核；若同目录还有完好图，可送完好的图，损坏项仍保留人工问题。见 [image_evidence.py](../app/services/image_evidence.py)、[图片流程](image-evidence-review-flow.md)。
 
-单 Step 图片传输合计不超 4 MiB 且 12 MP 时尽量原样发送；超预算在内存中尝试压缩/缩放到约 3.5 MB、10 MP、最长边 2048 px，不改源文件或附件。不能安全处理时为 `transport_too_large` → manual。模型每个 Step 恰好返回一份 assessment，该 assessment 的媒体 ID **完整且不重复**覆盖该 Step 发送的图片。图像 AI 只判断图是否支持 Description/Expected/Actual 与可信 Step 状态：清楚矛盾为 fail，不可读、不充分或不确定为 manual；Failed Step 的失败证据若支持记录，仍可 pass。
+单 Step 图片传输合计不超 4 MiB 且 12 MP 时尽量原样发送；超预算在内存中尝试压缩/缩放到约 3.5 MB、10 MP、最长边 2048 px，不改源文件或附件。不能安全处理时为 `transport_too_large` → manual。模型每次最多接收同一 Step 的 4 张图片，因此 10 张分为 4/4/2 批，各批须完整覆盖自己的媒体 ID；任一批不通过或需人工复核，都会影响该 Step。图像 AI 只判断图是否支持 Description/Expected/Actual 与可信 Step 状态：清楚矛盾为 fail，不可读、不充分或不确定为 manual；Failed Step 的失败证据若支持记录，仍可 pass。分批本身不扩大每 Run 24 张的限制，也不意味着模型在同一次调用中联合查看跨批图片。
 
 常见专项映射：`missing` / `no_images` / `no_usable_images` / `no_matching_images` → fail；`invalid_image` / `ambiguous_step_mapping` / `denied` / `unavailable` / `budget_exhausted` / `transport_too_large` / `not_checked` → manual。图片 Skill 输出两次修复仍无法通过格式或媒体覆盖校验时，**不采信 AI 输出并加 manual issue**；HTTP/传输/其他 Skill 故障不属于这个安全回退，仍可导致整个 ReviewJob 失败。见 [reviews.py](../app/services/reviews.py) 的 `_IMAGE_EVIDENCE_ISSUES`、`_image_review_stage()` 与 [图片 Skill 指令](../app/review_skills/image-evidence-review/instructions.md)。
 
@@ -139,7 +140,7 @@ Step issue 等级 `fail > manual > pass > not_applicable`；任意 Step fail **�
 
 ## 10. 模型输出校验、失败与任务重试
 
-每个 Skill 按自身 `skill.toml` 的输入/输出 schema、授权能力、ID 覆盖及应用侧专项 validator 运行。模型输入中的 ALM 文本、图片和 HTML 即使包含命令也只视为**不可信证据**，不能改变应用规则。每次 Skill 调用最多两轮模型输出：首次无效可把错误与原回复发回修复一次；第二次仍无效则使用**确有定义且验证通过**的安全 fallback，否则失败。这里“最多两轮”是**一次 Skill 调用内部**，不是整个 Review 只尝试两次。输出 trace 记录能力、Skill 版本/hash、输入/输出 hash、调用次数、修复错误、结束原因和耗时。见 [skill_runner.py](../app/services/skill_runner.py)。
+每个 Skill 按自身 `skill.toml` 的输入/输出 schema、授权能力、ID 覆盖及应用侧专项 validator 运行。模型输入中的 ALM 文本、图片和 HTML 即使包含命令也只视为**不可信证据**，不能改变应用规则。格式或覆盖校验失败时最多修复式重问一次；第二次仍无效则使用**确有定义且验证通过**的安全 fallback，否则失败。模型若只耗尽 token 思考而未输出 JSON，同一请求可额外重问一次并关闭 thinking；回复仍须通过全部校验，再次无答案则失败。这些上限针对**一次 Skill 调用内部**，整个 Review 可有多个批次。输出 trace 记录能力、Skill 版本/hash、输入/输出 hash、实际调用次数、修复错误、结束原因和耗时。见 [skill_runner.py](../app/services/skill_runner.py)。
 
 图片/HTML 的特定 `invalid_output` 可以安全降为 manual；文本引用**仅漏候选**有专门不确定路由 fallback；设备消歧失败会让涉及的设备检查进入 manual；其他阶段的 HTTP、认证、网络或不可恢复的 Skill 错误可能使**整条 ReviewJob 失败而没有新结果**，不能错误展示成已通过。通常每个 job 最多 3 次领取；不可重试错误直接耗尽尝试次数，可重试失败有退避。长任务运行期间续租，并按每次领取代次核对写入，避免租约到期后旧执行覆盖新执行；这只影响任务可靠性，不改变任何评审判定规则。见 [reviews.py](../app/services/reviews.py)、[scheduler.py](../app/services/scheduler.py)。
 

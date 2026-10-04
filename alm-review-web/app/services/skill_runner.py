@@ -54,6 +54,10 @@ class SkillFailure(ValueError):
         self.retryable = retryable
 
 
+class ThinkingBudgetExhausted(SkillFailure):
+    pass
+
+
 class ReviewTextStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -99,6 +103,7 @@ class AlmTextReviewInput(BaseModel):
 
     project: str = ""
     alm_run_status: Literal["Passed", "Failed"]
+    execution_location_config: TestLocationConfigInput | None = None
     steps: list[AlmTextReviewStep] = Field(min_length=1)
 
 
@@ -706,7 +711,7 @@ def _response_content(response: Any) -> str:
         content = ""
     if not isinstance(content, str) or not content.strip():
         if thinking:
-            raise SkillFailure(
+            raise ThinkingBudgetExhausted(
                 "Model used up max_tokens while thinking; raise the Skill max_tokens.",
                 retryable=False,
             )
@@ -849,7 +854,7 @@ def load_skill(skill_id: str) -> SkillDefinition:
         name=str(metadata.get("name", skill_id)),
         version=str(metadata["version"]),
         stage=str(metadata["stage"]),
-        enable_thinking=bool(model.get("enable_thinking", True)),
+        enable_thinking=bool(model.get("enable_thinking", False)),
         max_tokens=int(model.get("max_tokens", 1024)),
         max_tokens_per_item=int(model.get("max_tokens_per_item", 0)),
         instructions=paths["instructions"].read_text(encoding="utf-8").strip(),
@@ -992,25 +997,43 @@ class SkillRunner:
                     "strict": True,
                 },
             }
+            thinking_enabled = definition.enable_thinking
             for attempt in range(1, MAX_OUTPUT_REPAIR_ATTEMPTS + 1):
-                trace["ai_calls"] = attempt
+                request_payload = {
+                    "model": model_name,
+                    **_SAMPLING_PARAMS[thinking_enabled],
+                    "seed": seed,
+                    "max_tokens": max_tokens,
+                    "response_format": response_format,
+                    "chat_template_kwargs": {"enable_thinking": thinking_enabled},
+                    "messages": messages,
+                }
+                trace["ai_calls"] = trace.get("ai_calls", 0) + 1
                 response = (request_post or httpx.post)(
                     endpoint,
-                    json={
-                        "model": model_name,
-                        **_SAMPLING_PARAMS[definition.enable_thinking],
-                        "seed": seed,
-                        "max_tokens": max_tokens,
-                        "response_format": response_format,
-                        "chat_template_kwargs": {
-                            "enable_thinking": definition.enable_thinking
-                        },
-                        "messages": messages,
-                    },
+                    json=request_payload,
                     headers=headers,
                     timeout=timeout_seconds,
                 )
-                raw_content = _response_content(response)
+                try:
+                    raw_content = _response_content(response)
+                except ThinkingBudgetExhausted:
+                    if not thinking_enabled:
+                        raise
+                    thinking_enabled = False
+                    trace["thinking_fallback"] = "disabled"
+                    trace["ai_calls"] += 1
+                    response = (request_post or httpx.post)(
+                        endpoint,
+                        json={
+                            **request_payload,
+                            **_SAMPLING_PARAMS[False],
+                            "chat_template_kwargs": {"enable_thinking": False},
+                        },
+                        headers=headers,
+                        timeout=timeout_seconds,
+                    )
+                    raw_content = _response_content(response)
                 trace["finish_reason"] = response.json()["choices"][0].get(
                     "finish_reason"
                 )

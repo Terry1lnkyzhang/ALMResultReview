@@ -137,6 +137,34 @@ def test_alm_image_attachments_use_run_step_entities_and_global_download(
     assert attachments[0]["data_url"].startswith("data:image/jpeg;base64,")
 
 
+def test_alm_image_attachments_stop_after_ten_images(monkeypatch) -> None:
+    client = AlmClient(
+        SimpleNamespace(server_url="http://alm.example", domain="DEFAULT", project="PROJECT")
+    )
+    monkeypatch.setattr(
+        client,
+        "entities",
+        lambda resource: [
+            {"id": str(number), "name": f"Step1-{number}.jpg", "file-size": "6"}
+            for number in range(1, 12)
+        ],
+    )
+    downloaded = []
+
+    def fake_get(url, **_kwargs):
+        downloaded.append(url)
+        return httpx.Response(
+            200, content=b"\xff\xd8\xfftest", request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(client.client, "get", fake_get)
+
+    attachments = client.image_attachments("step-id")
+
+    assert len(attachments) == 10
+    assert len(downloaded) == 10
+
+
 def test_collect_run_resolves_current_folder_from_test_set(monkeypatch) -> None:
     test_set = {"id": "20989", "name": "Dom", "parent-id": "5673"}
     folders = {

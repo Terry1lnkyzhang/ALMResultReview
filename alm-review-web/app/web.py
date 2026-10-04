@@ -44,8 +44,6 @@ from app.models import (
 )
 from app.services.ai_transport import ai_endpoint_available, ai_endpoint_health_status
 from app.services.decision_reason import (
-    CATEGORY_HINTS,
-    CATEGORY_LABELS,
     DecisionAnswer,
     DecisionRow,
     compose_reason,
@@ -1895,8 +1893,6 @@ def _run_detail_response(
                 if allowed_decisions
                 else []
             ),
-            "decision_categories": list(CATEGORY_LABELS.items()),
-            "decision_category_hints": CATEGORY_HINTS,
             "decision_draft": {
                 "decision": "",
                 "answers": [],
@@ -1922,6 +1918,7 @@ def _run_detail_response(
             "status_label": STATUS_LABELS[review.final_status],
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
+            "decision_feedback": request.query_params.get("decision_feedback") == "1",
         },
     )
 
@@ -1933,9 +1930,7 @@ def decide_run(
     decision: Annotated[str, Form()],
     reason: Annotated[str, Form()] = "",
     review_result_id: Annotated[str, Form()] = "",
-    category: Annotated[list[str], Form()] = [],
     explanation: Annotated[list[str], Form()] = [],
-    evidence: Annotated[list[str], Form()] = [],
     db: Session = Depends(get_db),
 ):
     run = db.get(AlmRun, run_id)
@@ -1951,18 +1946,13 @@ def decide_run(
     ):
         rows = _manual_decision_rows(review, _latest_review_job(db, run))
         current_result_id = str(review.result.id) if review.result else ""
-        if review_result_id != current_result_id or not (
-            len(category) == len(explanation) == len(evidence) == len(rows)
-        ):
+        if review_result_id != current_result_id or len(explanation) != len(rows):
             return _redirect(
-                f"/runs/{run_id}",
+                f"/runs/{run_id}?decision_feedback=1",
                 "AI 评审结果已更新，请按最新结果重新填写人工裁决。",
                 "error",
             )
-        answers = [
-            DecisionAnswer(*fields)
-            for fields in zip(category, explanation, evidence, strict=True)
-        ]
+        answers = [DecisionAnswer(text) for text in explanation]
         row_errors = validate_answers(rows, answers)
         if row_errors:
             return _run_detail_response(
@@ -1982,11 +1972,11 @@ def decide_run(
     try:
         manual = save_manual_decision(db, run, decision, operator, reason)
     except ValueError as exc:
-        return _redirect(f"/runs/{run_id}", str(exc), "error")
+        return _redirect(f"/runs/{run_id}?decision_feedback=1", str(exc), "error")
     if items_json is not None:
         manual.items_json = items_json
         db.commit()
-    return _redirect(f"/runs/{run_id}", "人工裁决已记录。")
+    return _redirect(f"/runs/{run_id}?decision_feedback=1", "人工裁决已记录。")
 
 
 @router.post("/runs/{run_id}/manual-decision/revoke")
@@ -3098,6 +3088,7 @@ def save_configuration(
     automation_release_project_name: str = Form(""),
     external_evidence_review_enabled: bool = Form(False),
     equipment_review_enabled: bool = Form(False),
+    review_mode: str = Form("standard"),
     equipment_area_filter: str = Form(""),
     review_queue_paused: bool = Form(False),
     sync_queue_paused: bool = Form(False),
@@ -3151,6 +3142,9 @@ def save_configuration(
         )
     workspace.name = normalized_workspace_name
     workspace.project = workspace_project.strip()
+    if review_mode not in {"standard", "compare"}:
+        return _redirect(redirect_path, "Invalid review mode.", "error")
+    workspace.review_mode = review_mode
     workspace.equipment_review_enabled = equipment_review_enabled
     workspace.equipment_area_filter = equipment_area_filter.strip()
     workspace.review_queue_paused = review_queue_paused
@@ -3436,6 +3430,7 @@ def create_workspace(
         slug=slug,
         project=source.project if source else "",
         equipment_review_enabled=source.equipment_review_enabled if source else True,
+        review_mode=source.review_mode if source else "standard",
         equipment_area_filter=source.equipment_area_filter if source else "",
         queue_priority=source.queue_priority if source else 0,
         archived=False,

@@ -28,6 +28,7 @@ from app.services.review_pipeline import (
 from app.services.reviews import process_job
 from app.services.skill_runner import discover_skills, load_skill
 from app.services.test_locations import TEST_LOCATION_TABLE
+from app.services.workspaces import resolve_workspace
 
 EXPECTED_STAGE_ORDER = [
     "routing",
@@ -311,11 +312,15 @@ def run_pipeline(
     actual: str,
     external_evidence: bool | None = None,
     location_assessment: dict[str, Any] | None = None,
+    review_mode: str = "standard",
 ) -> tuple[dict[str, Any], list[str], str, dict[str, Any]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         configure_review(db)
+        workspace = resolve_workspace(db)
+        workspace.review_mode = review_mode
+        db.commit()
         if external_evidence is not None:
             db.add(
                 EvidenceConfig(
@@ -380,6 +385,53 @@ def test_pipeline_stages_keep_their_declared_order(monkeypatch) -> None:
 
     assert list(pipeline["stages"]) == EXPECTED_STAGE_ORDER
     assert called_skills == ["alm-text-review"]
+
+
+def test_agent_shadow_opt_in_does_not_change_pipeline_or_verdict(monkeypatch) -> None:
+    baseline, baseline_calls, baseline_verdict, baseline_criteria = run_pipeline(
+        monkeypatch, actual="The result was recorded in the test report."
+    )
+    assert "agent_shadow" not in baseline
+    seen: list[list[dict[str, Any]]] = []
+
+    def fake_shadow(_content, step_results, _location, _config, *, bundle):
+        seen.append(step_results)
+        assert bundle["target_step"] is None or bundle["checks"]
+        return {"status": "completed", "assessment": "uncertain", "target_step": 1}
+
+    monkeypatch.setattr("app.services.reviews.run_shadow_review", fake_shadow)
+    pipeline, calls, verdict, criteria = run_pipeline(
+        monkeypatch, actual="The result was recorded in the test report.", review_mode="compare"
+    )
+
+    assert seen and seen[0][0]["review_step"] == 1
+    assert pipeline.pop("agent_shadow")["assessment"] == "uncertain"
+    assert list(pipeline["stages"]) == list(baseline["stages"]) == EXPECTED_STAGE_ORDER
+    assert pipeline["total_ai_calls"] == baseline["total_ai_calls"]
+    assert {
+        stage: (trace["status"], trace["ai_calls"])
+        for stage, trace in pipeline["stages"].items()
+    } == {
+        stage: (trace["status"], trace["ai_calls"])
+        for stage, trace in baseline["stages"].items()
+    }
+    assert (calls, verdict, criteria) == (baseline_calls, baseline_verdict, baseline_criteria)
+
+
+def test_agent_shadow_failure_does_not_abort_review(monkeypatch) -> None:
+    def failed_agent(*_args, **_kwargs):
+        raise RuntimeError("external CLI failed")
+
+    monkeypatch.setattr("app.services.reviews.run_shadow_review", failed_agent)
+    pipeline, calls, verdict, criteria = run_pipeline(
+        monkeypatch, actual="The result was recorded in the test report.", review_mode="compare"
+    )
+
+    assert pipeline["agent_shadow"]["status"] == "unavailable"
+    assert "external CLI failed" not in json.dumps(pipeline)
+    assert verdict in {"qualified", "unqualified", "needs_manual_review"}
+    assert calls == ["alm-text-review"]
+    assert criteria["expected_vs_actual"]["status"] == "pass"
 
 
 def test_declaration_is_the_source_of_the_stage_order() -> None:

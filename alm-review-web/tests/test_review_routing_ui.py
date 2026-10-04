@@ -96,6 +96,31 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert 'include_manually_resolved_temporary=(status == "temporary_evidence")' in web_source
 
 
+def test_run_detail_renders_agent_shadow_as_separate_cited_opinion() -> None:
+    source, _, _ = templates.env.loader.get_source(templates.env, "run_detail.html")
+    fragment = "{% set agent_shadow" + source.split("{% set agent_shadow", 1)[1].split(
+        "{% set routing_steps", 1
+    )[0]
+    html = templates.env.from_string(fragment).render(
+        review_pipeline={
+            "agent_shadow": {
+                "status": "completed",
+                "target_step": 2,
+                "assessment": "uncertain",
+                "reason": "Check the previous Step.",
+                "citations": [
+                    {"step": 1, "field": "actual", "quote": "ECG simulator SN: 0175"}
+                ],
+            }
+        }
+    )
+
+    assert "Qwen Code 旁路意见" in html
+    assert "仅供人工复核，不改变正式结论" in html
+    assert "证据不足" in html
+    assert "ECG simulator SN: 0175" in html
+
+
 def test_run_detail_explains_superseded_manual_qualification() -> None:
     source, _, _ = templates.env.loader.get_source(
         templates.env, "run_detail.html"
@@ -149,6 +174,13 @@ def test_run_detail_keeps_review_job_status_and_errors_visible() -> None:
     assert "人工处理评审失败" in source
     assert "AI 未生成评审结果。人工核验证据后可确认合格" in source
     assert "撤销后将恢复显示评审失败状态" in source
+
+
+def test_run_detail_recorded_ids_do_not_fall_back_to_registry_matches() -> None:
+    template = templates.get_template("run_detail.html")
+    source, _, _ = templates.env.loader.get_source(templates.env, template.name)
+
+    assert "or equipment.get('matches')|map(attribute='equipment_id')" not in source
 
 
 def test_public_job_error_redacts_api_key_identifiers() -> None:

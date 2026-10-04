@@ -406,6 +406,9 @@ def _name_key(value: str) -> str:
     return _NAME_NOISE_RE.sub("", value.casefold())
 
 
+_PREVIOUS_DEVICE_NAME_ALIASES = {"ecgsimulator": "心电模拟器"}
+
+
 def _equipment_name_aliases(description: str) -> tuple[str, ...]:
     normalized = _normalized(description)
     if not normalized:
@@ -993,6 +996,15 @@ def apply_extracted_equipment(
         previous_references = set(
             check.get("previously_matched_equipment_ids", [])
         )
+        verified_previous_references = {
+            snapshot.get("registry_reference") or snapshot.get("equipment_id")
+            for prior_check in checks
+            if int(prior_check["review_step"]) < review_step
+            and prior_check["status"] == "pass"
+            for snapshot in prior_check.get("matches", [])
+            if set(snapshot.get("matched_by", []))
+            & {"equipment_id", "serial_number", "extracted_equipment_id", "extracted_serial_number"}
+        }
         requirement_previous_references = requirement_previous_equipment_ids(
             str(step.get("description") or ""),
             str(step.get("expected") or ""),
@@ -1057,6 +1069,20 @@ def apply_extracted_equipment(
                     for item in name_index.get(_name_key(name), [])
                     if equipment_reference(item) in previous_references
                 ]
+                alias = _PREVIOUS_DEVICE_NAME_ALIASES.get(_name_key(name))
+                if (
+                    alias
+                    and not name_in_actual
+                    and not matched
+                    and not check.get("reported_identifiers")
+                    and not check.get("unknown_identifiers")
+                ):
+                    previous_name_rows.extend(
+                        item
+                        for item in name_index.get(_name_key(alias), [])
+                        if equipment_reference(item) in previous_references
+                        and equipment_reference(item) in verified_previous_references
+                    )
                 requirement_previous_name_rows = [
                     item
                     for item in previous_name_rows
@@ -1379,6 +1405,21 @@ def apply_equipment_disambiguation(
                 )
             )
         grounded_ids.update(previous_ids & selected_name_equipment_ids)
+        if (
+            len({_name_key(_normalized(name)) for name in selected_names}) > 1
+            and not selected_name_equipment_ids.issubset(grounded_ids)
+            and not check.get("reported_identifiers")
+            and not check.get("unknown_identifiers")
+        ):
+            check.update(
+                status="manual",
+                code="equipment_name_ambiguous",
+                summary=(
+                    "AI 给出多台可能的台账设备，但 Actual 未记录足以区分"
+                    "具体设备的名称或标识符，需要人工确认。"
+                ),
+            )
+            continue
         selected = {
             item.id: item
             for item in (

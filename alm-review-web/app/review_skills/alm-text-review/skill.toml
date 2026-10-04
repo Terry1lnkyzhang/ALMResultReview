@@ -1,7 +1,7 @@
 [skill]
 id = "alm-text-review"
 name = "ALM Text Review and Evidence Planning"
-version = "1.7.1"
+version = "1.7.4"
 stage = "text_review"
 enabled = true
 
@@ -13,11 +13,11 @@ identity_field = "review_step"
 
 [capabilities]
 required = ["review.step_text", "review.text_format", "review.numbered_comparison", "evidence.path_metadata", "equipment.registry.candidates"]
-optional = []
+optional = ["location.configuration.metadata"]
 forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry", "database.read", "verdict.write"]
 
 [model]
-enable_thinking = true
+enable_thinking = false
 # Thinking tokens count against max_tokens.
 max_tokens = 12288
 max_tokens_per_item = 1536

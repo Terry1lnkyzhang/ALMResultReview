@@ -105,10 +105,10 @@ def test_collects_supported_images_with_depth_and_count_limits(tmp_path: Path) -
     write_image(tmp_path / "05.png")
     write_image(tmp_path / "06.png")
 
-    result = NetworkImageResolver(max_depth=2, max_images=5).collect(tmp_path)
+    result = NetworkImageResolver(max_depth=2, max_images=6).collect(tmp_path)
 
     assert result.status == "ready"
-    assert len(result.images) == 5
+    assert len(result.images) == 6
     assert {image.media_type for image in result.images} <= {
         "image/png",
         "image/jpeg",
@@ -120,6 +120,9 @@ def test_collects_supported_images_with_depth_and_count_limits(tmp_path: Path) -
     )
     assert all(len(image.sha256) == 64 for image in result.images)
     assert not any("level3" in image.relative_name for image in result.images)
+    limited = NetworkImageResolver(max_depth=2, max_images=5).collect(tmp_path)
+    assert limited.status == "budget_exhausted"
+    assert limited.images == ()
 
 
 def test_rejects_missing_empty_oversized_and_invalid_images(tmp_path: Path) -> None:
@@ -273,7 +276,7 @@ def test_run_image_limit_records_skipped_later_paths(monkeypatch) -> None:
         resolved_paths.append(value)
         if value.endswith("Step6"):
             return ImageEvidenceResult(status="no_images")
-        selected = {"Step2": 1, "Step3": 4, "Step5": 4, "Step7": 3}
+        selected = {"Step2": 6, "Step3": 6, "Step5": 6, "Step7": 6}
         return ImageEvidenceResult(
             status="ready",
             images=(image,) * min(self.max_images, selected[value.rsplit("\\", 1)[-1]]),
@@ -308,13 +311,96 @@ def test_run_image_limit_records_skipped_later_paths(monkeypatch) -> None:
         len(result.images)
         for results in prepared.results.values()
         for result in results.values()
-    ) == 12
+    ) == 24
     assert prepared.results[7][paths[4]].status == "ready"
     assert prepared.results[8][paths[-1]].status == "budget_exhausted"
     assert prepared.results[8][paths[-1]].source_kind == "not_read"
     assert prepared.results[8][paths[-1]].images == ()
     assert paths[-1] not in resolved_paths
     assert all(step != 8 for batch in _image_review_batches(prepared) for step, _, _ in batch)
+
+
+def test_seventeen_images_across_three_steps_fit_the_run_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for step, count in ((2, 7), (3, 6), (4, 4)):
+        for number in range(1, count + 1):
+            write_image(tmp_path / f"Step{step}_{number}.png")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    content = {
+        "steps": [
+            {
+                "review_step": step,
+                "order": str(step),
+                "evidence_profile": {
+                    "actual_paths": [{"raw": str(tmp_path), "kind": "folder_or_unknown"}],
+                    "routing": {"actions": ["validate_path", "load_images"]},
+                },
+            }
+            for step in (2, 3, 4)
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=str(tmp_path), external_evidence_review_enabled=True
+        ),
+    )
+
+    assert [
+        (step, result.status, len(result.images))
+        for step, evidence in prepared.results.items()
+        for result in evidence.values()
+    ] == [(2, "ready", 7), (3, "ready", 6), (4, "ready", 4)]
+    assert [len(batch) for batch in _image_review_batches(prepared)] == [4, 3, 4, 2, 4]
+
+
+def test_twenty_four_images_across_five_steps_fit_the_run_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    counts = ((3, 4), (4, 2), (5, 2), (6, 8), (7, 8))
+    for step, count in counts:
+        for number in range(1, count + 1):
+            write_image(tmp_path / f"Step{step}-{number}.png")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    content = {
+        "steps": [
+            {
+                "review_step": step,
+                "order": str(step),
+                "evidence_profile": {
+                    "actual_paths": [{"raw": str(tmp_path), "kind": "folder_or_unknown"}],
+                    "routing": {"actions": ["validate_path", "load_images"]},
+                },
+            }
+            for step, _ in counts
+        ]
+    }
+
+    prepared = _prepare_image_evidence(
+        content,
+        EvidenceConfig(
+            allowed_network_root=str(tmp_path), external_evidence_review_enabled=True
+        ),
+    )
+
+    assert [
+        (step, result.status, len(result.images))
+        for step, evidence in prepared.results.items()
+        for result in evidence.values()
+    ] == [(step, "ready", count) for step, count in counts]
+    assert [len(batch) for batch in _image_review_batches(prepared)] == [
+        4, 2, 2, 4, 4, 4, 4
+    ]
 
 
 def test_step_image_limit_records_skipped_path_and_attachment(monkeypatch) -> None:
@@ -341,7 +427,7 @@ def test_step_image_limit_records_skipped_path_and_attachment(monkeypatch) -> No
                         "sha256": image.sha256,
                         "data_url": image.data_url,
                     }
-                    for index in range(1, 6)
+                    for index in range(1, 12)
                 ],
                 "evidence_profile": {
                     "actual_paths": [{"raw": first, "kind": "folder_or_unknown"}],
@@ -370,8 +456,8 @@ def test_step_image_limit_records_skipped_path_and_attachment(monkeypatch) -> No
         ),
     )
 
-    assert prepared.results[1]["ALM attachment:5"].status == "budget_exhausted"
-    assert prepared.results[1]["ALM attachment:5"].source_kind == "alm_attachment"
+    assert prepared.results[1]["ALM attachment:11"].status == "budget_exhausted"
+    assert prepared.results[1]["ALM attachment:11"].source_kind == "alm_attachment"
     assert prepared.results[1][first].status == "budget_exhausted"
     assert prepared.results[2][first].status == "ready"
     assert prepared.results[2][second].status == "budget_exhausted"
@@ -422,6 +508,66 @@ def test_shared_directory_images_are_matched_to_their_review_step(
         image.relative_name
         for image in prepared.results[2][str(tagged)].images
     ] == ["Step2-1.png", "Step2-2.png"]
+
+
+def test_number_and_ordinal_prefixes_match_only_their_step(tmp_path: Path) -> None:
+    for name in (
+        "1-about.PNG",
+        "3.PNG",
+        "third-detail.PNG",
+        "11-CPU.PNG",
+        "11-Disk.PNG",
+        "Step5.PNG",
+    ):
+        write_image(tmp_path / name)
+
+    for step, expected in (
+        (1, ["1-about.PNG"]),
+        (3, ["3.PNG", "third-detail.PNG"]),
+        (5, ["Step5.PNG"]),
+        (11, ["11-CPU.PNG", "11-Disk.PNG"]),
+    ):
+        result = NetworkImageResolver(
+            matching_step_numbers={step}, require_step_marker=True
+        ).collect(tmp_path)
+        assert result.status == "ready"
+        assert [image.relative_name for image in result.images] == expected
+
+
+def test_ten_matching_images_are_reviewed_in_bounded_batches(tmp_path: Path, monkeypatch) -> None:
+    for number in range(1, 11):
+        write_image(tmp_path / f"Step1-{number:02}.png")
+    monkeypatch.setattr(
+        image_evidence,
+        "validate_network_evidence_path",
+        lambda value, allowed_root: "allowed",
+    )
+    content = {
+        "steps": [
+            {
+                "review_step": 1,
+                "order": "1",
+                "evidence_profile": {
+                    "actual_paths": [{"raw": str(tmp_path), "kind": "folder_or_unknown"}],
+                    "routing": {"actions": ["validate_path", "load_images"]},
+                },
+            }
+        ]
+    }
+    config = EvidenceConfig(
+        allowed_network_root=str(tmp_path), external_evidence_review_enabled=True
+    )
+
+    prepared = _prepare_image_evidence(content, config)
+
+    assert prepared.results[1][str(tmp_path)].status == "ready"
+    assert len(prepared.results[1][str(tmp_path)].images) == 10
+    assert [len(batch) for batch in _image_review_batches(prepared)] == [4, 4, 2]
+
+    write_image(tmp_path / "Step1-11.png")
+    limited = _prepare_image_evidence(content, config)
+    assert limited.results[1][str(tmp_path)].status == "budget_exhausted"
+    assert _image_review_batches(limited) == []
 
 
 def test_step_letter_suffix_images_match_the_base_step(tmp_path: Path) -> None:

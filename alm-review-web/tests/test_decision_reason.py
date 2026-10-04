@@ -80,7 +80,7 @@ def test_identical_findings_share_one_row_and_warnings_follow_blocking_items() -
     assert rows[0].label == "测试位置"
     assert rows[1].step_label == "步骤 1, 3"
     assert rows[1].label == "设备追溯"
-    assert "设备编号" in rows[1].evidence_hint
+    assert "Bay 编号" in rows[1].explanation_hint
 
 
 def test_warnings_are_required_when_they_are_the_only_findings() -> None:
@@ -127,7 +127,7 @@ def test_failed_review_and_unstructured_results_still_get_one_row() -> None:
 def test_generic_explanations_are_rejected(explanation: str) -> None:
     row = DecisionRow("fail", "screenshot", IMAGE_SUMMARY, (2,))
 
-    problems = answer_problems(row, DecisionAnswer("ai_unable", explanation, "Step2.mp4"))
+    problems = answer_problems(row, DecisionAnswer(explanation))
 
     assert any("过于笼统" in problem for problem in problems)
 
@@ -145,26 +145,22 @@ def test_generic_explanations_are_rejected(explanation: str) -> None:
 def test_specific_explanations_are_accepted(explanation: str) -> None:
     row = DecisionRow("fail", "screenshot", IMAGE_SUMMARY, (2,))
 
-    assert answer_problems(row, DecisionAnswer("ai_unable", explanation, "Step2.mp4")) == []
+    assert answer_problems(row, DecisionAnswer(explanation)) == []
 
 
-def test_category_evidence_and_copied_ai_summary_are_checked() -> None:
+def test_copied_ai_summary_is_checked_without_extra_fields() -> None:
     row = DecisionRow("manual", "equipment", EQUIPMENT_SUMMARY, (1,))
 
-    problems = answer_problems(row, DecisionAnswer("", EQUIPMENT_SUMMARY, "没问题"))
+    problems = answer_problems(row, DecisionAnswer(EQUIPMENT_SUMMARY))
 
-    assert problems == [
-        "请选择判定类别。",
-        "“AI 哪里错了 / 为什么不影响”不能直接复制 AI 结论。",
-        "“人工核对的证据”过于笼统，请写明核对的文件名、路径、设备编号或原文。",
-    ]
+    assert problems == ["“AI 哪里错了 / 为什么不影响”不能直接复制 AI 结论。"]
 
 
 def test_optional_rows_may_stay_blank_but_not_half_filled() -> None:
     row = DecisionRow("warning", "minor_language", WARNING_SUMMARY, (2,), required=False)
 
     assert answer_problems(row, DecisionAnswer()) == []
-    assert answer_problems(row, DecisionAnswer("accepted", "", "")) != []
+    assert answer_problems(row, DecisionAnswer("没问题")) != []
 
 
 def test_reason_and_items_list_only_answered_rows() -> None:
@@ -173,19 +169,20 @@ def test_reason_and_items_list_only_answered_rows() -> None:
         DecisionRow("warning", "minor_language", WARNING_SUMMARY, (2,), required=False),
     ]
     answers = [
-        DecisionAnswer("ai_error", "CHESS-CAST-20006 是 Bay 编号，不是设备", "Step1 Actual 中的 Location"),
+        DecisionAnswer("CHESS-CAST-20006 是 Bay 编号，不是设备"),
         DecisionAnswer(),
     ]
 
     assert validate_answers(rows, answers) == {}
     assert compose_reason(rows, answers) == (
-        "[步骤 1, 3 · 设备追溯] AI 判断错误：CHESS-CAST-20006 是 Bay 编号，不是设备；"
-        "证据：Step1 Actual 中的 Location"
+        "[步骤 1, 3 · 设备追溯] CHESS-CAST-20006 是 Bay 编号，不是设备"
     )
     items = json.loads(decision_items_json(rows, answers))
-    assert [(item["category"], item["steps"], item["ai_summary"]) for item in items] == [
-        ("ai_error", [1, 3], EQUIPMENT_SUMMARY)
+    assert [(item["steps"], item["ai_summary"]) for item in items] == [
+        ([1, 3], EQUIPMENT_SUMMARY)
     ]
+    assert items[0]["explanation"] == "CHESS-CAST-20006 是 Bay 编号，不是设备"
+    assert "evidence" not in items[0]
 
 
 @pytest.fixture
@@ -249,10 +246,14 @@ def test_run_detail_lists_each_finding_for_the_operator(client_and_engine) -> No
     response = client.get("/runs/42")
 
     assert response.status_code == 200
-    assert response.text.count('name="category"') == 3
+    assert response.text.count('name="explanation"') == 3
+    assert 'name="category"' not in response.text
+    assert 'name="evidence"' not in response.text
     assert f"AI 结论：{EQUIPMENT_SUMMARY}" in response.text
     assert "步骤 1, 3" in response.text
     assert "选填" in response.text
+    assert 'data-manual-decision-confirm' in response.text
+    assert '<dialog class="sync-confirm-dialog" data-manual-decision-feedback' not in response.text
 
 
 def test_generic_answers_are_sent_back_with_the_draft(client_and_engine) -> None:
@@ -264,15 +265,15 @@ def test_generic_answers_are_sent_back_with_the_draft(client_and_engine) -> None
         data={
             "decision": "override_qualified",
             "review_result_id": str(result_id),
-            "category": ["ai_error", "ai_unable", ""],
             "explanation": ["合格", "证据为 MP4 视频", ""],
-            "evidence": ["没问题", "Step2.mp4", ""],
         },
     )
 
     assert response.status_code == 422
     assert "过于笼统" in response.text
     assert "证据为 MP4 视频" in response.text
+    assert 'data-manual-decision-feedback' in response.text
+    assert '裁决未记录' in response.text
     with Session(engine) as db:
         assert db.scalar(select(ManualDecision)) is None
 
@@ -286,28 +287,57 @@ def test_structured_answers_are_saved_with_items(client_and_engine) -> None:
         data={
             "decision": "override_qualified",
             "review_result_id": str(result_id),
-            "category": ["reference_data", "ai_unable", ""],
             "explanation": ["CHESS-CAST-20006 是 Bay 编号，不是设备", "证据为 MP4 视频", ""],
-            "evidence": ["Step1 Actual 中的 Location", "Step2.mp4", ""],
         },
     )
 
     assert response.status_code == 303
+    assert "decision_feedback=1" in response.headers["location"]
     with Session(engine) as db:
         manual = db.scalar(select(ManualDecision))
         assert manual is not None
         assert manual.reason.splitlines() == [
-            "[步骤 1, 3 · 设备追溯] 参考数据问题：CHESS-CAST-20006 是 Bay 编号，不是设备；"
-            "证据：Step1 Actual 中的 Location",
-            "[步骤 2 · 截图证据] AI 无法检查：证据为 MP4 视频；证据：Step2.mp4",
+            "[步骤 1, 3 · 设备追溯] CHESS-CAST-20006 是 Bay 编号，不是设备",
+            "[步骤 2 · 截图证据] 证据为 MP4 视频",
         ]
         assert [item["type"] for item in json.loads(manual.items_json)] == [
             "equipment",
             "screenshot",
         ]
 
+    detail = client.get(response.headers["location"])
+    assert 'data-manual-decision-feedback' in detail.text
+    assert '裁决已记录' in detail.text
+    assert "人工裁决已记录。" in detail.text
+    assert "CHESS-CAST-20006 是 Bay 编号，不是设备" in detail.text
+    assert "人工核对的证据" not in detail.text
+    assert "AI 原始结论（非最终裁决）：不合格" in detail.text
+
+
+def test_existing_structured_decision_still_displays_legacy_fields(client_and_engine) -> None:
+    client, engine = client_and_engine
+    result_id = _prepare_run(engine)
+    response = client.post(
+        "/runs/42/manual-decision",
+        data={
+            "decision": "override_qualified",
+            "review_result_id": str(result_id),
+            "explanation": ["CHESS-CAST-20006 是 Bay 编号", "证据为 MP4 视频", ""],
+        },
+    )
+    assert response.status_code == 303
+    with Session(engine) as db:
+        manual = db.scalar(select(ManualDecision))
+        assert manual is not None
+        items = json.loads(manual.items_json)
+        items[0]["category_label"] = "参考数据问题"
+        items[0]["evidence"] = "Step1 Actual 中的 Location"
+        manual.items_json = json.dumps(items, ensure_ascii=False)
+        db.commit()
+
     detail = client.get("/runs/42")
-    assert "证据：Step2.mp4" in detail.text
+    assert "参考数据问题" in detail.text
+    assert "证据：Step1 Actual 中的 Location" in detail.text
 
 
 def test_stale_review_result_requires_refilling(client_and_engine) -> None:
@@ -319,14 +349,17 @@ def test_stale_review_result_requires_refilling(client_and_engine) -> None:
         data={
             "decision": "override_qualified",
             "review_result_id": str(result_id + 1),
-            "category": ["ai_error", "ai_unable", ""],
             "explanation": ["CHESS-CAST-20006 是 Bay 编号", "证据为 MP4 视频", ""],
-            "evidence": ["Step1 Location", "Step2.mp4", ""],
         },
     )
 
     assert response.status_code == 303
+    assert "decision_feedback=1" in response.headers["location"]
     assert "message_kind=error" in response.headers["location"]
+    detail = client.get(response.headers["location"])
+    assert 'data-manual-decision-feedback' in detail.text
+    assert '裁决未记录' in detail.text
+    assert "AI 评审结果已更新" in detail.text
     with Session(engine) as db:
         assert db.scalar(select(ManualDecision)) is None
 
@@ -341,8 +374,28 @@ def test_confirmed_unqualified_keeps_free_text_reason(client_and_engine) -> None
     )
 
     assert response.status_code == 303
+    assert "decision_feedback=1" in response.headers["location"]
     with Session(engine) as db:
         manual = db.scalar(select(ManualDecision))
         assert manual is not None
         assert manual.reason == "Evidence missing"
         assert manual.items_json is None
+
+    detail = client.get(response.headers["location"])
+    assert '裁决已记录' in detail.text
+
+
+def test_missing_reason_gets_failure_dialog(client_and_engine) -> None:
+    client, engine = client_and_engine
+    _prepare_run(engine, verdict="needs_manual_review")
+
+    response = client.post(
+        "/runs/42/manual-decision", data={"decision": "confirmed_unqualified"}
+    )
+
+    assert response.status_code == 303
+    detail = client.get(response.headers["location"])
+    assert '裁决未记录' in detail.text
+    assert 'A reason is required.' in detail.text
+    with Session(engine) as db:
+        assert db.scalar(select(ManualDecision)) is None

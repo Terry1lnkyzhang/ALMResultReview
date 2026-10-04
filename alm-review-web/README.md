@@ -48,6 +48,50 @@ Both machines must use the same `DATABASE_URL`. Keep `ALM_USERNAME`, `ALM_PASSWO
 `AI_API_KEY` only on the laptop Worker. The Web server creates database jobs and displays
 committed results; it does not connect to ALM, call AI, or read evidence paths.
 
+### Optional Qwen Code shadow review
+
+The Workspace's **Review mode** in `/ops/configuration` offers `Standard` (the
+default) and `Standard + Agent comparison`. Both run the original seven-stage
+review and produce the same authoritative verdict. Comparison additionally
+asks Qwen Code to inspect the first manual Step of a Run (at most 50 Steps),
+using a Run-scoped checklist derived from the original review. It records a
+separate, non-authoritative opinion under "Qwen Code 旁路意见" on the Run detail
+page. The original result is retained when the CLI is missing, times out, or
+returns incomplete or unverifiable findings.
+
+Deploy this schema change before using the new Configuration field: stop old
+Web and Worker processes, start one upgraded Web to apply the compatible
+`workspaces.review_mode` migration (all existing rows default to `standard`),
+then start the single upgraded Worker. Do not apply the migration to shared
+MySQL while old application processes are still running. Installing this code
+or the CLI alone does not switch any existing Workspace into comparison mode.
+
+On the **Worker** (not the Web server), install the official Qwen Code CLI using
+the organization's approved npm registry, then verify `qwen --version` from
+the same account that runs the Worker. Choose the comparison mode in the
+Workspace's Configuration page only after confirming the Worker can find `qwen`:
+
+```powershell
+npm install -g @qwen-code/qwen-code
+qwen --version
+```
+
+The Worker reads the mode from the shared database for each review job (no
+global `QWEN_CODE_SHADOW_ENABLED` setting is used). It uses the existing AI model, completion URL and
+key (AI configuration first, then `AI_API_KEY`); the provider must support Qwen
+Code's tool calls and structured output. Each invocation starts a private stdio
+MCP server over the already-resolved Run snapshot. Only eight dedicated read-only
+review tools are exposed; shell, generic file reads, arbitrary network and SQL
+are not available to the model. HTML tools expose bounded parsed blocks, image
+tools expose up to four validated images/4 MiB per target Step through MCP media
+blocks, and equipment tools expose the original review's prepared matches.
+Incomplete image sets and truncated reports cannot justify a confident conclusion. Missing
+tool calls, checklist items, or non-verbatim citations are rejected. Qwen Code
+runs in headless plan mode with tool/turn/time limits and a scrubbed environment.
+On Windows this is **not an OS-level sandbox**: use a restricted Worker account
+and do not treat MCP permission rules as a substitute for OS access control.
+Original Word documents are not loaded in this pilot.
+
 On the remote Web server, run these commands from the `alm-review-web` directory in
 PowerShell:
 

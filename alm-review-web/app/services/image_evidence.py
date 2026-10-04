@@ -26,6 +26,20 @@ _STEP_IMAGE_PATTERN = re.compile(
     r"(?:^|[\\/_.\s-])step[\s_-]*0*(\d+)[a-z]?(?=$|[\\/_.\s-])",
     re.IGNORECASE,
 )
+_NUMBER_PREFIX_PATTERN = re.compile(r"^0*([1-9]\d*)(?=$|[_.\s-])")
+_ORDINAL_PREFIX_PATTERN = re.compile(r"^([a-z]+)(?=$|[_.\s-])", re.IGNORECASE)
+_ORDINAL_STEPS = {
+    name: number
+    for number, name in enumerate(
+        (
+            "first", "second", "third", "fourth", "fifth", "sixth", "seventh",
+            "eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth",
+            "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth",
+            "nineteenth", "twentieth",
+        ),
+        start=1,
+    )
+}
 IMAGE_TRANSPORT_MAX_BYTES = 4 * 1024 * 1024
 IMAGE_TRANSPORT_MAX_PIXELS = 12_000_000
 IMAGE_TRANSPORT_TARGET_BYTES = 3_500_000
@@ -242,7 +256,7 @@ class NetworkImageResolver:
         self,
         *,
         max_depth: int = 2,
-        max_images: int = 4,
+        max_images: int = 10,
         max_image_bytes: int = 5 * 1024 * 1024,
         max_total_bytes: int = 10 * 1024 * 1024,
         max_scanned_entries: int = 500,
@@ -345,6 +359,15 @@ class NetworkImageResolver:
             elif self.require_step_marker:
                 return ImageEvidenceResult(status="ambiguous_step_mapping")
 
+        if len(supported_candidates) > self.max_images:
+            return ImageEvidenceResult(
+                status="budget_exhausted",
+                detail=(
+                    f"{len(supported_candidates)} matching images exceed the "
+                    f"{self.max_images}-image review limit."
+                ),
+            )
+
         images: list[ResolvedImage] = []
         skipped_oversized = 0
         skipped_invalid = 0
@@ -352,8 +375,6 @@ class NetworkImageResolver:
         total_bytes = 0
         try:
             for path, relative_name in supported_candidates:
-                if len(images) >= self.max_images:
-                    break
                 remaining_bytes = min(
                     self.max_image_bytes,
                     self.max_total_bytes - total_bytes,
@@ -529,7 +550,17 @@ def _decoded_dimensions(content: bytes, media_type: str) -> tuple[int, int] | No
 
 
 def _image_step_numbers(relative_name: str) -> frozenset[int]:
-    return frozenset(
+    numbers = {
         int(match.group(1))
         for match in _STEP_IMAGE_PATTERN.finditer(relative_name)
-    )
+    }
+    filename = PureWindowsPath(relative_name).name
+    numbered = _NUMBER_PREFIX_PATTERN.match(filename)
+    if numbered:
+        numbers.add(int(numbered.group(1)))
+    ordinal = _ORDINAL_PREFIX_PATTERN.match(filename)
+    if ordinal:
+        step_number = _ORDINAL_STEPS.get(ordinal.group(1).casefold())
+        if step_number is not None:
+            numbers.add(step_number)
+    return frozenset(numbers)

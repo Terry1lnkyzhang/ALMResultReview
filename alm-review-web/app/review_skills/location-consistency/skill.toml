@@ -1,7 +1,7 @@
 [skill]
 id = "location-consistency"
 name = "Test Location Consistency Review"
-version = "1.0.0"
+version = "1.0.1"
 stage = "location_review"
 enabled = true
 
@@ -17,7 +17,7 @@ optional = []
 forbidden = ["database.read", "filesystem.read", "network.fetch", "location.configuration.write"]
 
 [model]
-enable_thinking = true
+enable_thinking = false
 # Thinking tokens count against max_tokens.
 max_tokens = 8192
 max_tokens_per_item = 0

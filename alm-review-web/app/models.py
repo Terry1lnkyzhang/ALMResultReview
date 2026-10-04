@@ -435,6 +435,9 @@ class Workspace(Base):
     equipment_area_filter: Mapped[str] = mapped_column(
         String(255), default="", nullable=False
     )
+    review_mode: Mapped[str] = mapped_column(
+        String(32), default="standard", nullable=False
+    )
     legacy_policy_adopted: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )

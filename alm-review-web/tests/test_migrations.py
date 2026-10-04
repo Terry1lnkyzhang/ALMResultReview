@@ -75,6 +75,7 @@ def test_workspace_queue_controls_are_added_to_existing_schema() -> None:
 
     columns = {column["name"] for column in inspect(engine).get_columns("workspaces")}
     assert {
+        "review_mode",
         "review_queue_paused",
         "sync_queue_paused",
         "queue_priority",
@@ -83,11 +84,11 @@ def test_workspace_queue_controls_are_added_to_existing_schema() -> None:
     with engine.connect() as connection:
         row = connection.execute(
             text(
-                "SELECT review_queue_paused, sync_queue_paused, queue_priority "
+                "SELECT review_mode, review_queue_paused, sync_queue_paused, queue_priority "
                 "FROM workspaces WHERE id = 1"
             )
         ).one()
-    assert tuple(row) == (0, 0, 0)
+    assert tuple(row) == ("standard", 0, 0, 0)
 
 
 def test_test_location_history_tables_are_created() -> None:
