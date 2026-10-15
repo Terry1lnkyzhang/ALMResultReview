@@ -23,7 +23,9 @@ def test_dashboard_uses_workspace_review_progress_and_latest_alm_action() -> Non
     source, _, _ = templates.env.loader.get_source(templates.env, template.name)
 
     assert "Review new &amp; changed Runs" in source
-    assert "Re-run review" in source
+    assert "Re-run review" not in source
+    assert 'action="/actions/rereview"' not in source
+    assert "Review these Runs" in source
     assert "AI REVIEW" in source
     assert "data-queue-status" in source
     assert "queue-strip" not in source

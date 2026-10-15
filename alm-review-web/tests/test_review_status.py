@@ -677,6 +677,33 @@ def test_not_qualified_filter_also_includes_qualified_runs_with_warnings(
     assert _matches_status(item, "not_qualified")
 
 
+@pytest.mark.parametrize(
+    ("final_status", "has_warning", "expected"),
+    [
+        ("unqualified", False, True),
+        ("needs_manual_review", False, True),
+        ("needs_manual_review", True, True),
+        ("qualified", True, False),
+        ("qualified", False, False),
+        ("pending_review", False, False),
+        ("review_failed", False, False),
+    ],
+)
+def test_unqualified_manual_filter_leaves_out_qualified_runs_with_warnings(
+    final_status: str,
+    has_warning: bool,
+    expected: bool,
+) -> None:
+    item = {
+        "final_status": final_status,
+        "force_qualified": False,
+        "has_warning": has_warning,
+    }
+
+    assert _matches_status(item, "unqualified_manual") is expected
+    assert STATUS_LABELS["unqualified_manual"] == "不合格 + 需人工复核"
+
+
 def test_qualified_temporary_evidence_only_appears_in_its_own_lens() -> None:
     item = {
         "final_status": "qualified",

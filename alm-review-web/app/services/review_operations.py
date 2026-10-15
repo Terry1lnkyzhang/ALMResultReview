@@ -23,13 +23,6 @@ from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
 from app.services.run_status import REVIEWABLE_RUN_STATUSES
 from app.services.workspaces import resolve_workspace
 
-REREVIEW_SCOPES = {
-    "all": None,
-    "unqualified": {"unqualified"},
-    "manual": {"needs_manual_review"},
-    "unqualified_manual": {"unqualified", "needs_manual_review"},
-}
-
 
 @dataclass(frozen=True)
 class RereviewQueueResult:
@@ -250,44 +243,6 @@ def cancel_queued_reviews(
     result = db.execute(statement)
     db.commit()
     return result.rowcount or 0
-
-
-def queue_rereviews(
-    db: Session,
-    scope: str,
-    workspace_id: int | None = None,
-) -> RereviewQueueResult:
-    if scope not in REREVIEW_SCOPES:
-        raise ValueError(f"Unknown re-review scope {scope!r}.")
-    include_legacy = workspace_id is None
-    workspace = resolve_workspace(db, workspace_id)
-    policy_key = current_review_policy_key(db, workspace.id)
-    target_statuses = REREVIEW_SCOPES[scope]
-    runs = db.scalars(
-        select(AlmRun)
-        .where(
-            or_(
-                AlmRun.workspace_id == workspace.id,
-                include_legacy and AlmRun.workspace_id.is_(None),
-            ),
-            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
-            AlmRun.current_revision_id.is_not(None),
-        )
-        .order_by(AlmRun.run_id)
-    ).all()
-    matched_runs = []
-    manually_resolved = 0
-    for run in runs:
-        review = current_review(db, run, policy_key)
-        if target_statuses is not None and review.final_status not in target_statuses:
-            continue
-        if review.manual_decision is not None:
-            # An operator already ruled on this revision; a new AI verdict would
-            # replace the result the decision is attached to and silently drop it.
-            manually_resolved += 1
-            continue
-        matched_runs.append(run)
-    return _queue_rereview_batch(db, workspace.id, matched_runs, manually_resolved)
 
 
 def queue_recommended_review_updates(

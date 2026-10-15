@@ -17,7 +17,6 @@ from app.services.review_operations import (
     delete_local_run,
     latest_rereview_progress,
     queue_recommended_review_updates,
-    queue_rereviews,
     queue_rereviews_for_run_ids,
     queue_run_review,
     workspace_review_progress,
@@ -125,7 +124,7 @@ def test_queue_run_review_does_not_reuse_a_failed_job_with_a_saved_result() -> N
         assert db.scalar(select(ReviewResult.job_id).where(ReviewResult.run_id == 42)) == old_job.id
 
 
-def test_queue_rereviews_filters_final_status_and_preserves_history() -> None:
+def test_rereview_batches_selected_runs_and_preserves_history() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -133,7 +132,7 @@ def test_queue_rereviews_filters_final_status_and_preserves_history() -> None:
         add_reviewed_run(db, 2, "unqualified")
         add_reviewed_run(db, 3, "needs_manual_review")
 
-        result = queue_rereviews(db, "unqualified_manual")
+        result = queue_rereviews_for_run_ids(db, [2, 3])
         queued = db.scalars(
             select(ReviewJob)
             .where(ReviewJob.status == "queued")
@@ -151,7 +150,7 @@ def test_queue_rereviews_filters_final_status_and_preserves_history() -> None:
         assert len(db.scalars(select(ReviewResult)).all()) == 3
 
 
-def test_queue_rereviews_skips_run_with_active_job() -> None:
+def test_rereview_skips_run_with_active_job() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -165,24 +164,24 @@ def test_queue_rereviews_skips_run_with_active_job() -> None:
         )
         db.commit()
 
-        result = queue_rereviews(db, "unqualified")
+        result = queue_rereviews_for_run_ids(db, [2])
 
         assert (result.matched, result.queued, result.already_active) == (1, 0, 1)
 
 
-def test_queue_all_rereviews_every_passed_and_failed_run() -> None:
+def test_rereview_covers_passed_and_failed_runs() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         add_reviewed_run(db, 1, "qualified")
         add_reviewed_run(db, 2, "unqualified", run_status="Failed")
 
-        result = queue_rereviews(db, "all")
+        result = queue_rereviews_for_run_ids(db, [1, 2])
 
         assert (result.matched, result.queued) == (2, 2)
 
 
-def test_queue_rereviews_never_touches_a_manually_resolved_run() -> None:
+def test_rereview_never_touches_a_manually_resolved_run() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -190,7 +189,7 @@ def test_queue_rereviews_never_touches_a_manually_resolved_run() -> None:
         add_reviewed_run(db, 2, "unqualified")
         save_manual_decision(db, forced, "override_qualified", "tester", "Known tool defect")
 
-        result = queue_rereviews(db, "all")
+        result = queue_rereviews_for_run_ids(db, [1, 2])
         queued = db.scalars(select(ReviewJob).where(ReviewJob.status == "queued")).all()
 
         assert (result.matched, result.queued, result.manually_resolved) == (1, 1, 1)
@@ -266,7 +265,7 @@ def test_latest_rereview_progress_counts_terminal_jobs() -> None:
     with Session(engine) as db:
         add_reviewed_run(db, 1, "qualified")
         add_reviewed_run(db, 2, "unqualified")
-        result = queue_rereviews(db, "all")
+        result = queue_rereviews_for_run_ids(db, [1, 2])
         jobs = db.scalars(
             select(ReviewJob)
             .where(ReviewJob.batch_id == result.batch_id)

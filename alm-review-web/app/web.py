@@ -66,12 +66,10 @@ from app.services.non_site_locations import (
     update_non_site_location,
 )
 from app.services.review_operations import (
-    REREVIEW_SCOPES,
     active_run_review_job,
     cancel_queued_reviews,
     delete_local_run,
     queue_failed_reviews,
-    queue_rereviews,
     queue_rereviews_for_run_ids,
     queue_run_review,
     workspace_review_progress,
@@ -249,6 +247,7 @@ templates.env.filters["alm_rich_text"] = render_alm_rich_text
 
 STATUS_LABELS = {
     "not_qualified": "不合格 + 警告 + 需人工复核",
+    "unqualified_manual": "不合格 + 需人工复核",
     "qualified": "合格",
     "force_qualified": "人工确认合格",
     "unqualified": "不合格",
@@ -335,6 +334,8 @@ def _matches_status(item: dict, status: str) -> bool:
             item["final_status"] in {"unqualified", "needs_manual_review"}
             or item["has_warning"]
         )
+    if status == "unqualified_manual":
+        return item["final_status"] in {"unqualified", "needs_manual_review"}
     if status == "force_qualified":
         return item["force_qualified"]
     if status == "warning":
@@ -2223,34 +2224,6 @@ def retry_failed_reviews(
         redirect_path,
         f"Failed Review retry queued: {queued} Runs. Previous failures were retained.",
     )
-
-
-@router.post("/actions/rereview")
-def rereview_runs(
-    scope: str = Form(...),
-    db: Session = Depends(get_db),
-    workspace_id: int | None = Form(None),
-):
-    workspace = resolve_workspace(db, workspace_id)
-    redirect_path = f"/?workspace={workspace.id}"
-    if not _has_enabled_ai_endpoint(db):
-        return _redirect(
-            redirect_path,
-            "AI review is disabled. Configure the model before re-reviewing.",
-            "error",
-        )
-    if scope not in REREVIEW_SCOPES:
-        return _redirect(redirect_path, "Invalid re-review scope.", "error")
-    result = queue_rereviews(db, scope, workspace.id)
-    message = (
-        f"Re-review queued: {result.queued} of {result.matched} matching Runs. "
-        f"{result.already_active} already active, "
-        f"{result.manually_resolved} skipped as manually resolved. "
-        "Previous results were retained."
-    )
-    if result.queued and workspace.review_queue_paused:
-        message += " The Review queue is paused, so these jobs wait until you resume it."
-    return _redirect(redirect_path, message)
 
 
 @router.post("/actions/rereview-filtered")

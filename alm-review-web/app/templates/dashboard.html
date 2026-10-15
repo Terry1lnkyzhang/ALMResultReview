@@ -210,19 +210,9 @@
   {% if current_workspace.review_queue_paused %}<p class="queue-note">Review queue is paused. {{ review_job_counts.get('queued', 0) }} queued job(s) stay in the queue and start when you resume it.{% if review_job_counts.get('running', 0) %} The running job will finish safely.{% endif %}</p>{% endif %}
   <div class="queue-actions" role="group" aria-label="Queue review work">
     <form method="post" action="/actions/process-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button primary" type="submit">Review new &amp; changed Runs</button></form>
-    <form class="rereview-action" method="post" action="/actions/rereview">
-      <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
-      <label><span>Re-run review on</span><select name="scope" aria-label="Re-run review scope">
-        <option value="unqualified_manual">Unqualified + Manual</option>
-        <option value="unqualified">Unqualified only</option>
-        <option value="manual">Manual only</option>
-        <option value="all">All Passed/Failed Runs</option>
-      </select></label>
-      <button class="button secondary" type="submit">Re-run review</button>
-    </form>
     {% if review_progress.review_failed %}<form method="post" action="/actions/retry-failed-reviews"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Retry {{ review_progress.review_failed }} failed Runs</button></form>{% endif %}
   </div>
-  <p class="queue-hint">New &amp; changed covers the latest completed ALM sync and skips Runs that already have a result. Re-run review repeats review on Runs that already have a result.</p>
+  <p class="queue-hint">New &amp; changed covers the latest completed ALM sync and skips Runs that already have a result. To review Runs that already have a result again, filter the Runs list below and use Review these Runs.</p>
   <div class="queue-actions" role="group" aria-label="Queue control">
     <form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="{{ 'resume-review' if current_workspace.review_queue_paused else 'pause-review' }}"><button class="button secondary" type="submit">{{ 'Resume Review queue' if current_workspace.review_queue_paused else 'Pause Review queue' }}</button></form>
     <form method="post" action="/actions/workspace-queue"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="action" value="{{ 'resume-sync' if current_workspace.sync_queue_paused else 'pause-sync' }}"><button class="button secondary" type="submit">{{ 'Resume Sync queue' if current_workspace.sync_queue_paused else 'Pause Sync queue' }}</button></form>
