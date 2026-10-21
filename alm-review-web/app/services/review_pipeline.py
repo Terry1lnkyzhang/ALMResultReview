@@ -80,6 +80,7 @@ def build_pipeline_trace(
         "version": 1,
         "external_evidence_review_enabled": gates["external_evidence_review_enabled"],
         "equipment_review_enabled": gates["equipment_review_enabled"],
+        "location_review_enabled": gates["location_review_enabled"],
         "plan": plan,
         "stages": ordered,
         "total_ai_calls": sum(stage["ai_calls"] for stage in ordered.values()),

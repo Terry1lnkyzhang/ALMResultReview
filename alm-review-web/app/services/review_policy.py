@@ -103,7 +103,9 @@ def current_review_policy_key(
         }
         for item in equipment_registry
     ]
-    authoritative_skill_ids = ["alm-text-review", "location-consistency"]
+    authoritative_skill_ids = ["alm-text-review"]
+    if workspace.location_review_enabled:
+        authoritative_skill_ids.append("location-consistency")
     if (
         evidence_config
         and evidence_config.external_evidence_review_enabled
@@ -150,8 +152,17 @@ def current_review_policy_key(
             db,
             release_project_name,
         ),
-        "test_location_snapshot": location_config_policy_snapshot(db),
-        "non_site_location_snapshot": non_site_location_policy_snapshot(db),
+        "test_location_snapshot": (
+            location_config_policy_snapshot(db)
+            if workspace.location_review_enabled
+            else None
+        ),
+        "non_site_location_snapshot": (
+            non_site_location_policy_snapshot(db)
+            if workspace.location_review_enabled
+            else None
+        ),
+        "location_review_enabled": workspace.location_review_enabled,
         "external_evidence_review_enabled": bool(
             evidence_config and evidence_config.external_evidence_review_enabled
         ),

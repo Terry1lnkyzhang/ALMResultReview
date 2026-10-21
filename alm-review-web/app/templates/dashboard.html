@@ -26,6 +26,14 @@
           <input type="file" name="document" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required onchange="this.form.submit()">
         </label>
       </form>
+      <form class="docx-import-action" method="post" action="/actions/import-docx-folder" enctype="multipart/form-data">
+        <input type="hidden" name="workspace_id" value="{{ current_workspace.id }}">
+        <input type="hidden" name="relative_paths">
+        <label class="button secondary" title="Import every ALM Word export (.docx) in a folder and queue AI review for Runs not yet reviewed">
+          Review Word folder
+          <input type="file" name="documents" webkitdirectory multiple required onchange="this.form.relative_paths.value = JSON.stringify(Array.from(this.files, (file) => file.webkitRelativePath || file.name)); this.form.submit()">
+        </label>
+      </form>
       <form method="post" action="/actions/sync-alm" data-confirm-workspace-sync="incremental"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><button class="button secondary" type="submit">Sync from ALM</button></form>
       <form method="post" action="/actions/sync-alm" data-confirm-workspace-sync="full"><input type="hidden" name="workspace_id" value="{{ current_workspace.id }}"><input type="hidden" name="full_refresh" value="true"><button class="button secondary" type="submit">Full resync</button></form>
     </div>
@@ -359,7 +367,21 @@
       </select></label>
       <button class="button secondary" type="submit">Apply</button>
       <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export CSV</a>
+      <a class="button secondary" href="/exports/test-case-results.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export Test Case results</a>
     </form>
+    {% if document_counts %}
+    <div class="table-heading" id="documents-list"><h2>Documents</h2><span>{{ document_counts|length }} documents &middot; click one to filter its Runs</span></div>
+    <div class="table-scroll document-summary">
+      <table>
+        <thead><tr><th>Document</th><th>Runs</th>{% for status in ('qualified', 'unqualified', 'needs_manual_review', 'pending_review', 'review_failed') %}<th>{{ status_labels[status] }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for document, counts in document_counts %}
+          <tr{% if query == document %} class="selected"{% endif %}><td><a href="/?workspace={{ current_workspace.id }}&amp;query={{ document|urlencode }}#runs-list">{{ document }}</a></td><td>{{ counts['runs'] }}</td>{% for status in ('qualified', 'unqualified', 'needs_manual_review', 'pending_review', 'review_failed') %}<td>{{ counts[status] }}</td>{% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
     <div class="table-heading" id="runs-list">
       <h2>Runs</h2>
       <div class="table-heading-actions">
@@ -391,7 +413,7 @@
         {% for item in runs %}
           <tr>
             <td><a class="run-link" href="/runs/{{ item.run.run_id }}">#{{ item.run.alm_run_id or item.run.run_id }}</a><small>{{ item.run.test_set_name }}</small></td>
-            <td><strong>{{ item.run.test_name }}</strong><small>TC {{ item.run.test_id or '-' }} &middot; {{ item.run.folder_path }}</small></td>
+            <td><strong>{{ item.run.test_name }}</strong><small>TC {{ item.run.test_id or '-' }} &middot; {% if item.run.source_document %}<a href="/?workspace={{ current_workspace.id }}&amp;query={{ item.run.source_document|urlencode }}#runs-list">{{ item.run.source_document }}</a>{% else %}{{ item.run.folder_path }}{% endif %}</small></td>
             <td>{{ item.run.execution_location or '-' }}</td>
             <td>{{ item.actual_tester_label }}</td>
             <td>{{ item.test_owner_label }}</td>

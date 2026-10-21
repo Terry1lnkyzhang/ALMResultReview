@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -263,6 +263,7 @@ def import_batch(
     data: dict[str, Any],
     workspace_id: int,
     result: ImportResult,
+    source_documents: Mapping[int, str] | None = None,
 ) -> ImportResult:
     for item in data.get("users") or []:
         code1_id = normalize_text(item.get("code1_id"))
@@ -337,6 +338,8 @@ def import_batch(
             folder.get("path") or test_set.get("folderPath")
         )
         run_row.execution_location = normalize_text(run.get("location"))
+        if source_documents and run_id in source_documents:
+            run_row.source_document = source_documents[run_id]
         run_row.run_status = normalize_reviewable_run_status(run.get("status"))
         run_row.test_owner = normalize_text(record.get("testOwner"))
         run_row.assigned_tester = normalize_text(test_instance.get("owner"))
@@ -370,6 +373,7 @@ def import_data(
     source: str = "json",
     workspace_id: int | None = None,
     sync_config_id: int | None = None,
+    source_documents: Mapping[int, str] | None = None,
 ) -> ImportResult:
     workspace = resolve_workspace(db, workspace_id)
     result = ImportResult()
@@ -383,7 +387,7 @@ def import_data(
     db.flush()
 
     try:
-        import_batch(db, data, workspace.id, result)
+        import_batch(db, data, workspace.id, result, source_documents)
         history.status = "completed"
         history.discovered_runs = result.discovered_runs
         history.new_runs = result.new_runs

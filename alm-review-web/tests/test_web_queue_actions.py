@@ -1048,3 +1048,6 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
         assert secondary.api_key == "secondary-key"
         assert secondary.review_concurrency == 3
         assert secondary.enabled is True
+        assert workspace.location_review_enabled is False
+        assert save(2, location_review_enabled=True).status_code == 303
+        assert workspace.location_review_enabled is True

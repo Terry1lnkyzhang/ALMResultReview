@@ -14,7 +14,7 @@
 {% block content %}
 <a class="back-link" href="/?workspace={{ run.workspace_id }}">&larr; 返回仪表板</a>
 <section class="detail-heading">
-  <div><p class="eyebrow">运行 #{{ run.alm_run_id or run.run_id }} / 版本 {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p></div>
+  <div><p class="eyebrow">运行 #{{ run.alm_run_id or run.run_id }} / 版本 {{ revisions[0].revision_number if revisions else '-' }}</p><h1>{{ run.test_name }}</h1><p class="path">{{ run.folder_path }} / {{ run.test_set_name }}</p>{% if run.source_document %}<p class="path">文档：{{ run.source_document }}</p>{% endif %}</div>
   <div class="detail-status">
     <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
     {% if active_sync_job %}<span class="queue-tag">ALM 刷新：{{ queue_status_labels.get(active_sync_job.status, active_sync_job.status) }}</span>{% endif %}

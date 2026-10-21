@@ -43,6 +43,8 @@ class AlmRun(Base):
     test_set_name: Mapped[str] = mapped_column(String(512), default="")
     folder_path: Mapped[str] = mapped_column(String(1500), default="")
     execution_location: Mapped[str] = mapped_column(String(512), default="")
+    # Relative path of the Word document a Run was last imported from; empty for ALM sync.
+    source_document: Mapped[str] = mapped_column(String(512), default="")
     run_status: Mapped[str] = mapped_column(String(64), default="")
     test_owner: Mapped[str] = mapped_column(String(128), default="")
     assigned_tester: Mapped[str] = mapped_column(String(128), default="")
@@ -430,6 +432,9 @@ class Workspace(Base):
         String(255), default="", nullable=False, index=True
     )
     equipment_review_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    location_review_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
     equipment_area_filter: Mapped[str] = mapped_column(

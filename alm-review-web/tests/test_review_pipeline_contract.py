@@ -313,6 +313,7 @@ def run_pipeline(
     external_evidence: bool | None = None,
     location_assessment: dict[str, Any] | None = None,
     review_mode: str = "standard",
+    location_review: bool = True,
 ) -> tuple[dict[str, Any], list[str], str, dict[str, Any]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -320,6 +321,7 @@ def run_pipeline(
         configure_review(db)
         workspace = resolve_workspace(db)
         workspace.review_mode = review_mode
+        workspace.location_review_enabled = location_review
         db.commit()
         if external_evidence is not None:
             db.add(
@@ -387,6 +389,25 @@ def test_pipeline_stages_keep_their_declared_order(monkeypatch) -> None:
     assert called_skills == ["alm-text-review"]
 
 
+def test_disabled_location_review_skips_the_location_skill(monkeypatch) -> None:
+    def unexpected_load(*_args):
+        raise AssertionError("Location assessment must not load when disabled.")
+
+    monkeypatch.setattr("app.services.reviews.load_location_assessment", unexpected_load)
+    pipeline, called_skills, verdict, criteria = run_pipeline(
+        monkeypatch,
+        actual="The result was recorded in the test report.",
+        location_review=False,
+    )
+
+    assert called_skills == ["alm-text-review"]
+    assert pipeline["location_review_enabled"] is False
+    assert pipeline["stages"]["location_review"]["status"] == "disabled"
+    assert pipeline["stages"]["location_review"]["ai_calls"] == 0
+    assert criteria["location_consistency"]["status"] == "not_applicable"
+    assert verdict == "qualified"
+
+
 def test_agent_shadow_opt_in_does_not_change_pipeline_or_verdict(monkeypatch) -> None:
     baseline, baseline_calls, baseline_verdict, baseline_criteria = run_pipeline(
         monkeypatch, actual="The result was recorded in the test report."
@@ -440,6 +461,7 @@ def test_declaration_is_the_source_of_the_stage_order() -> None:
     assert set(STAGE_GATES.values()) == {
         "external_evidence_review_enabled",
         "equipment_review_enabled",
+        "location_review_enabled",
     }
 
 
@@ -447,6 +469,7 @@ def test_undeclared_or_missing_stages_are_rejected() -> None:
     gates = {
         "external_evidence_review_enabled": False,
         "equipment_review_enabled": False,
+        "location_review_enabled": False,
     }
     complete = {stage_id: {"ai_calls": 0} for stage_id in STAGE_ORDER}
 

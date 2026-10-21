@@ -285,6 +285,20 @@ the service to this computer, start it with `-BindAddress 127.0.0.1`.
 	Expected, and Actual text from the standard export layout. UNC paths in Actual text
 	continue through the existing evidence pipeline. Embedded Word images are not stored;
 	image review still reads approved paths configured under Network image evidence.
+- `Review Word folder` selects a local folder (including subfolders) and imports every ALM
+	Word export `.docx` in it, skipping other files and Word `~$` lock files. A document that
+	cannot be parsed is reported without blocking the others. AI review is queued for every
+	imported Passed/Failed Run whose current revision has no result yet. Reviews use the
+	Workspace's checks, so a dedicated document Workspace can turn off test location
+	consistency, Image/HTML evidence, equipment review, and the automation release project
+	in Configuration.
+- Each Word-imported Run remembers the relative path of the document it was last imported
+	from. The Dashboard lists these documents with their result counts; selecting one, or
+	searching for its path, filters the Runs, the re-review actions, and both exports to that
+	document.
+- `Export Test Case results` downloads one row per Run, grouped by source document and sorted
+	by Test Case ID, with the ALM result, AI verdict, final result, summary, and any manual
+	decision. It honors the Dashboard filters.
 - Live ALM synchronization downloads supported run-step image attachments only when external
 	evidence review is enabled. Attachments use the authenticated ALM API and enter the same
 	bounded visual review as approved network images; they are not treated as UNC paths.

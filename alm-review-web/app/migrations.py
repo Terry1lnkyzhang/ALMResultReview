@@ -143,6 +143,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
             "sync_queue_paused": "BOOLEAN NOT NULL DEFAULT 0",
             "queue_priority": "INTEGER NOT NULL DEFAULT 0",
             "project": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "location_review_enabled": "BOOLEAN NOT NULL DEFAULT 1",
         }
         for column_name, column_definition in workspace_added_columns.items():
             if column_name not in workspace_columns:
@@ -181,6 +182,13 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 connection.execute(
                     text(
                         "ALTER TABLE alm_runs ADD COLUMN execution_location "
+                        "VARCHAR(512) NOT NULL DEFAULT ''"
+                    )
+                )
+            if "source_document" not in columns:
+                connection.execute(
+                    text(
+                        "ALTER TABLE alm_runs ADD COLUMN source_document "
                         "VARCHAR(512) NOT NULL DEFAULT ''"
                     )
                 )

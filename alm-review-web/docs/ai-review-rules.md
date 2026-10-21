@@ -21,7 +21,7 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 | --- | --- | --- |
 | 文本评审 `text_review` | `alm-text-review` v1.7.4；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
 | 路由 `routing` | 程序消费首轮返回的候选角色，生成路径/图像/HTML/设备检查请求 | 本阶段 `ai_calls=0`；ALM 图像附件强制进入相应检查 |
-| 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.1 | 非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
+| 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.1 | Workspace 关闭位置评审时为 disabled（标准记为 not_applicable，不调用模型）；非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
 | 图像 `image_review` | 安全解析 + `image-evidence-review` v1.3.2 | Workspace 启用外部证据且存在可审图片时调用；否则 disabled / not_applicable |
 | HTML `report_review` | 安全解析、发布信息硬规则 + `html-evidence-review` v1.8.1 | Workspace 启用外部证据且 Actual 引用 HTML 时审查；可能多批调用 |
 | 设备 `equipment_review` | 台账确定性判断 + 未解问题用 `equipment-role` v1.4.2 | Workspace 启用设备审查时执行；明确结果无须第二轮 AI |

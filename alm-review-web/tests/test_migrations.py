@@ -79,16 +79,17 @@ def test_workspace_queue_controls_are_added_to_existing_schema() -> None:
         "review_queue_paused",
         "sync_queue_paused",
         "queue_priority",
+        "location_review_enabled",
     } <= columns
     assert "specialist_reviews_enabled" not in columns
     with engine.connect() as connection:
         row = connection.execute(
             text(
-                "SELECT review_mode, review_queue_paused, sync_queue_paused, queue_priority "
-                "FROM workspaces WHERE id = 1"
+                "SELECT review_mode, review_queue_paused, sync_queue_paused, queue_priority, "
+                "location_review_enabled FROM workspaces WHERE id = 1"
             )
         ).one()
-    assert tuple(row) == ("standard", 0, 0, 0)
+    assert tuple(row) == ("standard", 0, 0, 0, 1)
 
 
 def test_test_location_history_tables_are_created() -> None:
@@ -407,6 +408,7 @@ def test_existing_runs_and_configs_are_assigned_to_default_workspace() -> None:
 
     columns = {column["name"] for column in inspect(engine).get_columns("alm_runs")}
     assert "execution_location" in columns
+    assert "source_document" in columns
     sync_columns = {
         column["name"] for column in inspect(engine).get_columns("sync_configs")
     }

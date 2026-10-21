@@ -14,6 +14,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
@@ -72,6 +73,7 @@ from app.services.review_operations import (
     queue_failed_reviews,
     queue_rereviews_for_run_ids,
     queue_run_review,
+    queue_unreviewed_runs,
     workspace_review_progress,
 )
 from app.services.review_policy import current_review_policy_key
@@ -412,6 +414,7 @@ def _matches_dashboard_filters(
             or normalized_query in item["run"].test_set_name.casefold()
             or normalized_query in item["run"].folder_path.casefold()
             or normalized_query in item["run"].execution_location.casefold()
+            or normalized_query in (item["run"].source_document or "").casefold()
             or normalized_query in item["actual_tester_label"].casefold()
             or normalized_query in item["test_owner_label"].casefold()
             or normalized_query in item["review_summary"].casefold()
@@ -558,6 +561,50 @@ def _csv_value(value: Any) -> str:
     if text.lstrip().startswith(("=", "+", "-", "@")):
         return f"'{text}"
     return text
+
+
+def _export_views(
+    db: Session,
+    workspace: int | None,
+    status: str,
+    tester: str,
+    owner: str,
+    query: str,
+    search_steps: bool,
+) -> tuple[Workspace, list[dict]]:
+    """Run views for the Workspace that pass the Dashboard filters, newest first."""
+    include_legacy = workspace is None
+    current_workspace = resolve_workspace(db, workspace)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            or_(
+                AlmRun.workspace_id == current_workspace.id,
+                include_legacy and AlmRun.workspace_id.is_(None),
+            )
+        )
+        .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
+    ).all()
+    policy_key = current_review_policy_key(db, current_workspace.id)
+    users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    step_matches = (
+        _step_text_run_ids(db, current_workspace.id, include_legacy, query)
+        if search_steps
+        else None
+    )
+    views = [
+        item
+        for run in runs
+        if _matches_dashboard_filters(
+            item := _run_view(db, run, policy_key, users),
+            status,
+            tester,
+            owner,
+            query,
+            step_matches,
+        )
+    ]
+    return current_workspace, views
 
 
 def _format_steps_for_export(steps: list[RunStep]) -> str:
@@ -783,6 +830,7 @@ def dashboard(
                 AlmRun.test_set_name,
                 AlmRun.folder_path,
                 AlmRun.execution_location,
+                AlmRun.source_document,
                 AlmRun.run_status,
                 AlmRun.test_owner,
                 AlmRun.actual_tester,
@@ -844,6 +892,12 @@ def dashboard(
     status_counts["temporary_evidence"] = sum(
         item["temporary_evidence_used"] for item in all_views
     )
+    document_counts: dict[str, Counter] = {}
+    for item in all_views:
+        if item["run"].source_document:
+            counts = document_counts.setdefault(item["run"].source_document, Counter())
+            counts["runs"] += 1
+            counts[item["final_status"]] += 1
     step_matches = (
         _step_text_run_ids(db, current_workspace.id, include_legacy, query)
         if search_steps
@@ -1011,6 +1065,9 @@ def dashboard(
             ],
             "max_tester_count": max_tester_count,
             "max_owner_count": max_owner_count,
+            "document_counts": sorted(
+                document_counts.items(), key=lambda entry: entry[0].casefold()
+            ),
             "status_labels": STATUS_LABELS,
             "selected_status": status,
             "selected_tester": tester,
@@ -1291,37 +1348,9 @@ def export_reviews(
     workspace: int | None = None,
     db: Session = Depends(get_db),
 ) -> Response:
-    include_legacy = workspace is None
-    current_workspace = resolve_workspace(db, workspace)
-    runs = db.scalars(
-        select(AlmRun)
-        .where(
-            or_(
-                AlmRun.workspace_id == current_workspace.id,
-                include_legacy and AlmRun.workspace_id.is_(None),
-            )
-        )
-        .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
-    ).all()
-    policy_key = current_review_policy_key(db, current_workspace.id)
-    users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
-    step_matches = (
-        _step_text_run_ids(db, current_workspace.id, include_legacy, query)
-        if search_steps
-        else None
+    _, views = _export_views(
+        db, workspace, status, tester, owner, query, search_steps
     )
-    views = [
-        item
-        for run in runs
-        if _matches_dashboard_filters(
-            item := _run_view(db, run, policy_key, users),
-            status,
-            tester,
-            owner,
-            query,
-            step_matches,
-        )
-    ]
 
     revision_ids = {
         item["run"].current_revision_id
@@ -1347,6 +1376,7 @@ def export_reviews(
             "test_name",
             "test_set_name",
             "folder_path",
+            "source_document",
             "execution_location",
             "actual_tester_id",
             "actual_tester",
@@ -1386,6 +1416,7 @@ def export_reviews(
                 run.test_name,
                 run.test_set_name,
                 run.folder_path,
+                run.source_document,
                 run.execution_location,
                 run.actual_tester,
                 item["actual_tester_label"],
@@ -1417,6 +1448,77 @@ def export_reviews(
         content=output.getvalue().encode("utf-8-sig"),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="alm-review-results.csv"'},
+    )
+
+
+@router.get("/exports/test-case-results.csv")
+def export_test_case_results(
+    status: str = Query(default="all"),
+    tester: str = Query(default="all"),
+    owner: str = Query(default="all"),
+    query: str = Query(default=""),
+    search_steps: bool = Query(default=False),
+    workspace: int | None = None,
+    db: Session = Depends(get_db),
+) -> Response:
+    current_workspace, views = _export_views(
+        db, workspace, status, tester, owner, query, search_steps
+    )
+    # Stable sort keeps the newest Run first within each Test Case.
+    views.sort(
+        key=lambda item: (
+            (item["run"].source_document or "").casefold(),
+            item["run"].test_id or 0,
+        )
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        (
+            "Source Document",
+            "Test Case ID",
+            "Test Name",
+            "Test Set",
+            "Run ID",
+            "Execution Date",
+            "Actual Tester",
+            "ALM Result",
+            "AI Verdict",
+            "Final Result",
+            "Summary",
+            "Manual Decision",
+            "Manual Reason",
+            "Reviewed At",
+        )
+    )
+    for item in views:
+        run = item["run"]
+        result = item["review"].result
+        manual = item["review"].manual_decision
+        writer.writerow(
+            _csv_value(value)
+            for value in (
+                run.source_document,
+                run.test_id,
+                run.test_name,
+                run.test_set_name,
+                run.alm_run_id or run.run_id,
+                item["execution_at"],
+                item["actual_tester_label"],
+                run.run_status,
+                STATUS_LABELS.get(result.verdict, result.verdict) if result else None,
+                item["status_label"],
+                item["review_summary"],
+                manual.decision if manual else None,
+                manual.reason if manual else None,
+                _to_app_timezone(result.completed_at) if result else None,
+            )
+        )
+    filename = f"{workspace_slug(current_workspace.name)}-test-case-results.csv"
+    return Response(
+        content=output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -2114,6 +2216,9 @@ async def import_docx(
             db,
             source=f"docx:{filename}",
             workspace_id=workspace.id,
+            source_documents={
+                int(record["run"]["id"]): filename[-512:] for record in data["records"]
+            },
         )
     except Exception as exc:
         db.rollback()
@@ -2124,6 +2229,109 @@ async def import_docx(
         f"{result.new_runs} added, {result.changed_runs} changed, "
         f"{result.unchanged_runs} unchanged. Reviews were not queued.",
     )
+
+
+@router.post("/actions/import-docx-folder")
+async def import_docx_folder(
+    documents: list[UploadFile] = File(...),
+    relative_paths: str = Form(""),
+    workspace_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    workspace = resolve_workspace(db, workspace_id)
+    redirect_path = f"/?workspace={workspace.id}"
+    # Browsers may post only base names, so the page also sends webkitRelativePath.
+    try:
+        paths = json.loads(relative_paths) if relative_paths else None
+    except ValueError:
+        paths = None
+    if not (
+        isinstance(paths, list)
+        and len(paths) == len(documents)
+        and all(isinstance(path, str) and path.strip() for path in paths)
+    ):
+        paths = [document.filename or "" for document in documents]
+    users: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    source_documents: dict[int, str] = {}
+    failures: list[str] = []
+    parsed_files = 0
+    skipped_files = 0
+    for document, path in zip(documents, paths, strict=True):
+        label = path.replace("\\", "/").strip().lstrip("/")[-512:]
+        filename = label.rsplit("/", 1)[-1]
+        # Word leaves "~$name.docx" owner files beside documents that are open.
+        if not filename.casefold().endswith(".docx") or filename.startswith("~$"):
+            skipped_files += 1
+            await document.close()
+            continue
+        content = await document.read(MAX_DOCX_BYTES + 1)
+        await document.close()
+        try:
+            data = await run_in_threadpool(parse_alm_docx, content, filename)
+        except Exception as exc:
+            failures.append(f"{label}: {str(exc)[:160]}")
+            continue
+        parsed_files += 1
+        users.update((user["code1_id"], user) for user in data["users"])
+        records.extend(data["records"])
+        source_documents.update(
+            (int(record["run"]["id"]), label) for record in data["records"]
+        )
+    if not records:
+        detail = "; ".join(failures[:3]) or "the folder contains no .docx files"
+        return _redirect(
+            redirect_path,
+            f"Word folder import found no Test Runs: {detail}",
+            "error",
+        )
+    try:
+        result = import_data(
+            {"users": list(users.values()), "records": records},
+            db,
+            source=f"docx-folder:{parsed_files} files",
+            workspace_id=workspace.id,
+            source_documents=source_documents,
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(redirect_path, f"Word folder import failed: {exc}", "error")
+    queue = queue_unreviewed_runs(db, workspace.id, set(source_documents))
+    evidence_config = workspace_evidence_config(db, workspace.id)
+    checks = ", ".join(
+        f"{label} {'on' if enabled else 'off'}"
+        for label, enabled in (
+            ("test location", workspace.location_review_enabled),
+            (
+                "image/HTML evidence",
+                bool(
+                    evidence_config
+                    and evidence_config.external_evidence_review_enabled
+                ),
+            ),
+            ("equipment", workspace.equipment_review_enabled),
+            (
+                "automation release",
+                bool(
+                    evidence_config
+                    and evidence_config.automation_release_project_name
+                ),
+            ),
+        )
+    )
+    message = (
+        f"Word folder import: {parsed_files} documents read, {len(failures)} failed, "
+        f"{skipped_files} other files skipped; {result.discovered_runs} Passed/Failed "
+        f"Runs ({result.new_runs} added, {result.changed_runs} changed, "
+        f"{result.unchanged_runs} unchanged). AI review queued for {queue.queued} Runs "
+        f"({queue.already_reviewed} already reviewed, {queue.already_active} already "
+        f"queued). Workspace checks: {checks}."
+    )
+    if failures:
+        message += " Failed: " + "; ".join(failures[:3])
+        if len(failures) > 3:
+            message += f"; {len(failures) - 3} more"
+    return _redirect(redirect_path, message, "error" if failures else "success")
 
 
 @router.post("/actions/sync-alm")
@@ -3061,6 +3269,7 @@ def save_configuration(
     automation_release_project_name: str = Form(""),
     external_evidence_review_enabled: bool = Form(False),
     equipment_review_enabled: bool = Form(False),
+    location_review_enabled: bool = Form(False),
     review_mode: str = Form("standard"),
     equipment_area_filter: str = Form(""),
     review_queue_paused: bool = Form(False),
@@ -3119,6 +3328,7 @@ def save_configuration(
         return _redirect(redirect_path, "Invalid review mode.", "error")
     workspace.review_mode = review_mode
     workspace.equipment_review_enabled = equipment_review_enabled
+    workspace.location_review_enabled = location_review_enabled is True
     workspace.equipment_area_filter = equipment_area_filter.strip()
     workspace.review_queue_paused = review_queue_paused
     workspace.sync_queue_paused = sync_queue_paused
@@ -3403,6 +3613,7 @@ def create_workspace(
         slug=slug,
         project=source.project if source else "",
         equipment_review_enabled=source.equipment_review_enabled if source else True,
+        location_review_enabled=source.location_review_enabled if source else True,
         review_mode=source.review_mode if source else "standard",
         equipment_area_filter=source.equipment_area_filter if source else "",
         queue_priority=source.queue_priority if source else 0,

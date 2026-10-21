@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import uuid4
@@ -31,6 +31,13 @@ class RereviewQueueResult:
     already_active: int
     manually_resolved: int
     batch_id: str | None
+
+
+@dataclass(frozen=True)
+class ImportedRunQueueResult:
+    queued: int
+    already_reviewed: int
+    already_active: int
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,61 @@ def queue_run_review(db: Session, run: AlmRun) -> ReviewJob | None:
         job.completed_at = None
     db.commit()
     return job
+
+
+def queue_unreviewed_runs(
+    db: Session,
+    workspace_id: int,
+    alm_run_ids: Collection[int],
+) -> ImportedRunQueueResult:
+    """Queue the current revision of each Run that has no result and no active job."""
+    if not alm_run_ids:
+        return ImportedRunQueueResult(0, 0, 0)
+    runs = db.scalars(
+        select(AlmRun)
+        .where(
+            AlmRun.workspace_id == workspace_id,
+            AlmRun.alm_run_id.in_(alm_run_ids),
+            AlmRun.run_status.in_(REVIEWABLE_RUN_STATUSES),
+            AlmRun.current_revision_id.is_not(None),
+        )
+        .order_by(AlmRun.test_id, AlmRun.run_id)
+    ).all()
+    revision_ids = [run.current_revision_id for run in runs]
+    reviewed = set(
+        db.scalars(
+            select(ReviewResult.revision_id).where(
+                ReviewResult.revision_id.in_(revision_ids)
+            )
+        ).all()
+    )
+    active = set(
+        db.scalars(
+            select(ReviewJob.revision_id).where(
+                ReviewJob.revision_id.in_(revision_ids),
+                ReviewJob.status.in_(("queued", "running")),
+            )
+        ).all()
+    )
+    queued = 0
+    for run in runs:
+        if run.current_revision_id in reviewed or run.current_revision_id in active:
+            continue
+        db.add(
+            ReviewJob(
+                workspace_id=workspace_id,
+                run_id=run.run_id,
+                revision_id=run.current_revision_id,
+                status="queued",
+            )
+        )
+        queued += 1
+    db.commit()
+    return ImportedRunQueueResult(
+        queued=queued,
+        already_reviewed=len(reviewed),
+        already_active=len(active - reviewed),
+    )
 
 
 def active_run_review_job(db: Session, run: AlmRun) -> ReviewJob | None:

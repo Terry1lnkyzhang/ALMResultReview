@@ -17,7 +17,7 @@ writes = ["applicability", "step_issues", "step_warnings"]
 [[stage]]
 id = "location_review"
 skill = "location-consistency"
-gate = ""
+gate = "location_review_enabled"
 writes = ["location_review", "criteria.location_consistency", "verdict"]
 
 [[stage]]

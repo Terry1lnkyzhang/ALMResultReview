@@ -207,6 +207,7 @@ class ReviewContext:
     content: dict[str, Any]
     evidence_config: EvidenceConfig | None
     equipment_enabled: bool
+    location_enabled: bool = True
     project: str = ""
     workspace_name: str = ""
     equipment_registry: list[EquipmentRegistry] = field(default_factory=list)
@@ -3152,6 +3153,7 @@ def execute_review(ctx: ReviewContext) -> PipelineOutcome:
                 ctx.evidence.external_review_enabled
             ),
             "equipment_review_enabled": ctx.equipment_enabled,
+            "location_review_enabled": ctx.location_enabled,
         },
         plan=ctx.content["review_plan"],
         stages={
@@ -3264,12 +3266,25 @@ def process_job(
             )
         equipment_registry = list(db.scalars(equipment_statement).all())
     content = review_payload(snapshot)
-    location_assessment = load_location_assessment(
-        db,
-        str(content.get("execution_location") or ""),
-        str(content.get("folder_path") or ""),
-        run.execution_at,
-    )
+    if workspace.location_review_enabled:
+        location_assessment = load_location_assessment(
+            db,
+            str(content.get("execution_location") or ""),
+            str(content.get("folder_path") or ""),
+            run.execution_at,
+        )
+    else:
+        location_assessment = {
+            "status": "disabled",
+            "failure_code": "workspace_disabled",
+            "reason": "Test-location review is turned off for this Workspace.",
+            "alm_location": str(content.get("execution_location") or "").strip(),
+            "folder_path": str(content.get("folder_path") or "").strip(),
+            "parent_name": "",
+            "candidate_count": 0,
+            "candidate_items": [],
+            "selected_config": None,
+        }
     evidence_config = workspace_evidence_config(db, workspace.id)
     release_assessments: dict[int, dict[str, Any]] = {}
     release_project = (
@@ -3318,6 +3333,7 @@ def process_job(
         workspace_name=workspace.name,
         evidence_config=evidence_config,
         equipment_enabled=workspace.equipment_review_enabled,
+        location_enabled=workspace.location_review_enabled,
         equipment_registry=equipment_registry,
         automation_release_assessments=release_assessments,
         location_assessment=location_assessment,
