@@ -2,7 +2,7 @@
 
 FastAPI application for recursive ALM Test Lab synchronization, immutable Run
 revisions, AI review, and manual decisions. It supports a single-machine combined mode
-and a split deployment with a remote Web server and a laptop Worker sharing MySQL.
+and a split deployment with a remote Web server and a laptop Worker sharing MySQL..
 
 ## Environment
 
