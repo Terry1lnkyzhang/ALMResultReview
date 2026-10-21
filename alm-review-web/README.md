@@ -6,7 +6,7 @@ and a split deployment with a remote Web server and a laptop Worker sharing MySQ
 
 ## Environment
 
-This project uses exactly one virtual environment:
+This project uses exactly one virtual environment.:
 
 ```text
 alm-review-web/.venv
