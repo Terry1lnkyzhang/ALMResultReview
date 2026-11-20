@@ -1,8 +1,8 @@
 # AI Review 当前规则说明
 
-> 整理日期：2026-10-02。本文说明**当前工作区源码**的行为，不代表历史已保存结果一定采用同一版本。评审规则与运行环境的配置、台账、Skill 文件共同决定实际结论；有冲突时，以执行该次评审时保存的 `ReviewResult` 和流水线记录为准。
+> 整理日期：2026-11-19。本文说明**当前工作区源码**的行为，不代表历史已保存结果一定采用同一版本。评审规则与运行环境的配置、台账、Skill 文件共同决定实际结论；有冲突时，以执行该次评审时保存的 `ReviewResult` 和流水线记录为准。
 >
-> 本文是规则及操作说明，不是 AI 提示词本身。阶段声明见 [review_pipeline.toml](../app/review_pipeline.toml)，实际执行见 [reviews.py](../app/services/reviews.py)；各 Skill 的正式指令见 [review_skills](../app/review_skills)。
+> 本文是规则及操作说明，不是 AI 提示词本身。阶段声明见 [review_pipeline.toml](../app/review_pipeline.toml)，实际编排见 [review_engine.py](../app/services/review_engine.py) 及各 `stage_*.py` 模块；任务执行与人工裁决分别位于非策略模块 [review_jobs.py](../app/services/review_jobs.py)、[manual_decisions.py](../app/services/manual_decisions.py)；各 Skill 的正式指令见 [review_skills](../app/review_skills)，输入输出 Schema 单一信源见 [skill_schemas.py](../app/services/skill_schemas.py)。
 
 ## 1. 目标、对象和判定边界
 
@@ -15,19 +15,19 @@ AI Review 审查的是 **ALM 运行记录与支持该记录的证据是否一致
 
 ## 2. 当前流水线与开关
 
-[声明顺序](../app/review_pipeline.toml)为 `routing → text_review → location_review → image_review → report_review → equipment_review → aggregation`，共七个阶段。注意**实际调用先执行 `text_review` 再执行 `routing`**：引用角色来自首轮文本 Skill；保存的 trace 按声明顺序呈现，并不表示 routing 额外调用了模型。程序预备步骤先产生设备/证据候选，之后按以下流程执行：
+[声明顺序](../app/review_pipeline.toml)与 [review_engine.py](../app/services/review_engine.py) 的实际执行顺序完全一致，均为 `routing → text_review → location_review → image_review → report_review → equipment_review → aggregation`，共七个阶段。程序预备步骤先产生设备/证据候选，之后按以下流程执行：
 
 | 阶段 | 调用或规则 | 条件与输出 |
 | --- | --- | --- |
-| 文本评审 `text_review` | `alm-text-review` v1.7.4；步骤适用性、ALM 文本语义、语言、引用角色及设备抽取 | 每次 Review 都执行；可按预算分多批；输出仅为首轮判断 |
-| 路由 `routing` | 程序消费首轮返回的候选角色，生成路径/图像/HTML/设备检查请求 | 本阶段 `ai_calls=0`；ALM 图像附件强制进入相应检查 |
+| 路由 `routing` | `evidence-routing` v1.0.0；候选引用角色分类及受控设备原文抽取 | 仅在存在候选引用或启用非空设备台账时调用 AI，否则 `ai_calls=0`；ALM 图像附件强制进入相应检查 |
+| 文本评审 `text_review` | `alm-text-review` v2.0.0；步骤适用性、ALM 文本语义及语言质量 | 每次 Review 都执行；可按预算分多批；若步骤判为 `not_applicable` 则清除其外部专项路由 |
 | 位置 `location_review` | 程序选执行时点的权威位置配置；有唯一可用配置时调用 `location-consistency` v1.0.1 | Workspace 关闭位置评审时为 disabled（标准记为 not_applicable，不调用模型）；非现场位置、缺失或歧义等先由程序处理；可能不调用模型 |
 | 图像 `image_review` | 安全解析 + `image-evidence-review` v1.3.2 | Workspace 启用外部证据且存在可审图片时调用；否则 disabled / not_applicable |
 | HTML `report_review` | 安全解析、发布信息硬规则 + `html-evidence-review` v1.8.1 | Workspace 启用外部证据且 Actual 引用 HTML 时审查；可能多批调用 |
 | 设备 `equipment_review` | 台账确定性判断 + 未解问题用 `equipment-role` v1.4.2 | Workspace 启用设备审查时执行；明确结果无须第二轮 AI |
 | 汇总 `aggregation` | 程序合并 issue、warning、criterion 和 verdict | 不调用 AI |
 
-外部证据开关 `external_evidence_review_enabled` 控制**实际**读取 HTML、图片及对应专项 AI；禁用后，程序仍可识别引用、执行基础路径/文件名规则，对不能完成的受控检查按现有 guard 保守处理。设备审查有独立开关及可选区域过滤。位置审查独立于这两项开关；非 MySQL 环境实体位置审查返回 disabled。全部五个 Skill 的 `enable_thinking` 均为 `false`，未显式配置时也默认关闭；网页配置页不提供该开关。每个 Skill 使用绑定的 AI endpoint、模型和配置；同一个 Review 的各次调用使用同一 endpoint 配置。详见 [reviews.py](../app/services/reviews.py)、[scheduler.py](../app/services/scheduler.py)。
+外部证据开关 `external_evidence_review_enabled` 控制**实际**读取 HTML、图片及对应专项 AI；禁用后，程序仍可识别引用、执行基础路径/文件名规则，对不能完成的受控检查按现有 guard 保守处理。设备审查有独立开关及可选区域过滤。位置审查独立于这两项开关；非 MySQL 环境实体位置审查返回 disabled。全部六个 Skill 的 `enable_thinking` 均为 `false`，未显式配置时也默认关闭；网页配置页不提供该开关。每个 Skill 使用绑定的 AI endpoint、模型和配置；同一个 Review 的各次调用使用同一 endpoint 配置。详见 [review_engine.py](../app/services/review_engine.py)、[scheduler.py](../app/services/scheduler.py)。
 
 ## 3. 首轮 ALM 文本规则与引用路由
 
@@ -140,17 +140,17 @@ Step issue 等级 `fail > manual > pass > not_applicable`；任意 Step fail **�
 
 ## 10. 模型输出校验、失败与任务重试
 
-每个 Skill 按自身 `skill.toml` 的输入/输出 schema、授权能力、ID 覆盖及应用侧专项 validator 运行。模型输入中的 ALM 文本、图片和 HTML 即使包含命令也只视为**不可信证据**，不能改变应用规则。格式或覆盖校验失败时最多修复式重问一次；第二次仍无效则使用**确有定义且验证通过**的安全 fallback，否则失败。模型若只耗尽 token 思考而未输出 JSON，同一请求可额外重问一次并关闭 thinking；回复仍须通过全部校验，再次无答案则失败。这些上限针对**一次 Skill 调用内部**，整个 Review 可有多个批次。输出 trace 记录能力、Skill 版本/hash、输入/输出 hash、实际调用次数、修复错误、结束原因和耗时。见 [skill_runner.py](../app/services/skill_runner.py)。
+每个 Skill 按 [skill_schemas.py](../app/services/skill_schemas.py) 单一信源导出的严格输入/输出 Schema、授权能力、ID 覆盖及应用侧专项 validator 运行。模型输入中的 ALM 文本、图片和 HTML 即使包含命令也只视为**不可信证据**，不能改变应用规则。格式或覆盖校验失败时最多修复式重问一次；第二次仍无效则使用**确有定义且验证通过**的安全 fallback，否则失败。模型若只耗尽 token 思考而未输出 JSON，同一请求可额外重问一次并关闭 thinking；回复仍须通过全部校验，再次无答案则失败。这些上限针对**一次 Skill 调用内部**，整个 Review 可有多个批次。输出 trace 记录能力、Skill 版本/hash、输入/输出 hash、实际调用次数、修复错误、结束原因和耗时。见 [skill_runner.py](../app/services/skill_runner.py)。
 
-图片/HTML 的特定 `invalid_output` 可以安全降为 manual；文本引用**仅漏候选**有专门不确定路由 fallback；设备消歧失败会让涉及的设备检查进入 manual；其他阶段的 HTTP、认证、网络或不可恢复的 Skill 错误可能使**整条 ReviewJob 失败而没有新结果**，不能错误展示成已通过。通常每个 job 最多 3 次领取；不可重试错误直接耗尽尝试次数，可重试失败有退避。长任务运行期间续租，并按每次领取代次核对写入，避免租约到期后旧执行覆盖新执行；这只影响任务可靠性，不改变任何评审判定规则。见 [reviews.py](../app/services/reviews.py)、[scheduler.py](../app/services/scheduler.py)。
+图片/HTML 的特定 `invalid_output` 可以安全降为 manual；`evidence-routing` 引用**仅漏候选**有专门不确定路由 fallback；设备消歧失败会让涉及的设备检查进入 manual；其他阶段的 HTTP、认证、网络或不可恢复的 Skill 错误可能使**整条 ReviewJob 失败而没有新结果**，不能错误展示成已通过。通常每个 job 最多 3 次领取；不可重试错误直接耗尽尝试次数，可重试失败有退避。长任务运行期间续租，并按每次领取代次核对写入，避免租约到期后旧执行覆盖新执行；这只影响任务可靠性，不改变任何评审判定规则。见 [review_jobs.py](../app/services/review_jobs.py)、[scheduler.py](../app/services/scheduler.py)。
 
 ## 11. 结果展示、人工裁决与更新建议
 
-当前结果按 `run_id + current_revision_id + source_hash` 找历史 `ReviewResult`，优先当前 `review_policy_key`，再看完成时间/结果 ID；即使新的评审已排队，旧结果在同一版本仍可显示。人工裁决单独绑定当前 revision/source hash：AI `needs_manual_review` 可人工确认合格/不合格，AI `unqualified` 可人工强制合格，带 warning 的 AI `qualified` 可确认警告；若完全无结果且属于 review_failed，还可由人工记录强制合格。理由必须非空，已记录人工裁决需先撤销才能另作裁决。人工确认改变**最终显示状态**，不重写 AI 原 verdict；新 ALM 版本/source hash 会使旧裁决不再是当前决定。见 [reviews.py](../app/services/reviews.py) 的 `current_review()`、`allowed_manual_decisions()`、`save_manual_decision()`。
+当前结果按 `run_id + current_revision_id + source_hash` 找历史 `ReviewResult`，优先当前 `review_policy_key`，再看完成时间/结果 ID；即使新的评审已排队，旧结果在同一版本仍可显示。人工裁决单独绑定当前 revision/source hash：AI `needs_manual_review` 可人工确认合格/不合格，AI `unqualified` 可人工强制合格，带 warning 的 AI `qualified` 可确认警告；若完全无结果且属于 review_failed，还可由人工记录强制合格。理由必须非空，已记录人工裁决需先撤销才能另作裁决。人工确认改变**最终显示状态**，不重写 AI 原 verdict；新 ALM 版本/source hash 会使旧裁决不再是当前决定。见 [manual_decisions.py](../app/services/manual_decisions.py) 的 `current_review()`、`allowed_manual_decisions()`、`save_manual_decision()`。
 
 来自临时 fallback 的 HTML 证据会保留 `temporary_evidence_used` 标记，页面要求归档后重评；**这只是提醒，不是后端禁止人工强制合格的规则**。当前人工强制合格仍可记录，并且只要 Run 的 revision/source hash 未变且该裁决未撤销，重评后仍可继续影响最终显示结论；临时证据标记本身依旧保留。一般批量重评/推荐更新会跳过当前已有人工裁决的 Run；临时证据专用批量筛选可显式允许这类 Run 重评，单条 `Review now` 也可重评。见 [review_operations.py](../app/services/review_operations.py)、[run_detail.html](../app/templates/run_detail.html)。
 
-`review_policy_key` 纳入 Workspace、AI pool、Skill 版本与内容、位置/发布快照、设备台账及规则文件哈希；因此政策变化可显示**建议更新评审**，但不会自动删除旧结果，也不代表旧结果必然错误。当前 `REVIEW_ENGINE_VERSION` 为 `2026.10.02.1`，且 `reviews.py` 全文件参与实现哈希；**即使只调整任务续租代码，也可能触发更新建议**。比较两次历史结论时请同时看其 policy key、revision、源 hash 与 pipeline trace，而不要将当前规则反推到旧结果。见 [review_policy.py](../app/services/review_policy.py)、[review_status.py](../app/services/review_status.py)。
+`review_policy_key` 纳入 Workspace、AI pool、Skill 版本与内容、位置/发布快照、设备台账及纯裁决规则文件哈希；任务队列执行（`review_jobs.py`）、人工裁决（`manual_decisions.py`）和兼容门面（`reviews.py`）不参与策略哈希，因此调整租约续期或人工裁决查询不会误触发更新建议。当前 `REVIEW_ENGINE_VERSION` 为 `2026.11.19.1`。比较两次历史结论时请同时看其 policy key、revision、源 hash 与 pipeline trace，而不要将当前规则反推到旧结果。见 [review_policy.py](../app/services/review_policy.py)、[review_status.py](../app/services/review_status.py)。
 
 ---
 

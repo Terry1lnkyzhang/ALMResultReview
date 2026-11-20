@@ -2593,3 +2593,26 @@ def test_second_pass_with_previous_equipment_receives_name_vocabulary(
     )
 
     assert sent == [["ECG simulator"]]
+
+
+def test_unc_folder_path_mentioning_phantom_does_not_create_false_equipment_question() -> None:
+    female_phantom = EquipmentRegistry(
+        id=6,
+        equipment_id="PCCSY-RD-CT-0-0006",
+        description="女体模(The Female Body Phantom)",
+        manufacturer="N/A",
+        model_number="N/A",
+        serial_number="N/A",
+        calibration_interval="No calibration required",
+    )
+    content = review_content(
+        r"Recorded log in account information: root. Screenshot referred to "
+        r"\\code1\dfscle\BUSINESS\VandV\CT-SysVer\Taichi\RfS_D002265340_H-Phantom\43130",
+        description="Select DFS calibration in custom calibration, Follow the instructions.",
+        expected="Software interface information bar prompt correction successful.",
+    )
+
+    checks, questions = analyze_equipment_steps(content, [female_phantom])
+
+    assert questions == []
+    assert checks[0]["status"] == "not_applicable"

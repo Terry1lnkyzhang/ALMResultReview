@@ -6,7 +6,7 @@ from sqlalchemy import case, desc, func, select, tuple_
 from sqlalchemy.orm import Session, load_only
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
-from app.services.reviews import (
+from app.services.manual_decisions import (
     FORCE_QUALIFIED_DECISIONS,
     CurrentReview,
     has_unresolved_review_warning,
@@ -54,16 +54,11 @@ def _review_from_result(
 def review_update_reasons(
     result: ReviewResult | None,
     policy_key: str,
-    prompt_version_id: int | None,
-    model_name: str | None,
+    model_name: str | None = None,
 ) -> tuple[str, ...]:
     if result is None or result.review_policy_key == policy_key:
         return ()
     reasons = []
-    if prompt_version_id is not None and result.prompt_version_id != prompt_version_id:
-        reasons.append(
-            f"提示词版本已从 {result.prompt_version_id} 更新为 {prompt_version_id}"
-        )
     if model_name is not None and result.model_name != model_name:
         reasons.append(f"AI 模型已从 {result.model_name} 更新为 {model_name}")
     reasons.append("评审规则、证据设置或设备台账已更新")

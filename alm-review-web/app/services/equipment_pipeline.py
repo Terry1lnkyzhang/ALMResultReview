@@ -1,8 +1,6 @@
-"""Second-pass equipment resolution: everything between the registry analysis and
-the final equipment verdict.
-
-The first text pass carries `extracted_equipment` as a side channel for this
-feature; `absorb_first_pass` is its only consumer.
+"""Consolidated equipment review pipeline: initial deterministic registry analysis,
+routing extraction/role absorption, HTML report phantom verification, second-pass
+AI disambiguation, and final step/criterion guard application.
 """
 from __future__ import annotations
 
@@ -14,12 +12,21 @@ from app.models import AiConfig, EquipmentRegistry
 from app.services.ai_transport import ai_headers, completion_url, skill_failure
 from app.services.equipment_review import (
     OpenQuestion,
+    analyze_equipment_steps,
     apply_equipment_disambiguation,
     apply_extracted_equipment,
+    apply_html_report_equipment,
     equipment_reference,
     merge_pending_names,
     registry_equipment_names,
     requirement_previous_equipment_ids,
+)
+from app.services.html_evidence import HtmlEvidenceResult, actual_phantom_codes
+from app.services.review_types import (
+    ReviewContext,
+    _append_step_issue,
+    _criterion,
+    _recalculate_result,
 )
 from app.services.skill_runner import SkillFailure, skill_runner
 
@@ -313,3 +320,176 @@ def _merge_equipment_traces(traces: list[dict[str, Any]]) -> dict[str, Any]:
         ]
     }
     return merged
+
+
+def prepare_equipment_context(ctx: ReviewContext) -> None:
+    """Run deterministic equipment step analysis before routing."""
+    if ctx.equipment_enabled:
+        ctx.equipment_checks, ctx.open_questions = analyze_equipment_steps(
+            ctx.content,
+            ctx.equipment_registry,
+        )
+
+
+def absorb_routing_equipment(ctx: ReviewContext) -> None:
+    """Fold routing-stage equipment extractions and role decisions into context."""
+    if not ctx.equipment_enabled:
+        return
+    original_question_steps = {
+        question.review_step for question in ctx.open_questions
+    }
+    ctx.open_questions = absorb_first_pass(
+        ctx.content,
+        ctx.equipment_checks,
+        ctx.open_questions,
+        ctx.equipment_registry,
+    )
+    remaining_question_steps = {
+        question.review_step for question in ctx.open_questions
+    }
+    ctx.first_pass_resolved_steps = len(
+        original_question_steps - remaining_question_steps
+    )
+
+
+def collect_html_reported_equipment(
+    review_step: int,
+    report_paths: dict[str, str],
+    html_results: dict[int, dict[str, HtmlEvidenceResult]],
+    assessment: dict[str, Any],
+    reported_by_step: dict[int, list[dict[str, str]]],
+) -> None:
+    """Extract verified `Phantom Code` entries from cited `Actual:` HTML blocks."""
+    reported_equipment: list[dict[str, str]] = []
+    for citation in assessment.get("evidence", []):
+        if "actual" not in citation.get("supports", []):
+            continue
+        source_path = report_paths.get(citation.get("report_id", ""))
+        result = (
+            html_results.get(review_step, {}).get(source_path)
+            if source_path
+            else None
+        )
+        if result is None:
+            continue
+        block = next(
+            (
+                item
+                for item in result.blocks
+                if item.block_id == citation.get("block_id")
+            ),
+            None,
+        )
+        if block is None:
+            continue
+        for label, identifier in actual_phantom_codes(block):
+            reported_equipment.append(
+                {
+                    "equipment_id": identifier,
+                    "source_path": source_path,
+                    "block_id": block.block_id,
+                    "label": label,
+                }
+            )
+    if reported_equipment:
+        reported_by_step[review_step] = list(
+            {
+                (
+                    item["equipment_id"],
+                    item["source_path"],
+                    item["block_id"],
+                ): item
+                for item in reported_equipment
+            }.values()
+        )
+
+
+def run_equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
+    if ctx.equipment_enabled:
+        ctx.equipment_checks, skill_trace = run_equipment_pipeline(
+            ctx.ai_config,
+            ctx.content,
+            ctx.equipment_checks,
+            ctx.open_questions,
+            ctx.equipment_registry,
+        )
+        apply_html_report_equipment(
+            ctx.content,
+            ctx.equipment_checks,
+            ctx.evidence.html_reported_equipment,
+            ctx.equipment_registry,
+        )
+        status = "completed" if ctx.plan.equipment_steps else "not_applicable"
+    else:
+        skill_trace = {
+            "skill_id": "equipment-role",
+            "status": "disabled",
+            "ai_calls": 0,
+            "reason": "当前工作区已禁用设备台账校验。",
+        }
+        status = "disabled"
+    return {
+        "status": status,
+        "ai_calls": int(skill_trace.get("ai_calls", 0)) if ctx.equipment_enabled else 0,
+        "steps": len(ctx.plan.equipment_steps),
+        "ambiguous_steps": len(ctx.open_questions),
+        "first_pass_resolved_steps": ctx.first_pass_resolved_steps,
+        "skill": skill_trace,
+    }
+
+
+def _apply_equipment_guards(
+    parsed: dict[str, Any],
+    checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    checks_by_step = {item["review_step"]: item for item in checks}
+    for step_result in parsed["step_results"]:
+        check = checks_by_step.get(step_result["review_step"])
+        if check is None:
+            continue
+        if step_result.get("applicability") == "not_applicable":
+            check = {
+                **check,
+                "status": "not_applicable",
+                "code": "not_applicable",
+                "summary": "主评审判定该步骤不适用，因此跳过设备台账校验。",
+            }
+        step_result["equipment"] = check
+        for warning in check.get("warnings", []):
+            if warning not in step_result["warnings"]:
+                step_result["warnings"].append(warning)
+        if check["status"] in {"fail", "manual"}:
+            _append_step_issue(
+                parsed,
+                step_result["review_step"],
+                check["status"],
+                "equipment",
+                check["summary"],
+            )
+    return _recalculate_result(parsed)
+
+
+def _apply_disabled_equipment_guards(parsed: dict[str, Any]) -> dict[str, Any]:
+    for step_result in parsed["step_results"]:
+        step_result["equipment"] = {
+            "review_step": step_result["review_step"],
+            "status": "not_applicable",
+            "code": "disabled_by_configuration",
+            "summary": "当前工作区已禁用设备台账校验。",
+            "matches": [],
+            "warnings": [],
+        }
+    result = _recalculate_result(parsed)
+    result["criteria"]["equipment_traceability"] = _criterion(
+        "not_applicable",
+        "当前工作区已禁用设备台账校验。",
+    )
+    return result
+
+
+def apply_equipment_verdicts(ctx: ReviewContext, parsed: dict[str, Any]) -> dict[str, Any]:
+    return (
+        _apply_equipment_guards(parsed, ctx.equipment_checks)
+        if ctx.equipment_enabled
+        else _apply_disabled_equipment_guards(parsed)
+    )

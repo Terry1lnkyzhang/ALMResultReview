@@ -1,19 +1,8 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AiConfig, EvidenceConfig, PromptVersion, SyncConfig, WorkerLease
+from app.models import AiConfig, EvidenceConfig, SyncConfig, WorkerLease
 from app.services.workspaces import default_workspace
-
-# Legacy record only: the review is driven by the packaged Skills under
-# `app/review_skills/`, and this template is never sent to the model.
-DEFAULT_PROMPT = """You are an ALM test execution record reviewer.
-
-This template is retained for compatibility. The active review instructions,
-input/output schemas and examples live in the packaged review Skills under
-app/review_skills/, and every semantic call goes through SkillRunner.
-
-{{RUN_CONTENT}}
-"""
 
 
 def ensure_defaults(db: Session) -> None:
@@ -37,10 +26,6 @@ def ensure_defaults(db: Session) -> None:
             db.add(evidence_config)
         else:
             evidence_config.workspace_id = workspace.id
-
-    active_prompt = db.scalar(select(PromptVersion).where(PromptVersion.is_active.is_(True)))
-    if active_prompt is None:
-        db.add(PromptVersion(name="Default review prompt", template=DEFAULT_PROMPT, is_active=True))
 
     sync_config = db.scalar(select(SyncConfig).limit(1))
     if sync_config is None:

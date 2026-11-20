@@ -1,0 +1,23 @@
+[skill]
+id = "evidence-routing"
+name = "Evidence Routing and Equipment Extraction"
+version = "1.1.0"
+stage = "routing"
+enabled = true
+
+[contract]
+version = "1"
+input_collection = "steps"
+output_collection = "decisions"
+identity_field = "review_step"
+
+[capabilities]
+required = ["review.step_text", "evidence.path_metadata", "equipment.registry.candidates"]
+optional = []
+forbidden = ["filesystem.read", "network.fetch", "evidence.image.content", "equipment.registry", "database.read", "verdict.write"]
+
+[model]
+enable_thinking = false
+# Thinking tokens count against max_tokens.
+max_tokens = 8192
+max_tokens_per_item = 768

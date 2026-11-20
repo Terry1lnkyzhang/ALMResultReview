@@ -524,7 +524,6 @@ def test_create_workspace_copy_reuses_source_configuration() -> None:
             slug="project-a",
             project="earth_kylin",
             equipment_review_enabled=False,
-            review_mode="compare",
             equipment_area_filter="Lab 3",
             queue_priority=25,
         )
@@ -561,7 +560,6 @@ def test_create_workspace_copy_reuses_source_configuration() -> None:
         assert workspace is not None
         assert workspace.project == "earth_kylin"
         assert workspace.equipment_review_enabled is False
-        assert workspace.review_mode == "compare"
         assert workspace.equipment_area_filter == "Lab 3"
         assert workspace.queue_priority == 25
         sync_config = db.scalar(
@@ -876,7 +874,7 @@ def test_review_progress_reports_current_workspace_runs(monkeypatch) -> None:
         }
 
 
-def test_configuration_http_sets_review_mode_for_only_the_selected_workspace() -> None:
+def test_configuration_http_updates_only_the_selected_workspace() -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -911,22 +909,18 @@ def test_configuration_http_sets_review_mode_for_only_the_selected_workspace() -
         "ai_base_url": "http://ai.example.test/v1",
         "model_name": "qwen3",
         "timeout_seconds": "120",
-        "prompt_name": "Review",
-        "prompt_template": "Review {{RUN_CONTENT}}",
     }
     with TestClient(app, follow_redirects=False) as client:
         assert client.post(
-            "/ops/configuration", data={**form, "review_mode": "compare"}
+            "/ops/configuration", data={**form, "review_queue_paused": "true"}
         ).status_code == 303
         with Session(engine) as db:
-            assert db.get(Workspace, workspace_id).review_mode == "compare"
+            assert db.get(Workspace, workspace_id).review_queue_paused is True
             other = db.scalar(select(Workspace).where(Workspace.slug == "project-b"))
-            assert other is not None and other.review_mode == "standard"
-        assert client.post(
-            "/ops/configuration", data={**form, "review_mode": "standard"}
-        ).status_code == 303
+            assert other is not None and other.review_queue_paused is False
+        assert client.post("/ops/configuration", data=form).status_code == 303
     with Session(engine) as db:
-        assert db.get(Workspace, workspace_id).review_mode == "standard"
+        assert db.get(Workspace, workspace_id).review_queue_paused is False
 
 
 def test_configuration_clamps_and_persists_review_concurrency() -> None:
@@ -959,7 +953,6 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
             ai_api_key: str = "",
             clear_ai_api_key: bool = False,
             schedule_time: str = "01:30",
-            review_mode: str = "standard",
             **secondary_config,
         ):
             return save_configuration(
@@ -987,24 +980,16 @@ def test_configuration_clamps_and_persists_review_concurrency() -> None:
                 automation_release_project_name="Earth_Kylin",
                 external_evidence_review_enabled=False,
                 equipment_review_enabled=False,
-                review_mode=review_mode,
                 equipment_area_filter="",
                 review_queue_paused=False,
                 sync_queue_paused=False,
                 queue_priority=0,
-                prompt_name="Test prompt",
-                prompt_template="Review {{RUN_CONTENT}}",
                 db=db,
                 **secondary_config,
             )
 
         assert save(10, ai_api_key="saved-key").status_code == 303
         ai_config = db.get(AiConfig, 1)
-        assert workspace.review_mode == "standard"
-        assert save(10, review_mode="compare").status_code == 303
-        assert workspace.review_mode == "compare"
-        assert save(10, review_mode="unsupported").status_code == 303
-        assert workspace.review_mode == "compare"
         assert ai_config.review_concurrency == 4
         assert ai_config.api_key == "saved-key"
         assert workspace.project == "earth_kylin"

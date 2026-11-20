@@ -22,25 +22,33 @@ from app.services.skill_runner import skill_policy_identity
 from app.services.workspaces import resolve_workspace, workspace_evidence_config
 
 # Bump this whenever deterministic review preprocessing or guard behavior changes.
-REVIEW_ENGINE_VERSION = "2026.10.02.1"
+REVIEW_ENGINE_VERSION = "2026.11.20.2"
 _APP_DIRECTORY = Path(__file__).resolve().parents[1]
 _REVIEW_POLICY_FILES = (
     _APP_DIRECTORY / "review_pipeline.toml",
     _APP_DIRECTORY / "hashing.py",
     _APP_DIRECTORY / "services" / "automation_release.py",
     _APP_DIRECTORY / "services" / "equipment_pipeline.py",
-    _APP_DIRECTORY / "services" / "evidence.py",
     _APP_DIRECTORY / "services" / "equipment_review.py",
+    _APP_DIRECTORY / "services" / "evidence.py",
     _APP_DIRECTORY / "services" / "html_evidence.py",
     _APP_DIRECTORY / "services" / "image_evidence.py",
     _APP_DIRECTORY / "services" / "location_review.py",
     _APP_DIRECTORY / "services" / "non_site_locations.py",
+    _APP_DIRECTORY / "services" / "review_engine.py",
     _APP_DIRECTORY / "services" / "review_pipeline.py",
+    _APP_DIRECTORY / "services" / "review_types.py",
     _APP_DIRECTORY / "services" / "skill_runner.py",
+    _APP_DIRECTORY / "services" / "skill_schemas.py",
+    _APP_DIRECTORY / "services" / "stage_aggregation.py",
+    _APP_DIRECTORY / "services" / "stage_image_review.py",
+    _APP_DIRECTORY / "services" / "stage_location_review.py",
+    _APP_DIRECTORY / "services" / "stage_report_review.py",
+    _APP_DIRECTORY / "services" / "stage_routing.py",
+    _APP_DIRECTORY / "services" / "stage_text_review.py",
     _APP_DIRECTORY / "services" / "test_locations.py",
     _APP_DIRECTORY / "services" / "timezones.py",
-    _APP_DIRECTORY / "services" / "reviews.py",
-    # Skill instructions, schemas and examples steer the verdict as much as the code.
+    # Skill instructions and examples steer the verdict as much as the code.
     *sorted(
         path
         for path in (_APP_DIRECTORY / "review_skills").rglob("*")
@@ -103,7 +111,7 @@ def current_review_policy_key(
         }
         for item in equipment_registry
     ]
-    authoritative_skill_ids = ["alm-text-review"]
+    authoritative_skill_ids = ["evidence-routing", "alm-text-review"]
     if workspace.location_review_enabled:
         authoritative_skill_ids.append("location-consistency")
     if (

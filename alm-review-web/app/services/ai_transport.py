@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,6 +25,29 @@ def completion_url(configured_url: str) -> str:
 def ai_headers(ai_config: AiConfig) -> dict[str, str]:
     api_key = (ai_config.api_key or "").strip() or get_settings().ai_api_key.strip()
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def test_ai_connection(config: AiConfig) -> str:
+    response = httpx.post(
+        completion_url(config.base_url),
+        json={
+            "model": config.model_name,
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": 'Return JSON only: {"status":"ok"}',
+                }
+            ],
+        },
+        headers=ai_headers(config),
+        timeout=config.timeout_seconds,
+    )
+    response.raise_for_status()
+    content = str(response.json()["choices"][0]["message"]["content"]).strip()
+    if '"status":"ok"' not in content.replace(" ", ""):
+        raise ValueError(f"Unexpected AI response: {content[:300]}")
+    return content
 
 
 def skill_failure(trace: dict[str, Any], fallback: str) -> SkillFailure:

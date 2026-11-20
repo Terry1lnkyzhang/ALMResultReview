@@ -19,6 +19,7 @@ from app.services.reviews import (
     _image_review_stage,
     _manual_html_assessment,
     _recalculate_result,
+    _run_evidence_routing_skill,
     _run_image_review_skill,
     _run_text_semantic_skills,
 )
@@ -265,13 +266,11 @@ def test_first_pass_falls_back_to_uncertain_for_repeatedly_missing_reference(
         return IntentStubResponse(
             json.dumps(
                 {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": [],
-                            "summary": "Actual supports Expected.",
+                            "extracted_equipment": [],
                         }
                     ]
                 }
@@ -280,7 +279,7 @@ def test_first_pass_falls_back_to_uncertain_for_repeatedly_missing_reference(
 
     monkeypatch.setattr("app.services.reviews.httpx.post", post)
 
-    _, traces = _run_text_semantic_skills(
+    traces = _run_evidence_routing_skill(
         AiConfig(base_url="https://ai.example/v1", model_name="test"),
         content,
     )
@@ -357,13 +356,11 @@ def test_first_pass_repairs_missing_reference_decision(monkeypatch) -> None:
         return IntentStubResponse(
             json.dumps(
                 {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": next(replies),
-                            "summary": "Actual supports Expected.",
+                            "extracted_equipment": [],
                         }
                     ]
                 }
@@ -372,7 +369,7 @@ def test_first_pass_repairs_missing_reference_decision(monkeypatch) -> None:
 
     monkeypatch.setattr("app.services.reviews.httpx.post", post)
 
-    _, traces = _run_text_semantic_skills(
+    traces = _run_evidence_routing_skill(
         AiConfig(base_url="https://ai.example/v1", model_name="test"),
         content,
     )
@@ -418,11 +415,9 @@ def test_first_pass_does_not_fall_back_for_incompatible_reference_role(
         return IntentStubResponse(
             json.dumps(
                 {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": [
                                 {
                                     "candidate_id": "step-1-ref-1",
@@ -431,7 +426,7 @@ def test_first_pass_does_not_fall_back_for_incompatible_reference_role(
                                     "reason": "Incorrect role.",
                                 }
                             ],
-                            "summary": "Actual supports Expected.",
+                            "extracted_equipment": [],
                         }
                     ]
                 }
@@ -441,7 +436,7 @@ def test_first_pass_does_not_fall_back_for_incompatible_reference_role(
     monkeypatch.setattr("app.services.reviews.httpx.post", post)
 
     with pytest.raises(ValueError, match="cannot use role test_equipment"):
-        _run_text_semantic_skills(
+        _run_evidence_routing_skill(
             AiConfig(base_url="https://ai.example/v1", model_name="test"),
             content,
         )
@@ -473,7 +468,6 @@ def test_first_pass_restores_alm_step_order(monkeypatch) -> None:
                             "review_step": review_step,
                             "applicability": "applicable",
                             "findings": [],
-                            "reference_decisions": [],
                             "summary": f"Step {review_step} passed.",
                         }
                         for review_step in (2, 1)
@@ -523,7 +517,6 @@ def test_not_applicable_step_drops_text_findings(monkeypatch) -> None:
                                     "reason": "Actual does not confirm the update.",
                                 }
                             ],
-                            "reference_decisions": [],
                             "summary": "The Step only applies to Taichi.",
                         }
                     ]
@@ -584,7 +577,6 @@ def test_not_applicable_keeps_record_documentation_gap(
                                     "reason": "Actual does not explicitly record N/A or its basis.",
                                 }
                             ],
-                            "reference_decisions": [],
                             "summary": "The rotation is not supported, but N/A is undocumented.",
                         }
                     ]
@@ -655,6 +647,7 @@ def test_record_documentation_gap_is_manual_with_or_without_evidence(
                 "actual_format": {"layout_text": "", "signals": []},
                 "numbered_comparison": [],
                 "reference_candidates": reference_candidates,
+                "reference_decisions": reference_decisions,
                 "attachment_contents": [{}] if reference_candidates else [],
             }
         ],
@@ -679,7 +672,6 @@ def test_record_documentation_gap_is_manual_with_or_without_evidence(
                                     ),
                                 }
                             ],
-                            "reference_decisions": reference_decisions,
                             "summary": "Record needs verification.",
                         }
                     ]
@@ -742,7 +734,6 @@ def test_ads_without_pd_requires_review_only_for_earthformal02_failed_step(
                             "review_step": 1,
                             "applicability": "applicable",
                             "findings": [],
-                            "reference_decisions": [],
                             "summary": "Failed execution is documented.",
                         }
                     ]
@@ -802,7 +793,6 @@ def test_text_review_sends_workspace_project_and_alm_status_context(monkeypatch)
                             "review_step": 1,
                             "applicability": "not_applicable",
                             "findings": [],
-                            "reference_decisions": [],
                             "summary": "The configured project contains Earth.",
                         }
                     ]
@@ -858,6 +848,14 @@ def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> N
                         "detection_source": "path_extension",
                     }
                 ],
+                "reference_decisions": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "role": "result_evidence",
+                        "requires_check": True,
+                        "reason": "Actual cites the captured evidence.",
+                    }
+                ],
             }
         ],
     }
@@ -883,14 +881,6 @@ def test_routed_result_evidence_drops_missing_content_findings(monkeypatch) -> N
                                     "basis": "direct_step_text",
                                     "reason": "Actual mixes tenses.",
                                 },
-                            ],
-                            "reference_decisions": [
-                                {
-                                    "candidate_id": "step-1-ref-1",
-                                    "role": "result_evidence",
-                                    "requires_check": True,
-                                    "reason": "Actual cites the captured evidence.",
-                                }
                             ],
                             "summary": "Actual answers Expected through evidence.",
                         }
@@ -938,6 +928,14 @@ def test_routed_report_drops_mismatch_inferred_only_from_reference_metadata(
                         "detection_source": "path_extension",
                     }
                 ],
+                "reference_decisions": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "role": "result_evidence",
+                        "requires_check": True,
+                        "reason": "Actual cites the automation report.",
+                    }
+                ],
             }
         ],
     }
@@ -959,14 +957,6 @@ def test_routed_report_drops_mismatch_inferred_only_from_reference_metadata(
                                         "The report name does not contain the -5 degree "
                                         "parameter."
                                     ),
-                                }
-                            ],
-                            "reference_decisions": [
-                                {
-                                    "candidate_id": "step-1-ref-1",
-                                    "role": "result_evidence",
-                                    "requires_check": True,
-                                    "reason": "Actual cites the automation report.",
                                 }
                             ],
                             "summary": "The report name appears inconsistent.",
@@ -1016,6 +1006,14 @@ def test_routed_report_keeps_mismatch_stated_directly_in_actual(monkeypatch) -> 
                         "detection_source": "path_extension",
                     }
                 ],
+                "reference_decisions": [
+                    {
+                        "candidate_id": "step-1-ref-1",
+                        "role": "result_evidence",
+                        "requires_check": True,
+                        "reason": "Actual cites the automation report.",
+                    }
+                ],
             }
         ],
     }
@@ -1037,14 +1035,6 @@ def test_routed_report_keeps_mismatch_stated_directly_in_actual(monkeypatch) -> 
                                         "Actual states 5 degrees while the Step requires "
                                         "-5 degrees."
                                     ),
-                                }
-                            ],
-                            "reference_decisions": [
-                                {
-                                    "candidate_id": "step-1-ref-1",
-                                    "role": "result_evidence",
-                                    "requires_check": True,
-                                    "reason": "Actual cites the automation report.",
                                 }
                             ],
                             "summary": "Actual directly contradicts the requirement.",
@@ -1241,7 +1231,6 @@ def test_repeated_language_findings_produce_one_warning_each(monkeypatch) -> Non
                             "review_step": 1,
                             "applicability": "applicable",
                             "findings": [repeated, repeated, distinct],
-                            "reference_decisions": [],
                             "summary": "Actual supports Expected.",
                         }
                     ]
@@ -1347,7 +1336,7 @@ def test_text_and_image_reviews_use_separate_bounded_requests(monkeypatch) -> No
             request = requests[-1]
             system_content = request["messages"][0]["content"]
             user_content = request["messages"][1]["content"]
-            if "ALM Text Review and Evidence Planning" in system_content:
+            if "ALM Text Review" in system_content:
                 skill_input = json.loads(user_content)
                 return {
                     "choices": [{"message": {"content": json.dumps({
@@ -1356,7 +1345,6 @@ def test_text_and_image_reviews_use_separate_bounded_requests(monkeypatch) -> No
                                 "review_step": step["review_step"],
                                 "applicability": "applicable",
                                 "findings": [],
-                                "reference_decisions": [],
                                 "summary": "Actual supports Expected.",
                             }
                             for step in skill_input["steps"]
@@ -1707,6 +1695,126 @@ def test_image_missing_media_id_is_repaired_before_accepting_the_step(monkeypatc
     assert stage["manual_fallbacks"] == 0
     assert stage["skills"][0]["repairs"]
     assert ctx.text_result["verdict"] == "qualified"
+
+
+def test_image_review_supplies_referenced_prior_step_context(monkeypatch) -> None:
+    image = ResolvedImage(
+        relative_name="Step5.png",
+        media_type="image/png",
+        size_bytes=50,
+        sha256="b" * 64,
+        data_url="data:image/png;base64,AA==",
+    )
+    captured_inputs: list[dict] = []
+
+    def post(*_args, **kwargs) -> IntentStubResponse:
+        payload = kwargs["json"]
+        step_input = json.loads(payload["messages"][1]["content"][0]["text"])
+        captured_inputs.append(step_input)
+        media_id = step_input["steps"][0]["images"][0]["media_id"]
+        return IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 5,
+                            "status": "pass",
+                            "reason": "Software version matches Step 4.",
+                            "observed_media_ids": [media_id],
+                        }
+                    ]
+                }
+            )
+        )
+
+    monkeypatch.setattr("app.services.reviews.httpx.post", post)
+    content = {
+        "run_status": "Passed",
+        "steps": [
+            {
+                "review_step": 4,
+                "status": "Passed",
+                "description": "Record software version.",
+                "expected": "Software version: ___",
+                "actual": "Software version: 7.0.0.11985",
+            },
+            {
+                "review_step": 5,
+                "status": "Passed",
+                "description": "Verify software version in About dialog.",
+                "expected": "Version is the same as Step 4.",
+                "actual": "Version was the same as Step 4.",
+            },
+        ],
+    }
+
+    trace = _run_image_review_skill(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        [(5, "ALM attachment:1", image)],
+        content,
+    )
+
+    assert trace["status"] == "completed"
+    assert captured_inputs[0]["steps"][0]["referenced_steps"] == [
+        {
+            "review_step": 4,
+            "description": "Record software version.",
+            "expected": "Software version: ___",
+            "actual": "Software version: 7.0.0.11985",
+        }
+    ]
+
+
+def test_truncated_step_text_downgrades_insufficient_fail_to_manual(monkeypatch) -> None:
+    content = {
+        "review_plan": {"text_steps": [1]},
+        "steps": [
+            {
+                "review_step": 1,
+                "status": "Passed",
+                "description": "Record all 8 sub-tables.",
+                "expected": "All 8 sub-tables are recorded.",
+                "actual": "Data " * 1500,
+                "actual_format": {"layout_text": "", "signals": []},
+                "numbered_comparison": [],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.reviews.httpx.post",
+        lambda *_args, **_kwargs: IntentStubResponse(
+            json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [
+                                {
+                                    "code": "actual_insufficient",
+                                    "severity": "fail",
+                                    "basis": "direct_step_text",
+                                    "reason": "Missing sub-tables in truncated tail.",
+                                }
+                            ],
+                            "summary": "Incomplete.",
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    parsed, _ = _run_text_semantic_skills(
+        AiConfig(base_url="https://ai.example/v1", model_name="test"),
+        content,
+    )
+
+    assert parsed["verdict"] == "needs_manual_review"
+    assert all(
+        issue["status"] == "manual"
+        for issue in parsed["step_results"][0]["issues"]
+    )
 
 
 @pytest.mark.parametrize("status", ["budget_exhausted", "not_checked"])
@@ -2335,3 +2443,148 @@ def test_equipment_pass_and_current_status_warning_remain_qualified() -> None:
     assert guarded["verdict"] == "qualified"
     assert guarded["warnings"] == [{"step": 1, **warning}]
     assert guarded["criteria"]["equipment_traceability"]["status"] == "pass"
+
+
+def test_text_skill_precheck_validator_and_fallback_enforce_failed_checks() -> None:
+    from app.services.stage_text_review import (
+        _fallback_text_skill_output,
+        _validate_text_skill_output,
+    )
+
+    validated_input = {
+        "steps": [
+            {"review_step": 1, "alm_step_status": "Passed"},
+            {"review_step": 2, "alm_step_status": "Passed"},
+        ]
+    }
+    inconsistent_output = {
+        "assessments": [
+            {
+                "review_step": 1,
+                "applicability": "applicable",
+                "bound_checks": [
+                    {
+                        "metric": "SD",
+                        "bound": "<= 0.075",
+                        "actual": "0.857",
+                        "within_bound": False,
+                    }
+                ],
+                "conclusion_checks": [],
+                "findings": [],
+                "summary": "Omitted finding.",
+            },
+            {
+                "review_step": 2,
+                "applicability": "applicable",
+                "bound_checks": [],
+                "conclusion_checks": [
+                    {
+                        "claim_excerpt": "The data failed normality.",
+                        "matches_expected_subject_and_unit": True,
+                        "matches_recorded_data": False,
+                    }
+                ],
+                "findings": [],
+                "summary": "Omitted contradiction.",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="within_bound=false"):
+        _validate_text_skill_output(validated_input, inconsistent_output)
+
+    recovered = _fallback_text_skill_output(
+        validated_input, inconsistent_output, "repair exhausted"
+    )
+    _validate_text_skill_output(validated_input, recovered)
+    assert recovered["assessments"][0]["findings"][0]["severity"] == "fail"
+    assert recovered["assessments"][1]["findings"][0]["severity"] == "fail"
+
+
+def test_aggregate_review_pipeline_preserves_html_and_equipment_criteria_together() -> None:
+    from app.services.stage_aggregation import aggregate_review_pipeline
+
+    html_path = r"\\server\root\48276\report_48276.html"
+    content = {
+        "test_id": "48276",
+        "steps": [
+            {
+                "review_step": 1,
+                "order": "1",
+                "name": "Step 1",
+                "evidence_profile": {
+                    "actual_paths": [{"raw": html_path, "kind": "html"}],
+                    "actual_dates": [],
+                    "attachment_declared": False,
+                    "screenshot_review_required": False,
+                    "reference_lookup_required": False,
+                    "routing": {"actions": ["validate_path", "parse_html_report"]},
+                },
+            }
+        ],
+    }
+    ctx = ReviewContext(
+        ai_config=AiConfig(base_url="https://ai.example", model_name="qwen3"),
+        content=content,
+        evidence_config=EvidenceConfig(
+            external_evidence_review_enabled=True,
+            allowed_network_root=r"\\server\root",
+        ),
+        equipment_enabled=True,
+        location_enabled=False,
+        equipment_checks=[
+            {
+                "review_step": 1,
+                "status": "pass",
+                "code": "equipment_valid",
+                "summary": "Equipment verified.",
+                "matches": [{"equipment_id": "EQ-1"}],
+                "warnings": [],
+            }
+        ],
+        text_result=text_review_result(steps=[1]),
+        evidence=PreparedImageEvidence(
+            external_review_enabled=True,
+            results={},
+            html_results={
+                1: {
+                    html_path: HtmlEvidenceResult(
+                        status="ready",
+                        size_bytes=120,
+                        sha256="a" * 64,
+                        blocks=(HtmlEvidenceBlock("report-summary", "Pass"),),
+                    )
+                }
+            },
+            html_assessments={
+                1: {
+                    "review_step": 1,
+                    "status": "pass",
+                    "description_coverage": "supported",
+                    "expected_coverage": "supported",
+                    "actual_coverage": "supported",
+                    "result_consistency": "consistent",
+                    "release_consistency": "not_checked",
+                    "reviewed_report_ids": ["step-1-report-1"],
+                    "evidence": [
+                        {
+                            "report_id": "step-1-report-1",
+                            "block_id": "report-summary",
+                            "quote": "Pass",
+                            "supports": ["result"],
+                        }
+                    ],
+                    "reason": "报告一致支持通过。",
+                }
+            },
+        ),
+    )
+
+    aggregated = aggregate_review_pipeline(ctx)
+
+    assert aggregated["verdict"] == "qualified"
+    assert aggregated["criteria"]["equipment_traceability"]["status"] == "pass"
+    assert aggregated["criteria"]["html_report_sequence"]["status"] == "pass"
+    assert aggregated["criteria"]["automation_results"]["status"] == "pass"
+    assert "AI 已评审 1 个报告引用" in aggregated["criteria"]["automation_results"]["evidence"]

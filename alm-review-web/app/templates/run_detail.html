@@ -2,11 +2,11 @@
 {% set review_status_labels = {'qualified': '合格', 'unqualified': '不合格', 'needs_manual_review': '需人工复核', 'pass': '通过', 'fail': '失败', 'manual': '需人工复核', 'not_applicable': '不适用', 'completed': '已完成', 'failed': '失败', 'disabled': '已禁用', 'ready': '就绪', 'missing': '缺失', 'invalid_image': '图像损坏·需复核', 'unavailable': '不可用', 'denied': '已拒绝', 'uncertain': '不确定', 'matched': '匹配', 'mismatched': '不匹配', 'not_checked': '未检查', 'budget_exhausted': '配额耗尽·未检查', 'exact': '精确匹配', 'compatible': '兼容匹配', 'not_found': '未找到', 'needs_ai': '需 AI 判断', 'incomplete': '信息不完整'} %}
 {% set decision_labels = {'confirmed_qualified': '人工确认合格', 'confirmed_unqualified': '确认不合格', 'override_qualified': '人工确认合格', 'confirmed_warning_qualified': '确认警告已处理'} %}
 {% set route_labels = {'none': '无', 'image_evidence': '图像证据', 'html_report': 'HTML 报告', 'mixed_evidence': '混合证据', 'file_evidence': '文件证据', 'uncertain': '不确定'} %}
-{% set source_labels = {'deterministic': '确定性规则', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
+{% set source_labels = {'deterministic': '确定性规则', 'evidence-routing': '证据路由与设备抽取', 'alm-text-review': 'ALM 文本评审', 'authoritative': '正式判定'} %}
 {% set path_kind_labels = {'image': '图像', 'html': 'HTML 报告', 'file': '文件', 'folder_or_unknown': '文件夹或未知类型', 'unknown': '未知'} %}
 {% set action_labels = {'validate_path': '校验路径', 'load_images': '读取图像', 'send_to_visual_ai': '发送给视觉 AI', 'parse_html_report': '解析 HTML 报告', 'manual_review': '人工复核', 'review_attachment': '评审附件'} %}
 {% set match_labels = {'equipment_id': '设备 ID', 'serial_number': '序列号', 'model_number': '型号', 'extracted_equipment_id': 'AI 抽取的设备 ID', 'extracted_serial_number': 'AI 抽取的序列号', 'extracted_device_name': 'AI 抽取的设备名称', 'previous_step_equipment': '前序步骤已验证设备', 'ai_disambiguation': 'AI 消歧', 'ai_registry_name': 'AI 台账名称匹配', 'html_report_equipment_id': 'HTML 报告设备 ID'} %}
-{% set skill_labels = {'alm-text-review': 'ALM 文本评审', 'location-consistency': '测试位置一致性评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
+{% set skill_labels = {'evidence-routing': '证据路由与设备抽取', 'alm-text-review': 'ALM 文本评审', 'location-consistency': '测试位置一致性评审', 'image-evidence-review': '图像证据评审', 'html-evidence-review': 'HTML 证据评审', 'equipment-role': '设备角色评审'} %}
 {% set queue_status_labels = {'queued': '排队中', 'running': '执行中', 'completed': '已完成', 'failed': '失败'} %}
 {% set stage_labels = {'routing': '证据路由', 'text_review': '文本评审', 'location_review': '测试位置校验', 'image_review': '图像评审', 'report_review': '报告评审', 'equipment_review': '设备评审', 'aggregation': '结果汇总', 'unknown': '未知阶段'} %}
 {% macro manual_reason(decision, items) %}{% if items %}<ul class="manual-reason-items">{% for item in items %}<li><strong>{{ item.get('step_label', '') }} · {{ item.get('label', '') }}{% if item.get('category_label') %} · {{ item.get('category_label') }}{% endif %}</strong><p>{{ item.get('explanation', '') }}</p>{% if item.get('evidence') %}<small>证据：{{ item.get('evidence') }}</small>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="manual-reason-text">{{ decision.reason }}</p>{% endif %}{% endmacro %}
@@ -177,19 +177,6 @@
       {% endif %}
     {% endfor %}
   </div>
-  {% set agent_shadow = review_pipeline.get('agent_shadow') %}
-  {% if agent_shadow %}
-  <div class="routing-trace">
-    <div class="routing-trace-heading"><strong>Qwen Code 旁路意见</strong><span>仅供人工复核，不改变正式结论</span></div>
-    {% if agent_shadow.get('status') == 'completed' %}
-    <p>步骤 {{ agent_shadow.get('target_step') }} · {{ {'supported': '证据支持', 'gap': '发现缺口', 'uncertain': '证据不足'}.get(agent_shadow.get('assessment'), '待核对') }}：{{ agent_shadow.get('reason') }}</p>
-    {% for check in agent_shadow.get('check_results', []) %}
-    <p>{{ {'text': '文本', 'routing': '证据路由', 'location': '位置', 'image': '图片', 'report': 'HTML 报告', 'equipment': '设备', 'aggregation': '结果对照'}.get(check.get('id', '').split(':')[0], check.get('id')) }} · {{ {'supported': '证据支持', 'gap': '发现缺口', 'uncertain': '待人工核实'}.get(check.get('status'), '待核实') }}{% for citation in check.get('citations', []) %}<br><small>{{ citation.get('source') }}</small>：<q>{{ citation.get('quote') }}</q>{% endfor %}</p>
-    {% endfor %}
-    {% for citation in agent_shadow.get('citations', []) %}<p>步骤 {{ citation.get('step') }} · {{ {'description': '描述', 'expected': 'Expected', 'actual': 'Actual'}.get(citation.get('field'), citation.get('field')) }}：<q>{{ citation.get('quote') }}</q></p>{% endfor %}
-    {% else %}<p>{{ {'not_applicable': '没有适合试点的人工复核步骤', 'unavailable': '代理当前不可用', 'skipped': '案例超出试点范围', 'invalid_output': '代理引用未通过核对'}.get(agent_shadow.get('status'), '代理未完成') }}{% if agent_shadow.get('reason') %}：{{ agent_shadow.get('reason') }}{% endif %}</p>{% endif %}
-  </div>
-  {% endif %}
   {% set routing_steps = review_pipeline.get('stages', {}).get('routing', {}).get('steps', []) %}
   {% if routing_steps %}
   <div class="routing-trace">

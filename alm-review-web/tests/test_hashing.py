@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from app.hashing import review_hash, review_payload, source_hash
+from app.hashing import normalize_table_text, review_hash, review_payload, source_hash
 
 
 def sample_record() -> dict:
@@ -181,3 +181,31 @@ def test_review_payload_does_not_align_zero_or_duplicate_numbering() -> None:
     record["run"]["steps"][0]["actual"] = "0. Setup 1. Done 1. Done again"
 
     assert "numbered_comparison" not in review_payload(record)["steps"][0]
+
+
+def test_normalize_table_text_preserves_2d_markdown_grid_and_table_unc_paths() -> None:
+    record = sample_record()
+    record["run"]["steps"][0]["description"] = (
+        "<p>Compare with limits:</p>"
+        "<table><tr><th>Value</th><th>Col A</th><th>Col B</th></tr>"
+        "<tr><td>Limit</td><td>0.075</td><td>0.375</td></tr></table>"
+    )
+    record["run"]["steps"][0]["expected"] = (
+        "<table><tr><td>Metric</td><td>Col A</td><td>Col B</td></tr>"
+        "<tr><td>Result</td><td></td><td></td></tr></table>"
+    )
+    record["run"]["steps"][0]["actual"] = (
+        "<table><tr><td>Metric</td><td>Path</td></tr>"
+        r"<tr><td>Result</td><td>\\server\share\0. Common Config\report_48276.html</td></tr></table>"
+    )
+
+    payload = review_payload(record)
+    step = payload["steps"][0]
+
+    assert "| Value | Col A | Col B |" in step["description"]
+    assert "| Limit | 0.075 | 0.375 |" in step["description"]
+    assert "| Result |  |  |" in step["expected"]
+    assert step["evidence_profile"]["actual_paths"][0]["raw"] == (
+        r"\\server\share\0. Common Config\report_48276.html"
+    )
+    assert normalize_table_text("<p>No table here</p>") == "No table here"

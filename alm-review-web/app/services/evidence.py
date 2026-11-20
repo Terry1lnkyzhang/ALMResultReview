@@ -11,6 +11,7 @@ _PATH_PATTERNS = (
     re.compile(r'["\'](?P<path>\\\\[^"\']+)["\']'),
     re.compile(r'["\'](?P<path>[A-Za-z]:\\[^"\']+)["\']'),
     re.compile(r'(?m)^[ \t]*(?P<path>\\\\[^\r\n<>"|?*]+)[ \t]*$'),
+    re.compile(r'(?m)\|[ \t]*(?P<path>\\\\[^\r\n<>"|?*]+?)[ \t]*(?=\|)'),
     re.compile(r'''(?m):[ \t]*(?P<path>\\\\[^\r\n<>"'|?*]+)[ \t]*$'''),
     re.compile(
         # ALM may write "refered to\\server\share\folder with spaces" without

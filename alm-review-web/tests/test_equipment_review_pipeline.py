@@ -72,13 +72,11 @@ def semantic_skill_response(request: dict[str, Any]) -> StubResponse | None:
         return None
     skill_input = json.loads(user_content)
     steps = skill_input["steps"]
-    if "ALM Text Review and Evidence Planning" in system_content:
+    if "Evidence Routing and Equipment Extraction" in system_content:
         output = {
-            "assessments": [
+            "decisions": [
                 {
                     "review_step": step["review_step"],
-                    "applicability": "applicable",
-                    "findings": [],
                     "reference_decisions": [
                         {
                             "candidate_id": candidate["candidate_id"],
@@ -99,6 +97,18 @@ def semantic_skill_response(request: dict[str, Any]) -> StubResponse | None:
                         }
                         for candidate in step["reference_candidates"]
                     ],
+                    "extracted_equipment": [],
+                }
+                for step in steps
+            ]
+        }
+    elif "ALM Text Review" in system_content:
+        output = {
+            "assessments": [
+                {
+                    "review_step": step["review_step"],
+                    "applicability": "applicable",
+                    "findings": [],
                     "summary": "Actual supports Expected.",
                 }
                 for step in steps
@@ -880,7 +890,9 @@ def test_html_review_batches_finish_with_one_synthesis_call(monkeypatch) -> None
         assessment_validator(request, assessment)
         return {"status": "completed", "ai_calls": 1}, assessment
 
-    monkeypatch.setattr("app.services.reviews._run_html_review_skill", run_skill)
+    monkeypatch.setattr(
+        "app.services.stage_report_review._run_html_review_skill", run_skill
+    )
 
     traces, assessment = _run_html_review_batches(None, skill_input)  # type: ignore[arg-type]
 
@@ -998,7 +1010,9 @@ def test_invalid_html_evidence_batch_stops_before_final_and_is_manual(monkeypatc
             _manual_html_assessment(request),
         )
 
-    monkeypatch.setattr("app.services.reviews._run_html_review_skill", failed_batch)
+    monkeypatch.setattr(
+        "app.services.stage_report_review._run_html_review_skill", failed_batch
+    )
 
     traces, assessment = _run_html_review_batches(None, skill_input)  # type: ignore[arg-type]
 
@@ -1090,6 +1104,34 @@ def test_html_ai_keeps_actual_name_mismatch_separate_from_release_match() -> Non
             "evidence": [],
         },
     )
+
+
+def test_html_ai_accepts_mismatched_or_uncertain_when_actual_name_fails_without_release() -> None:
+    skill_input = {
+        "steps": [
+            {
+                "review_step": 1,
+                "automation_release": {
+                    "status": "mismatch",
+                    "failure_code": "actual_name_html_mismatch",
+                    "script_name_match": "not_checked",
+                    "selected_release": None,
+                },
+                "reports": [],
+            }
+        ]
+    }
+
+    for consistency in ("uncertain", "mismatched"):
+        _validate_html_assessment(
+            skill_input,
+            {
+                "status": "manual",
+                "release_consistency": consistency,
+                "reviewed_report_ids": [],
+                "evidence": [],
+            },
+        )
 
 
 def test_html_ai_cannot_pass_with_uncertain_release_consistency() -> None:
@@ -1228,13 +1270,15 @@ def test_process_job_exact_match_uses_only_main_ai_and_persists_equipment(
         result = process_job(db, job)
         step_result = json.loads(result.step_results_json)[0]
 
-        assert len(calls) == 1
-        assert "ALM Text Review and Evidence Planning" in (
+        assert len(calls) == 2
+        assert "Evidence Routing and Equipment Extraction" in (
             calls[0]["messages"][0]["content"]
         )
+        assert "ALM Text Review" in calls[1]["messages"][0]["content"]
         assert result.verdict == "qualified"
         pipeline = json.loads(result.pipeline_json)
-        assert pipeline["total_ai_calls"] == 1
+        assert pipeline["total_ai_calls"] == 2
+        assert pipeline["stages"]["routing"]["ai_calls"] == 1
         assert pipeline["stages"]["text_review"]["ai_calls"] == 1
         assert pipeline["stages"]["equipment_review"]["ai_calls"] == 0
         assert step_result["equipment"]["status"] == "pass"
@@ -1288,12 +1332,14 @@ def test_process_job_reuses_clear_first_pass_equipment_role(monkeypatch) -> None
         result = process_job(db, job)
         step_result = json.loads(result.step_results_json)[0]
 
-        assert len(calls) == 1
-        assert "ALM Text Review and Evidence Planning" in (
+        assert len(calls) == 2
+        assert "Evidence Routing and Equipment Extraction" in (
             calls[0]["messages"][0]["content"]
         )
+        assert "ALM Text Review" in calls[1]["messages"][0]["content"]
         pipeline = json.loads(result.pipeline_json)
-        assert pipeline["total_ai_calls"] == 1
+        assert pipeline["total_ai_calls"] == 2
+        assert pipeline["stages"]["routing"]["ai_calls"] == 1
         assert pipeline["stages"]["equipment_review"]["ai_calls"] == 0
         assert pipeline["stages"]["equipment_review"][
             "first_pass_resolved_steps"
@@ -1324,16 +1370,14 @@ def test_process_job_uses_equipment_skill_when_first_pass_is_uncertain(
             request = kwargs["json"]
             calls.append(request)
             system_content = request["messages"][0]["content"]
-            if "ALM Text Review and Evidence Planning" in system_content:
+            if "Evidence Routing and Equipment Extraction" in system_content:
                 skill_input = json.loads(request["messages"][1]["content"])
                 return StubResponse(
                     json.dumps(
                         {
-                            "assessments": [
+                            "decisions": [
                                 {
                                     "review_step": step["review_step"],
-                                    "applicability": "applicable",
-                                    "findings": [],
                                     "reference_decisions": [
                                         {
                                             "candidate_id": candidate[
@@ -1347,6 +1391,23 @@ def test_process_job_uses_equipment_skill_when_first_pass_is_uncertain(
                                             "reference_candidates"
                                         ]
                                     ],
+                                    "extracted_equipment": [],
+                                }
+                                for step in skill_input["steps"]
+                            ]
+                        }
+                    )
+                )
+            if "ALM Text Review" in system_content:
+                skill_input = json.loads(request["messages"][1]["content"])
+                return StubResponse(
+                    json.dumps(
+                        {
+                            "assessments": [
+                                {
+                                    "review_step": step["review_step"],
+                                    "applicability": "applicable",
+                                    "findings": [],
                                     "summary": "Actual supports Expected.",
                                 }
                                 for step in skill_input["steps"]
@@ -1377,9 +1438,9 @@ def test_process_job_uses_equipment_skill_when_first_pass_is_uncertain(
         result = process_job(db, job)
         pipeline = json.loads(result.pipeline_json)
 
-        assert len(calls) == 2
-        assert "Equipment Role Review" in calls[1]["messages"][0]["content"]
-        assert pipeline["total_ai_calls"] == 2
+        assert len(calls) == 3
+        assert "Equipment Role Review" in calls[2]["messages"][0]["content"]
+        assert pipeline["total_ai_calls"] == 3
         assert pipeline["stages"]["equipment_review"]["ai_calls"] == 1
         assert pipeline["stages"]["equipment_review"][
             "first_pass_resolved_steps"
@@ -1442,7 +1503,7 @@ def test_process_job_sends_explicit_html_report_to_ai_review(monkeypatch) -> Non
         result = process_job(db, job)
         pipeline = json.loads(result.pipeline_json)
 
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert result.verdict == "qualified"
         assert pipeline["plan"]["report_steps"] == [1]
         report_stage = pipeline["stages"]["report_review"]
@@ -1527,13 +1588,11 @@ def test_process_job_uses_html_phantom_code_for_equipment_identity(
             system_content = request["messages"][0]["content"]
             skill_input = json.loads(request["messages"][1]["content"])
             step = skill_input["steps"][0]
-            if "ALM Text Review and Evidence Planning" in system_content:
+            if "Evidence Routing and Equipment Extraction" in system_content:
                 output = {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": [
                                 {
                                     "candidate_id": candidate["candidate_id"],
@@ -1556,6 +1615,16 @@ def test_process_job_uses_html_phantom_code_for_equipment_identity(
                                     "source_text": "Use the adult body phantom",
                                 }
                             ],
+                        }
+                    ]
+                }
+            elif "ALM Text Review" in system_content:
+                output = {
+                    "assessments": [
+                        {
+                            "review_step": 1,
+                            "applicability": "applicable",
+                            "findings": [],
                             "summary": "The report carries the execution result.",
                         }
                     ]
@@ -1709,7 +1778,9 @@ def test_process_job_supplies_release_record_to_html_review(monkeypatch) -> None
             assert response is not None
             return response
 
-        monkeypatch.setattr("app.services.reviews.load_automation_releases", load_releases)
+        monkeypatch.setattr(
+            "app.services.review_jobs.load_automation_releases", load_releases
+        )
         monkeypatch.setattr("app.services.reviews.httpx.post", post)
         monkeypatch.setattr(
             "app.services.reviews.HtmlEvidenceResolver.resolve",
@@ -1803,7 +1874,7 @@ def test_process_job_marks_ai_release_script_mismatch_distinctly(monkeypatch) ->
             return StubResponse(json.dumps(output))
 
         monkeypatch.setattr(
-            "app.services.reviews.load_automation_releases",
+            "app.services.review_jobs.load_automation_releases",
             lambda *_args: releases,
         )
         monkeypatch.setattr("app.services.reviews.httpx.post", post)
@@ -1828,7 +1899,7 @@ def test_process_job_marks_ai_release_script_mismatch_distinctly(monkeypatch) ->
         assert release_result["failure_code"] == "release_script_mismatch"
 
 
-def test_process_job_uses_first_pass_evidence_routing_without_shadow_call(
+def test_process_job_uses_dedicated_evidence_routing_skill(
     monkeypatch,
 ) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -1870,15 +1941,17 @@ def test_process_job_uses_first_pass_evidence_routing_without_shadow_call(
         result = process_job(db, job)
         pipeline = json.loads(result.pipeline_json)
 
-        assert len(calls) == 1
-        assert pipeline["total_ai_calls"] == 1
-        assert pipeline["stages"]["routing"]["ai_calls"] == 0
-        assert "skill_shadow" not in pipeline["stages"]["routing"]
-        assert pipeline["stages"]["routing"]["decision_skill"]["skill_id"] == (
-            "alm-text-review"
+        assert len(calls) == 2
+        assert pipeline["total_ai_calls"] == 2
+        assert pipeline["stages"]["routing"]["ai_calls"] == 1
+        assert pipeline["stages"]["routing"]["skills"][0]["skill_id"] == (
+            "evidence-routing"
         )
         assert pipeline["stages"]["routing"]["steps"][0]["intent"] == (
             "image_evidence"
+        )
+        assert pipeline["stages"]["routing"]["steps"][0]["decision_source"] == (
+            "evidence-routing"
         )
 
 
@@ -1929,7 +2002,9 @@ def test_disabled_equipment_review_skips_disambiguation_and_marks_not_applicable
         assert criteria["equipment_traceability"]["status"] == "not_applicable"
 
 
-def test_disabling_both_specialist_controls_runs_text_review_only(monkeypatch) -> None:
+def test_disabling_both_specialist_controls_runs_routing_and_text_review_only(
+    monkeypatch,
+) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -1940,7 +2015,7 @@ def test_disabling_both_specialist_controls_runs_text_review_only(monkeypatch) -
             EvidenceConfig(
                 workspace_id=workspace.id,
                 allowed_network_root=r"\\server\approved",
-            external_evidence_review_enabled=False,
+                external_evidence_review_enabled=False,
             )
         )
         db.commit()
@@ -1965,8 +2040,35 @@ def test_disabling_both_specialist_controls_runs_text_review_only(monkeypatch) -
             request = kwargs["json"]
             calls.append(request)
             system_content = request["messages"][0]["content"]
-            assert "ALM Text Review and Evidence Planning" in system_content
             skill_input = json.loads(request["messages"][1]["content"])
+            if "Evidence Routing and Equipment Extraction" in system_content:
+                return StubResponse(
+                    json.dumps(
+                        {
+                            "decisions": [
+                                {
+                                    "review_step": step["review_step"],
+                                    "reference_decisions": [
+                                        {
+                                            "candidate_id": candidate["candidate_id"],
+                                            "role": (
+                                                "uncertain"
+                                                if candidate["type"] == "equipment"
+                                                else "result_evidence"
+                                            ),
+                                            "requires_check": True,
+                                            "reason": "The candidate may require specialist review.",
+                                        }
+                                        for candidate in step["reference_candidates"]
+                                    ],
+                                    "extracted_equipment": [],
+                                }
+                                for step in skill_input["steps"]
+                            ]
+                        }
+                    )
+                )
+            assert "ALM Text Review" in system_content
             return StubResponse(
                 json.dumps(
                     {
@@ -1975,19 +2077,6 @@ def test_disabling_both_specialist_controls_runs_text_review_only(monkeypatch) -
                                 "review_step": step["review_step"],
                                 "applicability": "applicable",
                                 "findings": [],
-                                "reference_decisions": [
-                                    {
-                                        "candidate_id": candidate["candidate_id"],
-                                        "role": (
-                                            "uncertain"
-                                            if candidate["type"] == "equipment"
-                                            else "result_evidence"
-                                        ),
-                                        "requires_check": True,
-                                        "reason": "The candidate may require specialist review.",
-                                    }
-                                    for candidate in step["reference_candidates"]
-                                ],
                                 "summary": "The ALM text supports Expected.",
                             }
                             for step in skill_input["steps"]
@@ -2010,16 +2099,16 @@ def test_disabling_both_specialist_controls_runs_text_review_only(monkeypatch) -
         pipeline = json.loads(result.pipeline_json)
         criteria = json.loads(result.criteria_json)
 
-        assert len(calls) == 1
+        assert len(calls) == 2
         assert pipeline["external_evidence_review_enabled"] is False
         assert pipeline["equipment_review_enabled"] is False
-        assert pipeline["total_ai_calls"] == 1
+        assert pipeline["total_ai_calls"] == 2
         assert pipeline["plan"] == {
             "text_steps": [1],
             "report_steps": [1],
             "equipment_steps": [],
         }
-        assert pipeline["stages"]["routing"]["ai_calls"] == 0
+        assert pipeline["stages"]["routing"]["ai_calls"] == 1
         assert pipeline["stages"]["routing"]["steps"][0]["intent"] == "html_report"
         assert pipeline["stages"]["image_review"]["status"] == "disabled"
         assert pipeline["stages"]["report_review"]["status"] == "disabled"

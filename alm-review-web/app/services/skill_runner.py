@@ -7,18 +7,24 @@ import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
+
+from app.services.skill_schemas import (
+    OUTPUT_ID_CONSTRAINTS,
+    REASON_CHAR_LIMIT,
+    SKILL_MODELS,
+    build_strict_json_schema,
+    grammar_schema as _grammar_schema,
+)
 
 _SKILLS_ROOT = Path(__file__).resolve().parents[1] / "review_skills"
-# Kept generous on purpose: the application already clips these to 200 characters,
-# so a verbose model must not fail the whole review job.
-REASON_CHAR_LIMIT = 1000
 MAX_OUTPUT_REPAIR_ATTEMPTS = 2
 _RETRYABLE_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-# Qwen's official sampling presets; top_k, min_p and repetition_penalty are vLLM/llama.cpp extensions.
+# Sampling presets: greedy deterministic decoding (`temperature=0.0, presence_penalty=0.0`)
+# when thinking is off avoids cross-step presence-penalty drift in multi-step JSON batches.
 _SAMPLING_PARAMS: dict[bool, dict[str, float | int]] = {
     True: {
         "temperature": 1.0,
@@ -29,16 +35,14 @@ _SAMPLING_PARAMS: dict[bool, dict[str, float | int]] = {
         "repetition_penalty": 1.0,
     },
     False: {
-        "temperature": 0.7,
-        "top_p": 0.8,
-        "top_k": 20,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": -1,
         "min_p": 0.0,
-        "presence_penalty": 1.5,
+        "presence_penalty": 0.0,
         "repetition_penalty": 1.0,
     },
 }
-# The vLLM structured-output grammar rejects these JSON Schema keywords.
-_GRAMMAR_UNSUPPORTED_KEYS = frozenset({"uniqueItems"})
 _REPAIR_INSTRUCTION = (
     "Your previous response was rejected by the output validator:\n{error}\n\n"
     "Return the corrected JSON object only. Keep every item you already assessed, "
@@ -56,386 +60,6 @@ class SkillFailure(ValueError):
 
 class ThinkingBudgetExhausted(SkillFailure):
     pass
-
-
-class ReviewTextStep(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    review_step: int = Field(ge=1)
-    description: str
-    expected: str
-    actual: str
-
-
-class NumberedComparison(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    number: int = Field(ge=1)
-    expected: str
-    actual: str
-
-
-class ReferenceCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    candidate_id: str = Field(min_length=1)
-    type: Literal["equipment", "image", "html_report", "file", "folder_or_unknown"]
-    value: str = Field(min_length=1)
-    source_field: Literal["description", "expected", "actual", "attachment"]
-    detection_source: Literal[
-        "path_extension",
-        "path_without_extension",
-        "equipment_registry_match",
-        "equipment_identifier",
-        "alm_attachment",
-    ]
-
-
-class AlmTextReviewStep(ReviewTextStep):
-    alm_step_status: str = Field(min_length=1)
-    actual_format: dict[str, Any]
-    numbered_comparison: list[NumberedComparison] = Field(default_factory=list)
-    reference_candidates: list[ReferenceCandidate] = Field(default_factory=list)
-
-
-class AlmTextReviewInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project: str = ""
-    alm_run_status: Literal["Passed", "Failed"]
-    execution_location_config: TestLocationConfigInput | None = None
-    steps: list[AlmTextReviewStep] = Field(min_length=1)
-
-
-class AlmTextFinding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    code: Literal[
-        "actual_missing",
-        "actual_insufficient",
-        "expected_actual_mismatch",
-        "language_quality",
-        "evidence_reference_missing",
-        "record_documentation_gap",
-    ]
-    severity: Literal["warning", "fail", "manual"]
-    basis: Literal["direct_step_text", "reference_metadata_inference"]
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class ReferenceDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    candidate_id: str = Field(min_length=1)
-    role: Literal[
-        "test_equipment",
-        "dut_or_other",
-        "result_evidence",
-        "reference_document",
-        "result_evidence_location",
-        "unrelated",
-        "uncertain",
-    ]
-    requires_check: bool
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class ExtractedEquipment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    device_name: str = Field(default="", max_length=512)
-    equipment_id: str = Field(default="", max_length=128)
-    serial_number: str = Field(default="", max_length=255)
-    reported_calibration_due_date: str = Field(default="", max_length=32)
-    source_text: str = Field(min_length=1, max_length=512)
-
-
-class AlmTextAssessment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    review_step: int = Field(ge=1)
-    applicability: Literal["applicable", "not_applicable", "manual"]
-    findings: list[AlmTextFinding]
-    reference_decisions: list[ReferenceDecision]
-    extracted_equipment: list[ExtractedEquipment] = Field(
-        default_factory=list, max_length=12
-    )
-    summary: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class AlmTextReviewOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    assessments: list[AlmTextAssessment]
-
-
-class ImageMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    media_id: str = Field(min_length=1)
-    source_path: str = Field(min_length=1)
-    relative_name: str = Field(min_length=1)
-    mime_type: str = Field(pattern=r"^image/")
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    width: int | None = Field(default=None, ge=1)
-    height: int | None = Field(default=None, ge=1)
-
-
-class ImageReviewStep(ReviewTextStep):
-    alm_step_status: str = Field(min_length=1)
-    images: list[ImageMetadata] = Field(min_length=1)
-
-
-class ImageReviewInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    alm_run_status: Literal["Passed", "Failed"]
-    steps: list[ImageReviewStep] = Field(min_length=1)
-
-
-class ImageAssessment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    review_step: int = Field(ge=1)
-    status: Literal["pass", "fail", "manual"]
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-    observed_media_ids: list[str] = Field(min_length=1)
-
-
-class ImageReviewOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    assessments: list[ImageAssessment]
-
-
-class HtmlBlock(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    block_id: str = Field(min_length=1)
-    text: str = Field(min_length=1)
-
-
-class HtmlReport(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    report_id: str = Field(min_length=1)
-    source_path: str = Field(min_length=1)
-    filename: str = Field(min_length=1)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    content_truncated: bool
-    omitted_block_count: int = Field(default=0, ge=0)
-    blocks: list[HtmlBlock]
-
-
-class AutomationReleaseRecordInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    release_id: int
-    testcase_id: str
-    project_name: str
-    script_name: str
-    file_path: str
-    baseline_name: str
-    release_time: str
-    release_version: str
-    version_number: str
-    release_revision: int | None
-    release_version_format: str
-    document_number: str
-    document_revision: str
-    report_link: str
-
-
-class AutomationReleaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal[
-        "disabled",
-        "matched",
-        "needs_ai",
-        "mismatch",
-        "not_found",
-        "incomplete",
-        "unavailable",
-    ]
-    project_name: str
-    testcase_id: str
-    candidate_count: int = Field(ge=0)
-    claimed_script_name: str
-    claimed_script_testcase_id: str
-    html_script_names: list[str]
-    html_path_testcase_ids: list[str]
-    html_path_testcase_match: Literal["not_checked", "exact", "mismatch"]
-    actual_name_match: Literal[
-        "not_checked", "exact", "mismatch", "missing"
-    ]
-    failure_code: Literal[
-        "",
-        "actual_testcase_id_missing",
-        "actual_testcase_id_mismatch",
-        "html_script_missing",
-        "html_path_testcase_id_mismatch",
-        "actual_name_missing",
-        "actual_name_html_mismatch",
-        "release_not_found",
-        "release_testcase_id_mismatch",
-        "document_mismatch",
-        "document_incomplete",
-    ]
-    claimed_document_number: str
-    claimed_document_revision: str
-    selected_release: AutomationReleaseRecordInput | None
-    script_name_match: Literal[
-        "not_checked", "exact", "compatible", "mismatch", "uncertain", "not_found"
-    ]
-    document_match: Literal[
-        "not_checked", "exact", "mismatch", "uncertain", "not_found"
-    ]
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class HtmlEvidenceCitation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    report_id: str = Field(min_length=1)
-    block_id: str = Field(min_length=1)
-    quote: str = Field(min_length=1, max_length=2000)
-    supports: list[Literal["description", "expected", "actual", "result"]] = Field(
-        min_length=1
-    )
-
-
-class HtmlAssessment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    review_step: int = Field(ge=1)
-    status: Literal["pass", "fail", "manual"]
-    description_coverage: Literal[
-        "supported", "contradicted", "not_found", "uncertain"
-    ]
-    expected_coverage: Literal[
-        "supported", "contradicted", "not_found", "uncertain"
-    ]
-    actual_coverage: Literal[
-        "supported", "contradicted", "not_found", "uncertain"
-    ]
-    result_consistency: Literal["consistent", "inconsistent", "uncertain"]
-    release_consistency: Literal[
-        "matched", "mismatched", "uncertain", "not_checked"
-    ]
-    reviewed_report_ids: list[str] = Field(min_length=1)
-    evidence: list[HtmlEvidenceCitation]
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class HtmlReviewStep(ReviewTextStep):
-    alm_step_status: str = Field(min_length=1)
-    automation_release: AutomationReleaseInput
-    reports: list[HtmlReport] = Field(min_length=1)
-    batch_observations: list[HtmlAssessment] = Field(default_factory=list)
-
-
-class HtmlReviewInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    alm_run_status: Literal["Passed", "Failed"]
-    review_mode: Literal["evidence_batch", "final"]
-    batch_index: int = Field(ge=1)
-    batch_count: int = Field(ge=1)
-    steps: list[HtmlReviewStep] = Field(min_length=1)
-
-
-class HtmlReviewOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    assessments: list[HtmlAssessment]
-
-
-class EquipmentCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    equipment_id: str = Field(min_length=1)
-    description: str
-    model_number: str
-    serial_number: str
-
-
-class EquipmentRoleStep(ReviewTextStep):
-    reported_identifiers: list[str]
-    previously_matched_equipment_ids: list[str]
-    candidate_equipment: list[EquipmentCandidate]
-    extracted_device_names: list[str] = Field(default_factory=list)
-
-
-class EquipmentRoleInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    steps: list[EquipmentRoleStep] = Field(min_length=1)
-    registry_equipment_names: list[str] = Field(default_factory=list)
-
-
-class EquipmentRoleDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    review_step: int = Field(ge=1)
-    role: Literal["controlled_equipment", "dut_or_other", "uncertain"]
-    required: bool
-    selected_equipment_ids: list[str]
-    selected_equipment_names: list[str] = Field(default_factory=list)
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class EquipmentRoleOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    decisions: list[EquipmentRoleDecision]
-
-
-class TestLocationConfigInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    item: str = Field(min_length=1)
-    product: str
-    dms_version: str
-    dms_coverage: str
-    couch: str
-    computer: str
-
-
-class LocationConsistencyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    alm_location: str = Field(min_length=1)
-    folder_path: str = Field(min_length=1)
-    parent_name: str = Field(min_length=1)
-    location_config: TestLocationConfigInput
-
-
-class LocationComparison(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    field: Literal["product", "dms_version", "dms_coverage", "couch", "computer"]
-    parent_text: str = Field(min_length=1, max_length=512)
-    status: Literal["matched", "mismatched", "uncertain"]
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-class LocationConsistencyOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    has_configuration_claim: bool
-    status: Literal["pass", "not_applicable", "fail", "uncertain"]
-    comparisons: list[LocationComparison] = Field(max_length=5)
-    reason: str = Field(min_length=1, max_length=REASON_CHAR_LIMIT)
-
-
-_SKILL_MODELS: dict[str, tuple[type[BaseModel], type[BaseModel]]] = {
-    "alm-text-review": (AlmTextReviewInput, AlmTextReviewOutput),
-    "image-evidence-review": (ImageReviewInput, ImageReviewOutput),
-    "html-evidence-review": (HtmlReviewInput, HtmlReviewOutput),
-    "equipment-role": (EquipmentRoleInput, EquipmentRoleOutput),
-    "location-consistency": (LocationConsistencyInput, LocationConsistencyOutput),
-}
 
 
 @dataclass(frozen=True)
@@ -482,204 +106,10 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _grammar_schema(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _grammar_schema(item)
-            for key, item in value.items()
-            if key not in _GRAMMAR_UNSUPPORTED_KEYS
-        }
-    if isinstance(value, list):
-        return [_grammar_schema(item) for item in value]
-    return value
-
-
-def _with_properties(schema: dict[str, Any], **properties: Any) -> dict[str, Any]:
-    return {**schema, "properties": {**schema["properties"], **properties}}
-
-
-def _one_of(*values: Any) -> dict[str, Any]:
-    return {"enum": list(dict.fromkeys(values))}
-
-
-def _exact_array(
-    schema: dict[str, Any], items: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """One item per entry, in order: nothing omitted, repeated or invented."""
-    base = {
-        key: value
-        for key, value in schema.items()
-        if key not in {"items", "minItems", "maxItems"}
-    }
-    return {
-        **base,
-        "prefixItems": items,
-        "items": False,
-        "minItems": len(items),
-        "maxItems": len(items),
-    }
-
-
-def _choice_array(schema: dict[str, Any], values: list[str]) -> dict[str, Any]:
-    if not values:
-        return {**schema, "maxItems": 0}
-    return {**schema, "items": {**schema["items"], **_one_of(*values)}}
-
-
-def _text_review_ids(
-    schema: dict[str, Any], data: dict[str, Any]
-) -> dict[str, Any]:
-    assessments = schema["properties"]["assessments"]
-    item = assessments["items"]
-    decisions = item["properties"]["reference_decisions"]
-    return _with_properties(
-        schema,
-        assessments=_exact_array(
-            assessments,
-            [
-                _with_properties(
-                    item,
-                    review_step=_one_of(step["review_step"]),
-                    reference_decisions=_exact_array(
-                        decisions,
-                        [
-                            _with_properties(
-                                decisions["items"],
-                                candidate_id=_one_of(candidate["candidate_id"]),
-                            )
-                            for candidate in step["reference_candidates"]
-                        ],
-                    ),
-                )
-                for step in data["steps"]
-            ],
-        ),
-    )
-
-
-def _image_review_ids(
-    schema: dict[str, Any], data: dict[str, Any]
-) -> dict[str, Any]:
-    assessments = schema["properties"]["assessments"]
-    item = assessments["items"]
-    observed = item["properties"]["observed_media_ids"]
-    return _with_properties(
-        schema,
-        assessments=_exact_array(
-            assessments,
-            [
-                _with_properties(
-                    item,
-                    review_step=_one_of(step["review_step"]),
-                    observed_media_ids=_exact_array(
-                        observed,
-                        [_one_of(image["media_id"]) for image in step["images"]],
-                    ),
-                )
-                for step in data["steps"]
-            ],
-        ),
-    )
-
-
-def _html_review_ids(
-    schema: dict[str, Any], data: dict[str, Any]
-) -> dict[str, Any]:
-    assessments = schema["properties"]["assessments"]
-    item = assessments["items"]
-    evidence = item["properties"]["evidence"]
-    narrowed_steps = []
-    for step in data["steps"]:
-        # Final synthesis may only reuse citations already verified in a batch.
-        pairs = (
-            [
-                (citation["report_id"], citation["block_id"])
-                for observation in step["batch_observations"]
-                for citation in observation["evidence"]
-            ]
-            if step["batch_observations"]
-            else [
-                (report["report_id"], block["block_id"])
-                for report in step["reports"]
-                for block in report["blocks"]
-            ]
-        )
-        blocks_by_report: dict[str, list[str]] = {}
-        for report_id, block_id in pairs:
-            blocks_by_report.setdefault(report_id, []).append(block_id)
-        citations = [
-            _with_properties(
-                evidence["items"],
-                report_id=_one_of(report_id),
-                block_id=_one_of(*block_ids),
-            )
-            for report_id, block_ids in blocks_by_report.items()
-        ]
-        narrowed_steps.append(
-            _with_properties(
-                item,
-                review_step=_one_of(step["review_step"]),
-                reviewed_report_ids=_exact_array(
-                    item["properties"]["reviewed_report_ids"],
-                    [_one_of(report["report_id"]) for report in step["reports"]],
-                ),
-                evidence=(
-                    {**evidence, "items": {"anyOf": citations}}
-                    if citations
-                    else {**evidence, "maxItems": 0}
-                ),
-            )
-        )
-    return _with_properties(
-        schema, assessments=_exact_array(assessments, narrowed_steps)
-    )
-
-
-def _equipment_role_ids(
-    schema: dict[str, Any], data: dict[str, Any]
-) -> dict[str, Any]:
-    decisions = schema["properties"]["decisions"]
-    item = decisions["items"]
-    return _with_properties(
-        schema,
-        decisions=_exact_array(
-            decisions,
-            [
-                _with_properties(
-                    item,
-                    review_step=_one_of(step["review_step"]),
-                    selected_equipment_ids=_choice_array(
-                        item["properties"]["selected_equipment_ids"],
-                        [
-                            candidate["equipment_id"]
-                            for candidate in step["candidate_equipment"]
-                        ],
-                    ),
-                    selected_equipment_names=_choice_array(
-                        item["properties"]["selected_equipment_names"],
-                        data["registry_equipment_names"],
-                    ),
-                )
-                for step in data["steps"]
-            ],
-        ),
-    )
-
-
-_OUTPUT_ID_CONSTRAINTS: dict[
-    str, Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
-] = {
-    "alm-text-review": _text_review_ids,
-    "image-evidence-review": _image_review_ids,
-    "html-evidence-review": _html_review_ids,
-    "equipment-role": _equipment_role_ids,
-}
-
-
 def _request_output_schema(
     definition: SkillDefinition, validated_input: dict[str, Any]
 ) -> dict[str, Any]:
-    narrow = _OUTPUT_ID_CONSTRAINTS.get(definition.skill_id)
+    narrow = OUTPUT_ID_CONSTRAINTS.get(definition.skill_id)
     schema = (
         narrow(definition.output_schema, validated_input)
         if narrow
@@ -801,14 +231,12 @@ def skill_manifest_metadata(skill_id: str) -> dict[str, Any]:
 
 
 def load_skill(skill_id: str) -> SkillDefinition:
-    if skill_id not in discover_skills() or skill_id not in _SKILL_MODELS:
+    if skill_id not in discover_skills() or skill_id not in SKILL_MODELS:
         raise ValueError(f"Unsupported review Skill: {skill_id}")
     skill_directory = _SKILLS_ROOT / skill_id
     paths = {
         "manifest": skill_directory / "skill.toml",
         "instructions": skill_directory / "instructions.md",
-        "input_schema": skill_directory / "input.schema.json",
-        "output_schema": skill_directory / "output.schema.json",
         "examples": skill_directory / "examples.json",
     }
     manifest = tomllib.loads(paths["manifest"].read_text(encoding="utf-8"))
@@ -826,15 +254,21 @@ def load_skill(skill_id: str) -> SkillDefinition:
     if not metadata.get("enabled", False):
         raise ValueError(f"Skill {skill_id} is disabled in its manifest.")
 
+    input_model, output_model = SKILL_MODELS[skill_id]
+    input_schema = build_strict_json_schema(input_model)
+    output_schema = build_strict_json_schema(
+        output_model,
+        require_all_properties=True,
+    )
     digest = hashlib.sha256()
     for name, path in paths.items():
         digest.update(name.encode("utf-8"))
         digest.update(path.read_bytes())
-    input_schema = json.loads(paths["input_schema"].read_text(encoding="utf-8"))
-    output_schema = json.loads(paths["output_schema"].read_text(encoding="utf-8"))
+    digest.update(b"input_schema")
+    digest.update(_canonical_hash(input_schema).encode("utf-8"))
+    digest.update(b"output_schema")
+    digest.update(_canonical_hash(output_schema).encode("utf-8"))
     examples = json.loads(paths["examples"].read_text(encoding="utf-8"))
-    if not isinstance(input_schema, dict) or not isinstance(output_schema, dict):
-        raise ValueError(f"Skill {skill_id} schemas must be JSON objects.")
     if not isinstance(examples, list):
         raise ValueError(f"Skill {skill_id} examples must be a JSON array.")
     required_capabilities = _string_tuple(
@@ -849,7 +283,7 @@ def load_skill(skill_id: str) -> SkillDefinition:
     declared_capabilities = set(required_capabilities) | set(optional_capabilities)
     if declared_capabilities & set(forbidden_capabilities):
         raise ValueError(f"Skill {skill_id} declares a forbidden capability.")
-    return SkillDefinition(
+    definition = SkillDefinition(
         skill_id=skill_id,
         name=str(metadata.get("name", skill_id)),
         version=str(metadata["version"]),
@@ -870,6 +304,21 @@ def load_skill(skill_id: str) -> SkillDefinition:
         optional_capabilities=optional_capabilities,
         forbidden_capabilities=forbidden_capabilities,
     )
+    for index, example in enumerate(examples, start=1):
+        if not isinstance(example, dict) or set(example.keys()) != {"input", "output"}:
+            raise ValueError(
+                f"Skill {skill_id} example #{index} must contain exact keys 'input' and 'output'."
+            )
+        validated_example_input = input_model.model_validate(
+            example["input"]
+        ).model_dump(mode="json")
+        _validated_output(
+            definition,
+            output_model,
+            validated_example_input,
+            json.dumps(example["output"], ensure_ascii=False),
+        )
+    return definition
 
 
 def skill_policy_identity(skill_id: str) -> dict[str, str]:
@@ -918,7 +367,7 @@ class SkillRunner:
         }
         try:
             definition = load_skill(skill_id)
-            input_model, output_model = _SKILL_MODELS[skill_id]
+            input_model, output_model = SKILL_MODELS[skill_id]
             required = set(definition.required_capabilities)
             optional = set(definition.optional_capabilities)
             forbidden = set(definition.forbidden_capabilities)

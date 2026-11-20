@@ -1,26 +1,99 @@
 [
   {
-    "input": {"review_step": 1, "expected": "The report shows Passed.", "images": [{"media_id": "step-1-image-1", "relative_name": "Step1.png"}]},
-    "output": {"review_step": 1, "status": "pass", "reason": "提供的图像清楚显示了 Expected 所要求的 Passed 结果。", "observed_media_ids": ["step-1-image-1"]}
-  },
-  {
-    "input": {"review_step": 2, "expected": "The value is visible.", "images": [{"media_id": "step-2-image-1", "relative_name": "Step2.png"}]},
-    "output": {"review_step": 2, "status": "manual", "reason": "提供的图像中无法清楚读取相关数值。", "observed_media_ids": ["step-2-image-1"]}
+    "input": {
+      "alm_run_status": "Passed",
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Passed",
+          "description": "Verify status indicator.",
+          "expected": "The screen displays Passed.",
+          "actual": "Status displayed Passed. See Step1.png.",
+          "images": [
+            {
+              "media_id": "step-1-image-1",
+              "source_path": "\\\\server\\images\\Step1.png",
+              "relative_name": "Step1.png",
+              "mime_type": "image/png",
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "width": 1280,
+              "height": 720
+            }
+          ],
+          "referenced_steps": []
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "Read numeric parameter on screen.",
+          "expected": "The value is visible and equals 5.0.",
+          "actual": "Value was 5.0. See Step2.png.",
+          "images": [
+            {
+              "media_id": "step-2-image-1",
+              "source_path": "\\\\server\\images\\Step2.png",
+              "relative_name": "Step2.png",
+              "mime_type": "image/png",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+              "width": 640,
+              "height": 480
+            }
+          ],
+          "referenced_steps": []
+        }
+      ]
+    },
+    "output": {
+      "assessments": [
+        {
+          "review_step": 1,
+          "status": "pass",
+          "reason": "提供的图像清楚显示了 Expected 所要求的 Passed 结果。",
+          "observed_media_ids": ["step-1-image-1"]
+        },
+        {
+          "review_step": 2,
+          "status": "manual",
+          "reason": "提供的图像分辨率不足，无法清楚读取目标数值。",
+          "observed_media_ids": ["step-2-image-1"]
+        }
+      ]
+    }
   },
   {
     "input": {
       "alm_run_status": "Failed",
-      "review_step": 3,
-      "alm_step_status": "Failed",
-      "expected": "Startup time shall be no more than 10 seconds.",
-      "actual": "Startup took 14.2 seconds.",
-      "images": [{"media_id": "step-3-image-1", "relative_name": "Step3.png"}]
+      "steps": [
+        {
+          "review_step": 3,
+          "alm_step_status": "Failed",
+          "description": "Measure startup duration.",
+          "expected": "Startup time shall be no more than 10 seconds.",
+          "actual": "Startup took 14.2 seconds.",
+          "images": [
+            {
+              "media_id": "step-3-image-1",
+              "source_path": "\\\\server\\images\\Step3.png",
+              "relative_name": "Step3.png",
+              "mime_type": "image/png",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+              "width": 1280,
+              "height": 720
+            }
+          ],
+          "referenced_steps": []
+        }
+      ]
     },
     "output": {
-      "review_step": 3,
-      "status": "pass",
-      "reason": "图像显示启动时间为 14.2 秒，支持 Actual 记录的超限结果以及可信的 Failed 状态。",
-      "observed_media_ids": ["step-3-image-1"]
+      "assessments": [
+        {
+          "review_step": 3,
+          "status": "pass",
+          "reason": "图像显示启动时间为 14.2 秒，支持 Actual 记录的超限结果以及可信的 Failed 状态。",
+          "observed_media_ids": ["step-3-image-1"]
+        }
+      ]
     }
   }
 ]

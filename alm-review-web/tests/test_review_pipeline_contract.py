@@ -11,7 +11,6 @@ from app.models import (
     AiConfig,
     AlmRun,
     EvidenceConfig,
-    PromptVersion,
     ReviewJob,
     RunRevision,
 )
@@ -19,13 +18,13 @@ from app.models import TestLocationIdentity as LocationIdentity
 from app.models import TestLocationVersion as LocationVersion
 from app.services.image_evidence import ImageEvidenceResult, ResolvedImage
 from app.services.location_review import assess_location_history
+from app.services.review_jobs import process_job
 from app.services.review_pipeline import (
     STAGE_GATES,
     STAGE_ORDER,
     STAGE_SKILLS,
     build_pipeline_trace,
 )
-from app.services.reviews import process_job
 from app.services.skill_runner import discover_skills, load_skill
 from app.services.test_locations import TEST_LOCATION_TABLE
 from app.services.workspaces import resolve_workspace
@@ -46,6 +45,7 @@ IMAGE_PATH = ALLOWED_ROOT + r"\case\Step1.png"
 SKILL_TITLES = {
     skill_id: load_skill(skill_id).instructions.splitlines()[0].lstrip("# ").strip()
     for skill_id in (
+        "evidence-routing",
         "alm-text-review",
         "location-consistency",
         "image-evidence-review",
@@ -174,14 +174,12 @@ def skill_response(request: dict[str, Any]) -> StubResponse:
             }
         )
     steps = payload["steps"]
-    if skill_id == "alm-text-review":
+    if skill_id == "evidence-routing":
         return StubResponse(
             {
-                "assessments": [
+                "decisions": [
                     {
                         "review_step": step["review_step"],
-                        "applicability": "applicable",
-                        "findings": [],
                         "reference_decisions": [
                             {
                                 "candidate_id": candidate["candidate_id"],
@@ -191,6 +189,20 @@ def skill_response(request: dict[str, Any]) -> StubResponse:
                             }
                             for candidate in step["reference_candidates"]
                         ],
+                        "extracted_equipment": [],
+                    }
+                    for step in steps
+                ]
+            }
+        )
+    if skill_id == "alm-text-review":
+        return StubResponse(
+            {
+                "assessments": [
+                    {
+                        "review_step": step["review_step"],
+                        "applicability": "applicable",
+                        "findings": [],
                         "summary": "Actual supports Expected.",
                     }
                     for step in steps
@@ -236,13 +248,6 @@ def configure_review(db: Session) -> None:
             base_url="http://ai.test/v1/chat/completions",
             model_name="test-model",
             enabled=True,
-        )
-    )
-    db.add(
-        PromptVersion(
-            name="test",
-            template="Review this content: {{RUN_CONTENT}}",
-            is_active=True,
         )
     )
     db.commit()
@@ -312,7 +317,6 @@ def run_pipeline(
     actual: str,
     external_evidence: bool | None = None,
     location_assessment: dict[str, Any] | None = None,
-    review_mode: str = "standard",
     location_review: bool = True,
 ) -> tuple[dict[str, Any], list[str], str, dict[str, Any]]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
@@ -320,7 +324,6 @@ def run_pipeline(
     with Session(engine) as db:
         configure_review(db)
         workspace = resolve_workspace(db)
-        workspace.review_mode = review_mode
         workspace.location_review_enabled = location_review
         db.commit()
         if external_evidence is not None:
@@ -341,11 +344,11 @@ def run_pipeline(
 
         monkeypatch.setattr("app.services.reviews.httpx.post", post)
         monkeypatch.setattr(
-            "app.services.reviews.NetworkImageResolver", StubImageResolver
+            "app.services.stage_image_review.NetworkImageResolver", StubImageResolver
         )
         if location_assessment is not None:
             monkeypatch.setattr(
-                "app.services.reviews.load_location_assessment",
+                "app.services.review_jobs.load_location_assessment",
                 lambda *_args: location_assessment,
             )
 
@@ -387,13 +390,16 @@ def test_pipeline_stages_keep_their_declared_order(monkeypatch) -> None:
 
     assert list(pipeline["stages"]) == EXPECTED_STAGE_ORDER
     assert called_skills == ["alm-text-review"]
+    assert pipeline["stages"]["routing"]["ai_calls"] == 0
 
 
 def test_disabled_location_review_skips_the_location_skill(monkeypatch) -> None:
     def unexpected_load(*_args):
         raise AssertionError("Location assessment must not load when disabled.")
 
-    monkeypatch.setattr("app.services.reviews.load_location_assessment", unexpected_load)
+    monkeypatch.setattr(
+        "app.services.review_jobs.load_location_assessment", unexpected_load
+    )
     pipeline, called_skills, verdict, criteria = run_pipeline(
         monkeypatch,
         actual="The result was recorded in the test report.",
@@ -408,55 +414,10 @@ def test_disabled_location_review_skips_the_location_skill(monkeypatch) -> None:
     assert verdict == "qualified"
 
 
-def test_agent_shadow_opt_in_does_not_change_pipeline_or_verdict(monkeypatch) -> None:
-    baseline, baseline_calls, baseline_verdict, baseline_criteria = run_pipeline(
-        monkeypatch, actual="The result was recorded in the test report."
-    )
-    assert "agent_shadow" not in baseline
-    seen: list[list[dict[str, Any]]] = []
-
-    def fake_shadow(_content, step_results, _location, _config, *, bundle):
-        seen.append(step_results)
-        assert bundle["target_step"] is None or bundle["checks"]
-        return {"status": "completed", "assessment": "uncertain", "target_step": 1}
-
-    monkeypatch.setattr("app.services.reviews.run_shadow_review", fake_shadow)
-    pipeline, calls, verdict, criteria = run_pipeline(
-        monkeypatch, actual="The result was recorded in the test report.", review_mode="compare"
-    )
-
-    assert seen and seen[0][0]["review_step"] == 1
-    assert pipeline.pop("agent_shadow")["assessment"] == "uncertain"
-    assert list(pipeline["stages"]) == list(baseline["stages"]) == EXPECTED_STAGE_ORDER
-    assert pipeline["total_ai_calls"] == baseline["total_ai_calls"]
-    assert {
-        stage: (trace["status"], trace["ai_calls"])
-        for stage, trace in pipeline["stages"].items()
-    } == {
-        stage: (trace["status"], trace["ai_calls"])
-        for stage, trace in baseline["stages"].items()
-    }
-    assert (calls, verdict, criteria) == (baseline_calls, baseline_verdict, baseline_criteria)
-
-
-def test_agent_shadow_failure_does_not_abort_review(monkeypatch) -> None:
-    def failed_agent(*_args, **_kwargs):
-        raise RuntimeError("external CLI failed")
-
-    monkeypatch.setattr("app.services.reviews.run_shadow_review", failed_agent)
-    pipeline, calls, verdict, criteria = run_pipeline(
-        monkeypatch, actual="The result was recorded in the test report.", review_mode="compare"
-    )
-
-    assert pipeline["agent_shadow"]["status"] == "unavailable"
-    assert "external CLI failed" not in json.dumps(pipeline)
-    assert verdict in {"qualified", "unqualified", "needs_manual_review"}
-    assert calls == ["alm-text-review"]
-    assert criteria["expected_vs_actual"]["status"] == "pass"
-
-
 def test_declaration_is_the_source_of_the_stage_order() -> None:
     assert list(STAGE_ORDER) == EXPECTED_STAGE_ORDER
+    assert STAGE_SKILLS["routing"] == "evidence-routing"
+    assert STAGE_SKILLS["text_review"] == "alm-text-review"
     assert set(STAGE_SKILLS.values()) <= set(discover_skills())
     assert set(STAGE_GATES.values()) == {
         "external_evidence_review_enabled",
@@ -502,18 +463,23 @@ def test_pipeline_ai_call_counts_match_the_stage_totals(monkeypatch) -> None:
     assert stage_calls == pipeline["total_ai_calls"] == len(called_skills)
 
 
-def test_image_stage_runs_after_the_text_stage(monkeypatch) -> None:
+def test_routing_text_and_image_stages_run_in_declared_order(monkeypatch) -> None:
     pipeline, called_skills, _verdict, _criteria = run_pipeline(
         monkeypatch,
         actual=f"The screenshot was archived at {IMAGE_PATH}",
         external_evidence=True,
     )
 
-    assert called_skills == ["alm-text-review", "image-evidence-review"]
+    assert called_skills == [
+        "evidence-routing",
+        "alm-text-review",
+        "image-evidence-review",
+    ]
+    assert pipeline["stages"]["routing"]["ai_calls"] == 1
     assert pipeline["stages"]["text_review"]["ai_calls"] == 1
     assert pipeline["stages"]["image_review"]["status"] == "completed"
     assert pipeline["stages"]["image_review"]["ai_calls"] == 1
-    assert pipeline["total_ai_calls"] == 2
+    assert pipeline["total_ai_calls"] == 3
 
 
 def test_external_stages_are_disabled_without_evidence_review(monkeypatch) -> None:
@@ -523,7 +489,7 @@ def test_external_stages_are_disabled_without_evidence_review(monkeypatch) -> No
         external_evidence=False,
     )
 
-    assert called_skills == ["alm-text-review"]
+    assert called_skills == ["evidence-routing", "alm-text-review"]
     assert pipeline["stages"]["image_review"]["status"] == "disabled"
     assert pipeline["stages"]["report_review"]["status"] == "disabled"
     assert pipeline["stages"]["image_review"]["ai_calls"] == 0
@@ -685,7 +651,7 @@ def test_pipeline_compares_the_historical_location_effective_at_execution(monkey
                 execution_at=datetime(2026, 9, 20, 5, 12, 8),
             )
             monkeypatch.setattr(
-                "app.services.reviews.load_location_assessment",
+                "app.services.review_jobs.load_location_assessment",
                 assess_location_history,
             )
             monkeypatch.setattr(
@@ -703,3 +669,61 @@ def test_pipeline_compares_the_historical_location_effective_at_execution(monkey
             assert assessment["status"] == "pass"
             assert assessment["selected_config"]["computer"] == "CT Tenara G5 Prem"
             assert assessment["selected_version"]["valid_to"] == "2026-09-25 00:02:22"
+
+
+def test_not_applicable_text_review_clears_routed_external_evidence_and_skips_image_ai(
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        configure_review(db)
+        workspace = resolve_workspace(db)
+        workspace.location_review_enabled = False
+        db.add(
+            EvidenceConfig(
+                allowed_network_root=ALLOWED_ROOT,
+                external_evidence_review_enabled=True,
+            )
+        )
+        db.commit()
+        job = add_job(
+            db,
+            actual=f"This step does not apply on Earth; ref {IMAGE_PATH}",
+        )
+        called_skills: list[str] = []
+
+        def post(*_args, **kwargs):
+            request = kwargs["json"]
+            skill_id = identify_skill(request["messages"][0]["content"])
+            called_skills.append(skill_id)
+            if skill_id == "alm-text-review":
+                payload = json.loads(request["messages"][1]["content"])
+                return StubResponse(
+                    {
+                        "assessments": [
+                            {
+                                "review_step": step["review_step"],
+                                "applicability": "not_applicable",
+                                "findings": [],
+                                "summary": "Explicit N/A with reason.",
+                            }
+                            for step in payload["steps"]
+                        ]
+                    }
+                )
+            return skill_response(request)
+
+        monkeypatch.setattr("app.services.reviews.httpx.post", post)
+        monkeypatch.setattr(
+            "app.services.stage_image_review.NetworkImageResolver", StubImageResolver
+        )
+
+        result = process_job(db, job)
+        pipeline = json.loads(result.pipeline_json)
+
+        assert called_skills == ["evidence-routing", "alm-text-review"]
+        assert pipeline["stages"]["routing"]["steps"][0]["intent"] == "none"
+        assert pipeline["stages"]["routing"]["steps"][0]["actions"] == []
+        assert pipeline["stages"]["image_review"]["ai_calls"] == 0
+        assert result.verdict == "qualified"

@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import AiConfig, SyncConfig
 from app.services.ai_transport import ai_endpoint_available, available_ai_configs
-from app.services.reviews import (
+from app.services.review_jobs import (
     claim_next_review_job,
     process_claimed_review_job,
     reap_abandoned_review_jobs,

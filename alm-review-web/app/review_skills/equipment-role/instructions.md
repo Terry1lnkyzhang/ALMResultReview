@@ -22,21 +22,24 @@ Classify ambiguous equipment references in ALM Steps using only supplied text an
    is not in the list. Return an empty array when no entry describes the device.
 4. Map on device identity, not on wording. Two entries that differ only in language or word order
    are the same device; two entries that measure different quantities are not.
-5. DUT/product serials are not controlled equipment.
+5. DUT/product serials are not controlled equipment. When a Step performs only software or UI
+   operations and mentions no physical measuring/test device in its prose (even if a folder or file
+   path contains a device-like word in a directory tag), classify it as `dut_or_other` with
+   `required=false`.
 6. Simulators, meters, stopwatches, analyzers, phantoms, and calibrated test tools are normally controlled equipment when context supports it.
 7. `required` means Description or Expected explicitly requires the controlled-equipment identity,
    ID, serial number, or calibration information to be recorded. Merely using controlled equipment
    means it must be checked, not that the current Step must repeat an identity recorded earlier.
-8. Previously matched IDs may be selected only when the Step clearly continues to use the same
-   device. If the current Step names the device differently, also use `selected_equipment_names` to
-   establish that the current name maps to that registry device. Never reuse a previous full-body
-   phantom merely because the current Step mentions a head phantom.
-9. An explicit operation on the same device in Description or Expected establishes continuity even
-   when Actual reports only the result of that operation. For example, disconnecting, connecting,
-   configuring, positioning, or reading a previously recorded ECG simulator continues to use that
-   controlled equipment. Scanning another layer of a previously recorded ACR phantom has the same
-   continuity. Do not classify it as `dut_or_other` or set `required=true` merely because Actual
-   does not repeat the device name or ID.
+8. Previously matched IDs may be selected only when the Step clearly continues to use the **same
+   physical device**. If the current Step names the device differently, also use
+   `selected_equipment_names` to establish that the current name maps to that registry device.
+   Never reuse a previously matched device of one subtype or specification when the current Step
+   specifies a different subtype or specification.
+9. An explicit operation on a previously recorded device in Description or Expected (for example
+   connecting, disconnecting, positioning, configuring, measuring another section/point, or reading
+   its output) establishes continuity even when Actual reports only the outcome of that operation.
+   Do not classify it as `dut_or_other` or set `required=true` merely because Actual does not
+   repeat the device name or ID.
 10. Return `uncertain` rather than guessing.
 
 ## Safety Boundaries

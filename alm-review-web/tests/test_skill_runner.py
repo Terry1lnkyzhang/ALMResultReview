@@ -39,18 +39,14 @@ class FailingResponse:
         )
 
 
-def skill_input() -> dict:
+def routing_input() -> dict:
     return {
-        "alm_run_status": "Passed",
         "steps": [
             {
                 "review_step": 1,
-                "alm_step_status": "Passed",
                 "description": "Archive review evidence.",
                 "expected": "Evidence is available.",
                 "actual": r"Screenshots saved under \\server\share\case-1",
-                "actual_format": {},
-                "numbered_comparison": [],
                 "reference_candidates": [
                     {
                         "candidate_id": "step-1-ref-1",
@@ -65,31 +61,77 @@ def skill_input() -> dict:
     }
 
 
+def skill_input() -> dict:
+    return {
+        "alm_run_status": "Passed",
+        "steps": [
+            {
+                "review_step": 1,
+                "alm_step_status": "Passed",
+                "description": "Archive review evidence.",
+                "expected": "Evidence is available.",
+                "actual": r"Screenshots saved under \\server\share\case-1",
+                "actual_format": {},
+                "numbered_comparison": [],
+                "routed_evidence_references": [r"\\server\share\case-1"],
+            }
+        ]
+    }
+
+
 def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "1.7.4"
+    assert definition.version == "2.3.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
+    item_required = definition.output_schema["properties"]["assessments"]["items"][
+        "required"
+    ]
+    assert item_required.index("bound_checks") < item_required.index("findings")
+    assert item_required.index("conclusion_checks") < item_required.index("findings")
+    assert "layout_text" not in json.dumps(definition.input_schema)
+    assert "reference_decisions" not in json.dumps(definition.output_schema)
+    assert "extracted_equipment" not in json.dumps(definition.output_schema)
     assert "alm-text-review" in discover_skills()
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "1.7.4",
+        "version": "2.3.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "alm-text-review": "1.7.4",
-        "equipment-role": "1.4.2",
-        "html-evidence-review": "1.8.1",
-        "image-evidence-review": "1.3.2",
-        "location-consistency": "1.0.1",
+        "evidence-routing": "1.1.0",
+        "alm-text-review": "2.3.0",
+        "equipment-role": "1.5.0",
+        "html-evidence-review": "1.9.0",
+        "image-evidence-review": "1.4.2",
+        "location-consistency": "1.1.1",
     }
+    case_specific_tokens = (
+        "MSD",
+        "Z.USL",
+        "CTBOX",
+        "IVC BOX",
+        "Chess Console",
+        "H-Phantom",
+        "earth_kylin",
+        "Gantry angle",
+        "Standard PC",
+        "Premium PC",
+        "ACR phantom",
+        "ECG simulator",
+        "Zhao Yize",
+        "Li Xianjin",
+        "CHESS-SCIM",
+        "CHESS-CAST",
+        "PCCSY-RD",
+    )
 
     assert set(discover_skills()) == set(active)
     for skill_id, version in active.items():
@@ -98,90 +140,128 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
         assert definition.enable_thinking is False
         assert definition.contract_version == "1"
         assert len(definition.skill_hash) == 64
+        assert "$defs" not in definition.input_schema
+        assert "$defs" not in definition.output_schema
         assert definition.required_capabilities
         assert not (
             set(definition.required_capabilities)
             & set(definition.forbidden_capabilities)
         )
         assert "Simplified Chinese" in definition.instructions
+        serialized_examples = json.dumps(definition.examples, ensure_ascii=False)
+        for token in case_specific_tokens:
+            assert token not in definition.instructions
+            assert token not in serialized_examples
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.8.1"
+    assert html["version"] == "1.9.0"
     assert load_skill("html-evidence-review").max_tokens == 32768
 
 
+def _paired_step_examples(skill_id: str) -> list[tuple[dict, dict, dict]]:
+    pairs: list[tuple[dict, dict, dict]] = []
+    definition = load_skill(skill_id)
+    for example in definition.examples:
+        inp = example["input"]
+        out = example["output"]
+        by_step = {
+            item["review_step"]: item
+            for item in out[definition.output_collection]
+        }
+        for step in inp[definition.input_collection]:
+            pairs.append((inp, step, by_step[step["review_step"]]))
+    return pairs
+
+
 def test_review_skill_examples_cover_failed_run_record_consistency() -> None:
-    text_examples = load_skill("alm-text-review").examples
-    failed_text = next(
-        example
-        for example in text_examples
-        if example["input"].get("alm_step_status") == "Failed"
-        and "14.2 seconds" in example["input"]["actual"]
+    text_pairs = _paired_step_examples("alm-text-review")
+    _, failed_step, failed_out = next(
+        pair
+        for pair in text_pairs
+        if pair[1].get("alm_step_status") == "Failed"
+        and "14.2 seconds" in pair[1]["actual"]
     )
-    no_run_text = next(
-        example
-        for example in text_examples
-        if example["input"].get("alm_step_status") == "No Run"
+    _, no_run_step, no_run_out = next(
+        pair for pair in text_pairs if pair[1].get("alm_step_status") == "No Run"
     )
-    contradictory_text = next(
-        example
-        for example in text_examples
-        if example["input"].get("alm_step_status") == "Failed"
-        and "8.1 seconds" in example["input"]["actual"]
+    _, contradictory_step, contradictory_out = next(
+        pair
+        for pair in text_pairs
+        if pair[1].get("alm_step_status") == "Failed"
+        and "8.1 seconds" in pair[1]["actual"]
     )
-    image_failed = next(
-        example
-        for example in load_skill("image-evidence-review").examples
-        if example["input"].get("alm_step_status") == "Failed"
+    _, _, image_failed_out = next(
+        pair
+        for pair in _paired_step_examples("image-evidence-review")
+        if pair[1].get("alm_step_status") == "Failed"
     )
-    html_failed = next(
-        example
-        for example in load_skill("html-evidence-review").examples
-        if example["input"].get("alm_step_status") == "Failed"
+    _, _, html_failed_out = next(
+        pair
+        for pair in _paired_step_examples("html-evidence-review")
+        if pair[1].get("alm_step_status") == "Failed"
     )
 
-    assert failed_text["output"]["findings"] == []
-    assert no_run_text["input"]["actual"] == ""
-    assert no_run_text["output"]["findings"] == []
-    assert contradictory_text["output"]["findings"][0]["code"] == (
-        "expected_actual_mismatch"
-    )
-    assert image_failed["output"]["status"] == "pass"
-    assert html_failed["output"]["status"] == "pass"
+    assert failed_step["alm_step_status"] == "Failed"
+    assert failed_out["findings"] == []
+    assert no_run_step["actual"] == ""
+    assert no_run_out["findings"] == []
+    assert contradictory_step["alm_step_status"] == "Failed"
+    assert contradictory_out["findings"][0]["code"] == "expected_actual_mismatch"
+    assert image_failed_out["status"] == "pass"
+    assert html_failed_out["status"] == "pass"
 
 
 def test_alm_text_examples_distinguish_explained_and_unexplained_na() -> None:
-    examples = load_skill("alm-text-review").examples
-    explained = next(
-        example for example in examples
-        if "service laptop" in example["input"]["actual"]
+    text_pairs = _paired_step_examples("alm-text-review")
+    _, _, explained_out = next(
+        pair for pair in text_pairs if "service laptop" in pair[1]["actual"]
     )
-    unexplained = next(
-        example for example in examples
-        if "0.34s/r rotation" in example["input"]["description"]
+    _, _, unexplained_out = next(
+        pair for pair in text_pairs if "0.34s cycle mode" in pair[1]["description"]
     )
 
-    assert explained["output"]["applicability"] == "not_applicable"
-    assert explained["output"]["findings"] == []
-    assert unexplained["output"]["findings"][0]["code"] == "record_documentation_gap"
+    assert explained_out["applicability"] == "not_applicable"
+    assert explained_out["findings"] == []
+    assert unexplained_out["applicability"] == "not_applicable"
+    assert unexplained_out["findings"][0]["code"] == "record_documentation_gap"
 
 
 def test_alm_text_examples_keep_active_dms_failure_separate_from_missing_na() -> None:
-    examples = load_skill("alm-text-review").examples
-    dms_examples = [
-        example for example in examples
-        if example["input"].get("execution_location_config", {}).get("dms_coverage")
+    dms_pairs = [
+        pair
+        for pair in _paired_step_examples("alm-text-review")
+        if (pair[0].get("execution_location_config") or {}).get("dms_coverage")
         == "4cm"
     ]
 
-    assert len(dms_examples) == 2
-    assert [example["output"]["applicability"] for example in dms_examples] == [
-        "applicable", "applicable"
+    assert len(dms_pairs) == 2
+    assert [pair[2]["applicability"] for pair in dms_pairs] == [
+        "applicable",
+        "applicable",
     ]
-    assert [example["output"]["findings"][0]["severity"] for example in dms_examples] == [
-        "manual", "fail"
+    assert [pair[2]["findings"][0]["severity"] for pair in dms_pairs] == [
+        "manual",
+        "fail",
     ]
+
+
+def test_load_skill_rejects_example_that_violates_schema_contract(
+    monkeypatch, tmp_path
+) -> None:
+    import shutil
+    from app.services import skill_runner as sr_module
+
+    shutil.copytree(sr_module._SKILLS_ROOT, tmp_path / "skills")
+    bad_examples = tmp_path / "skills" / "alm-text-review" / "examples.json"
+    bad_examples.write_text(
+        json.dumps([{"input": {"review_step": 1}, "output": {"review_step": 1}}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sr_module, "_SKILLS_ROOT", tmp_path / "skills")
+
+    with pytest.raises(ValueError):
+        load_skill("alm-text-review")
 
 
 def test_skill_runner_validates_input_output_and_separates_untrusted_data(
@@ -194,11 +274,9 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
         return StubResponse(
             json.dumps(
                 {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": [
                                 {
                                     "candidate_id": "step-1-ref-1",
@@ -207,7 +285,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
                                     "reason": "Actual identifies an evidence location.",
                                 }
                             ],
-                            "summary": "Actual identifies the expected evidence.",
+                            "extracted_equipment": [],
                         }
                     ]
                 }
@@ -217,28 +295,26 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
 
     trace = SkillRunner().run(
-        "alm-text-review",
-        skill_input(),
+        "evidence-routing",
+        routing_input(),
         endpoint="https://ai.example/v1/chat/completions",
         model_name="test-model",
         headers={},
         timeout_seconds=30,
         granted_capabilities={
             "review.step_text",
-            "review.text_format",
-            "review.numbered_comparison",
             "evidence.path_metadata",
             "equipment.registry.candidates",
         },
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.7.4"
+    assert trace["skill_version"] == "1.1.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64
     assert trace["ai_calls"] == 1
-    assert trace["output"]["assessments"][0]["reference_decisions"][0][
+    assert trace["output"]["decisions"][0]["reference_decisions"][0][
         "role"
     ] == "result_evidence_location"
     assert requests[0]["messages"][0]["role"] == "system"
@@ -251,6 +327,10 @@ _TEXT_GRANTS = {
     "review.step_text",
     "review.text_format",
     "review.numbered_comparison",
+    "evidence.path_metadata",
+}
+_ROUTING_GRANTS = {
+    "review.step_text",
     "evidence.path_metadata",
     "equipment.registry.candidates",
 }
@@ -268,11 +348,9 @@ def test_skill_runner_disables_thinking_and_strips_inline_thinking(monkeypatch) 
     requests = []
     answer = json.dumps(
         {
-            "assessments": [
+            "decisions": [
                 {
                     "review_step": 1,
-                    "applicability": "applicable",
-                    "findings": [],
                     "reference_decisions": [
                         {
                             "candidate_id": "step-1-ref-1",
@@ -281,7 +359,7 @@ def test_skill_runner_disables_thinking_and_strips_inline_thinking(monkeypatch) 
                             "reason": "Actual identifies an evidence location.",
                         }
                     ],
-                    "summary": "Actual identifies the expected evidence.",
+                    "extracted_equipment": [],
                 }
             ]
         }
@@ -294,28 +372,29 @@ def test_skill_runner_disables_thinking_and_strips_inline_thinking(monkeypatch) 
     monkeypatch.setattr("app.services.skill_runner.httpx.post", post)
 
     trace = SkillRunner().run(
-        "alm-text-review",
-        skill_input(),
+        "evidence-routing",
+        routing_input(),
         endpoint="https://ai.example/v1/chat/completions",
         model_name="test-model",
         headers={},
         timeout_seconds=30,
-        granted_capabilities=_TEXT_GRANTS,
+        granted_capabilities=_ROUTING_GRANTS,
     )
 
     assert trace["status"] == "completed"
     assert trace["enable_thinking"] is False
     assert trace["ai_calls"] == 1
     assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
-    assert requests[0]["temperature"] == 0.7
+    assert requests[0]["temperature"] == 0.0
+    assert requests[0]["presence_penalty"] == 0.0
     assert requests[0]["seed"] == trace["seed"] == int(trace["input_hash"][:8], 16) & 0x7FFFFFFF
     assert requests[0]["response_format"]["type"] == "json_schema"
-    assessments = requests[0]["response_format"]["json_schema"]["schema"][
+    decisions = requests[0]["response_format"]["json_schema"]["schema"][
         "properties"
-    ]["assessments"]
-    assert assessments["items"] is False
-    assert assessments["minItems"] == assessments["maxItems"] == 1
-    step = assessments["prefixItems"][0]["properties"]
+    ]["decisions"]
+    assert decisions["items"] is False
+    assert decisions["minItems"] == decisions["maxItems"] == 1
+    step = decisions["prefixItems"][0]["properties"]
     assert step["review_step"] == {"enum": [1]}
     assert [
         decision["properties"]["candidate_id"]
@@ -471,14 +550,6 @@ def test_skill_runner_retries_empty_thinking_once_without_thinking(
                     "review_step": 1,
                     "applicability": "applicable",
                     "findings": [],
-                    "reference_decisions": [
-                        {
-                            "candidate_id": "step-1-ref-1",
-                            "role": "result_evidence_location",
-                            "requires_check": True,
-                            "reason": "Actual cites the screenshot folder.",
-                        }
-                    ],
                     "summary": "Screenshot folder identified.",
                 }
             ]
@@ -525,14 +596,6 @@ def test_skill_runner_retries_reasoning_content_without_visible_answer(
                     "review_step": 1,
                     "applicability": "applicable",
                     "findings": [],
-                    "reference_decisions": [
-                        {
-                            "candidate_id": "step-1-ref-1",
-                            "role": "result_evidence_location",
-                            "requires_check": True,
-                            "reason": "Actual cites the screenshot folder.",
-                        }
-                    ],
                     "summary": "Screenshot folder identified.",
                 }
             ]
@@ -589,8 +652,6 @@ def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) ->
                             "review_step": step["review_step"],
                             "applicability": "applicable",
                             "findings": [],
-                            "reference_decisions": [],
-                            "extracted_equipment": [],
                             "summary": "Actual matches Expected.",
                         }
                         for step in steps
@@ -605,7 +666,7 @@ def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) ->
         payload = skill_input()
         template = payload["steps"][0]
         payload["steps"] = [
-            {**template, "review_step": number, "reference_candidates": []}
+            {**template, "review_step": number, "routed_evidence_references": []}
             for number in range(1, step_count + 1)
         ]
         trace = SkillRunner().run(
@@ -615,13 +676,7 @@ def test_output_token_cap_grows_with_the_batch_but_never_shrinks(monkeypatch) ->
             model_name="test-model",
             headers={},
             timeout_seconds=30,
-            granted_capabilities={
-                "review.step_text",
-                "review.text_format",
-                "review.numbered_comparison",
-                "evidence.path_metadata",
-                "equipment.registry.candidates",
-            },
+            granted_capabilities=_TEXT_GRANTS,
         )
         assert trace["status"] == "completed"
         return trace["max_tokens"]
@@ -637,11 +692,9 @@ def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) ->
         lambda *args, **kwargs: StubResponse(
             json.dumps(
                 {
-                    "assessments": [
+                    "decisions": [
                         {
                             "review_step": 1,
-                            "applicability": "applicable",
-                            "findings": [],
                             "reference_decisions": [
                                 {
                                     "candidate_id": "step-1-ref-1",
@@ -650,7 +703,7 @@ def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) ->
                                     "reason": "Invalid output",
                                 }
                             ],
-                            "summary": "Invalid output",
+                            "extracted_equipment": [],
                         }
                     ]
                 }
@@ -659,19 +712,13 @@ def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) ->
     )
 
     trace = SkillRunner().run(
-        "alm-text-review",
-        skill_input(),
+        "evidence-routing",
+        routing_input(),
         endpoint="https://ai.example/v1/chat/completions",
         model_name="test-model",
         headers={},
         timeout_seconds=30,
-        granted_capabilities={
-            "review.step_text",
-            "review.text_format",
-            "review.numbered_comparison",
-            "evidence.path_metadata",
-            "equipment.registry.candidates",
-        },
+        granted_capabilities=_ROUTING_GRANTS,
     )
 
     assert trace["status"] == "failed"
@@ -683,14 +730,12 @@ def test_skill_runner_contains_invalid_ai_output_as_failed_trace(monkeypatch) ->
     assert "output" not in trace
 
 
-def _text_assessment(role: str) -> str:
+def _routing_decision(role: str) -> str:
     return json.dumps(
         {
-            "assessments": [
+            "decisions": [
                 {
                     "review_step": 1,
-                    "applicability": "applicable",
-                    "findings": [],
                     "reference_decisions": [
                         {
                             "candidate_id": "step-1-ref-1",
@@ -699,34 +744,28 @@ def _text_assessment(role: str) -> str:
                             "reason": "Evidence location.",
                         }
                     ],
-                    "summary": "Reviewed.",
+                    "extracted_equipment": [],
                 }
             ]
         }
     )
 
 
-def _run_text_skill() -> dict:
+def _run_routing_skill() -> dict:
     return SkillRunner().run(
-        "alm-text-review",
-        skill_input(),
+        "evidence-routing",
+        routing_input(),
         endpoint="https://ai.example/v1/chat/completions",
         model_name="test-model",
         headers={},
         timeout_seconds=30,
-        granted_capabilities={
-            "review.step_text",
-            "review.text_format",
-            "review.numbered_comparison",
-            "evidence.path_metadata",
-            "equipment.registry.candidates",
-        },
+        granted_capabilities=_ROUTING_GRANTS,
     )
 
 
 def test_skill_runner_repairs_invalid_output_on_the_second_attempt(monkeypatch) -> None:
     requests: list[dict] = []
-    replies = iter([_text_assessment("invented_role"), _text_assessment("uncertain")])
+    replies = iter([_routing_decision("invented_role"), _routing_decision("uncertain")])
 
     def stub_post(*args, **kwargs) -> StubResponse:
         requests.append(kwargs["json"])
@@ -734,7 +773,7 @@ def test_skill_runner_repairs_invalid_output_on_the_second_attempt(monkeypatch) 
 
     monkeypatch.setattr("app.services.skill_runner.httpx.post", stub_post)
 
-    trace = _run_text_skill()
+    trace = _run_routing_skill()
 
     assert trace["status"] == "completed"
     assert trace["ai_calls"] == 2
@@ -753,7 +792,7 @@ def test_skill_runner_marks_client_errors_terminal_and_server_errors_retryable(
             lambda *args, _code=status_code, **kwargs: FailingResponse(_code),
         )
 
-        trace = _run_text_skill()
+        trace = _run_routing_skill()
 
         assert trace["status"] == "failed"
         assert trace["ai_calls"] == 1

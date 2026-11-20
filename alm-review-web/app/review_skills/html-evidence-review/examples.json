@@ -1,54 +1,140 @@
 [
   {
     "input": {
+      "alm_run_status": "Passed",
       "review_mode": "final",
       "batch_index": 1,
       "batch_count": 1,
-      "review_step": 2,
-      "description": "Verify slice thickness",
-      "expected": "The slice thickness is within tolerance and the test passes.",
-      "actual": "The measured result was within tolerance and passed.",
-      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34834", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
-      "batch_observations": [],
-      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-4", "text": "Slice thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed"}]}]
+      "steps": [
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "Verify thickness measurement",
+          "expected": "The thickness is within tolerance and the test passes.",
+          "actual": "The measured result was within tolerance and passed.",
+          "automation_release": {
+            "status": "disabled",
+            "project_name": "",
+            "testcase_id": "34801",
+            "candidate_count": 0,
+            "claimed_script_name": "",
+            "claimed_script_testcase_id": "",
+            "html_script_names": [],
+            "html_path_testcase_ids": [],
+            "html_path_testcase_match": "not_checked",
+            "actual_name_match": "not_checked",
+            "failure_code": "",
+            "claimed_document_number": "",
+            "claimed_document_revision": "",
+            "selected_release": null,
+            "script_name_match": "not_checked",
+            "document_match": "not_checked",
+            "reason": "未配置自动化发布记录校验。"
+          },
+          "batch_observations": [],
+          "reports": [
+            {
+              "report_id": "step-2-report-1",
+              "source_path": "\\\\server\\reports\\34801\\Thickness_34801.html",
+              "filename": "Thickness_34801.html",
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "content_truncated": false,
+              "omitted_block_count": 0,
+              "blocks": [
+                {
+                  "block_id": "test-result-1",
+                  "text": "Thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "review_step": 3,
+          "alm_step_status": "Passed",
+          "description": "Verify processing pipeline",
+          "expected": "All pipeline checks pass.",
+          "actual": "The checks passed.",
+          "automation_release": {
+            "status": "disabled",
+            "project_name": "",
+            "testcase_id": "34802",
+            "candidate_count": 0,
+            "claimed_script_name": "",
+            "claimed_script_testcase_id": "",
+            "html_script_names": [],
+            "html_path_testcase_ids": [],
+            "html_path_testcase_match": "not_checked",
+            "actual_name_match": "not_checked",
+            "failure_code": "",
+            "claimed_document_number": "",
+            "claimed_document_revision": "",
+            "selected_release": null,
+            "script_name_match": "not_checked",
+            "document_match": "not_checked",
+            "reason": "未配置自动化发布记录校验。"
+          },
+          "batch_observations": [],
+          "reports": [
+            {
+              "report_id": "step-3-report-1",
+              "source_path": "\\\\server\\reports\\34802\\Pipeline_34802.html",
+              "filename": "Pipeline_34802.html",
+              "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "content_truncated": false,
+              "omitted_block_count": 0,
+              "blocks": [
+                {
+                  "block_id": "test-result-2",
+                  "text": "Pipeline sub-check: Failed | Overall result: Passed"
+                }
+              ]
+            }
+          ]
+        }
+      ]
     },
     "output": {
-      "review_step": 2,
-      "status": "pass",
-      "description_coverage": "supported",
-      "expected_coverage": "supported",
-      "actual_coverage": "supported",
-      "result_consistency": "consistent",
-      "release_consistency": "not_checked",
-      "reviewed_report_ids": ["report-1"],
-      "evidence": [{"report_id": "report-1", "block_id": "block-4", "quote": "Slice thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed", "supports": ["description", "expected", "actual", "result"]}],
-      "reason": "引用的报告结果覆盖了该步骤，并支持通过结论。"
-    }
-  },
-  {
-    "input": {
-      "review_mode": "final",
-      "batch_index": 1,
-      "batch_count": 1,
-      "review_step": 3,
-      "description": "Verify reconstruction",
-      "expected": "All reconstruction checks pass.",
-      "actual": "The checks passed.",
-      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34835", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
-      "batch_observations": [],
-      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-8", "text": "Reconstruction check: Failed | Overall result: Passed"}]}]
-    },
-    "output": {
-      "review_step": 3,
-      "status": "fail",
-      "description_coverage": "supported",
-      "expected_coverage": "contradicted",
-      "actual_coverage": "contradicted",
-      "result_consistency": "inconsistent",
-      "release_consistency": "not_checked",
-      "reviewed_report_ids": ["report-1"],
-      "evidence": [{"report_id": "report-1", "block_id": "block-8", "quote": "Reconstruction check: Failed | Overall result: Passed", "supports": ["expected", "actual", "result"]}],
-      "reason": "一项必需的详细检查失败，与 Actual 以及整体 Passed 结论均不一致。"
+      "assessments": [
+        {
+          "review_step": 2,
+          "status": "pass",
+          "description_coverage": "supported",
+          "expected_coverage": "supported",
+          "actual_coverage": "supported",
+          "result_consistency": "consistent",
+          "release_consistency": "not_checked",
+          "reviewed_report_ids": ["step-2-report-1"],
+          "evidence": [
+            {
+              "report_id": "step-2-report-1",
+              "block_id": "test-result-1",
+              "quote": "Thickness 1.0 mm | measured 1.1 mm | tolerance 0.5 mm | Passed",
+              "supports": ["description", "expected", "actual", "result"]
+            }
+          ],
+          "reason": "引用的报告结果完整覆盖该步骤，并支持通过结论。"
+        },
+        {
+          "review_step": 3,
+          "status": "fail",
+          "description_coverage": "supported",
+          "expected_coverage": "contradicted",
+          "actual_coverage": "contradicted",
+          "result_consistency": "inconsistent",
+          "release_consistency": "not_checked",
+          "reviewed_report_ids": ["step-3-report-1"],
+          "evidence": [
+            {
+              "report_id": "step-3-report-1",
+              "block_id": "test-result-2",
+              "quote": "Pipeline sub-check: Failed | Overall result: Passed",
+              "supports": ["expected", "actual", "result"]
+            }
+          ],
+          "reason": "报告中必需子项失败，与 Actual 及 Passed 步骤结论直接冲突。"
+        }
+      ]
     }
   },
   {
@@ -57,26 +143,74 @@
       "review_mode": "final",
       "batch_index": 1,
       "batch_count": 1,
-      "review_step": 4,
-      "alm_step_status": "Failed",
-      "description": "Verify startup time",
-      "expected": "Startup time shall be no more than 10 seconds.",
-      "actual": "Startup took 14.2 seconds and failed the limit.",
-      "automation_release": {"status": "disabled", "project_name": "", "testcase_id": "34836", "candidate_count": 0, "claimed_script_name": "", "claimed_script_testcase_id": "", "html_script_names": [], "html_path_testcase_ids": [], "html_path_testcase_match": "not_checked", "actual_name_match": "not_checked", "failure_code": "", "claimed_document_number": "", "claimed_document_revision": "", "selected_release": null, "script_name_match": "not_checked", "document_match": "not_checked", "reason": "未配置自动化发布记录校验。"},
-      "batch_observations": [],
-      "reports": [{"report_id": "report-1", "blocks": [{"block_id": "block-9", "text": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed"}]}]
+      "steps": [
+        {
+          "review_step": 4,
+          "alm_step_status": "Failed",
+          "description": "Verify startup time",
+          "expected": "Startup time shall be no more than 10 seconds.",
+          "actual": "Startup took 14.2 seconds and failed the limit.",
+          "automation_release": {
+            "status": "disabled",
+            "project_name": "",
+            "testcase_id": "34803",
+            "candidate_count": 0,
+            "claimed_script_name": "",
+            "claimed_script_testcase_id": "",
+            "html_script_names": [],
+            "html_path_testcase_ids": [],
+            "html_path_testcase_match": "not_checked",
+            "actual_name_match": "not_checked",
+            "failure_code": "",
+            "claimed_document_number": "",
+            "claimed_document_revision": "",
+            "selected_release": null,
+            "script_name_match": "not_checked",
+            "document_match": "not_checked",
+            "reason": "未配置自动化发布记录校验。"
+          },
+          "batch_observations": [],
+          "reports": [
+            {
+              "report_id": "step-4-report-1",
+              "source_path": "\\\\server\\reports\\34803\\Startup_34803.html",
+              "filename": "Startup_34803.html",
+              "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "content_truncated": false,
+              "omitted_block_count": 0,
+              "blocks": [
+                {
+                  "block_id": "test-result-3",
+                  "text": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed"
+                }
+              ]
+            }
+          ]
+        }
+      ]
     },
     "output": {
-      "review_step": 4,
-      "status": "pass",
-      "description_coverage": "supported",
-      "expected_coverage": "supported",
-      "actual_coverage": "supported",
-      "result_consistency": "consistent",
-      "release_consistency": "not_checked",
-      "reviewed_report_ids": ["report-1"],
-      "evidence": [{"report_id": "report-1", "block_id": "block-9", "quote": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed", "supports": ["description", "expected", "actual", "result"]}],
-      "reason": "报告清楚记录了超限结果，与 Actual 及可信的 Failed 状态一致，因此失败记录合格。"
+      "assessments": [
+        {
+          "review_step": 4,
+          "status": "pass",
+          "description_coverage": "supported",
+          "expected_coverage": "supported",
+          "actual_coverage": "supported",
+          "result_consistency": "consistent",
+          "release_consistency": "not_checked",
+          "reviewed_report_ids": ["step-4-report-1"],
+          "evidence": [
+            {
+              "report_id": "step-4-report-1",
+              "block_id": "test-result-3",
+              "quote": "Startup time: 14.2 seconds | Limit: 10 seconds | Result: Failed",
+              "supports": ["description", "expected", "actual", "result"]
+            }
+          ],
+          "reason": "报告清楚记录了超限结果，与 Actual 及可信的 Failed 状态一致，因此失败记录合格。"
+        }
+      ]
     }
   }
 ]

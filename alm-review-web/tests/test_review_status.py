@@ -819,14 +819,12 @@ def test_review_update_reasons_describe_detectable_setting_changes() -> None:
         result = db.scalar(select(ReviewResult).where(ReviewResult.run_id == run.run_id))
         assert result is not None
         result.review_policy_key = "earlier-policy"
-        result.prompt_version_id = 4
         result.model_name = "earlier-model"
         db.commit()
 
-        reasons = review_update_reasons(result, "current-policy", 5, "current-model")
+        reasons = review_update_reasons(result, "current-policy", "current-model")
 
         assert reasons == (
-            "提示词版本已从 4 更新为 5",
             "AI 模型已从 earlier-model 更新为 current-model",
             "评审规则、证据设置或设备台账已更新",
         )
@@ -843,7 +841,6 @@ def test_current_policy_result_does_not_recommend_review_update() -> None:
         assert review_update_reasons(
             result,
             result.review_policy_key,
-            result.prompt_version_id,
             result.model_name,
         ) == ()
 
@@ -1120,16 +1117,19 @@ def test_disabled_equipment_review_excludes_registry_from_workspace_policy() -> 
 def test_every_verdict_module_is_hashed_into_the_review_policy() -> None:
     from app.services.review_policy import _REVIEW_POLICY_FILES
 
-    # Transport and orchestration cannot change a verdict, so they stay out.
+    # Transport, job queue, manual decisions, and compatibility facades cannot change a verdict.
     exempt = {
         "ai_transport",
-        "qwen_code_agent",
+        "manual_decisions",
+        "review_jobs",
         "review_policy",
+        "reviews",
         "worker_lease",
         "workspaces",
         "worker_tasks",
     }
     hashed = {path.stem for path in _REVIEW_POLICY_FILES if path.suffix == ".py"}
+    assert hashed.isdisjoint({"manual_decisions", "review_jobs", "reviews"})
     imported = {
         match.group(1)
         for path in _REVIEW_POLICY_FILES

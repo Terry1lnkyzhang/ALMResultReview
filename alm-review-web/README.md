@@ -355,34 +355,36 @@ current source when the short overview below is outdated.
 
 ### Staged review pipeline
 
-Each explicit Review Job builds one plan and completes these stages before saving a result:
+Each explicit Review Job builds one plan and completes the declared stages in exact `review_pipeline.toml` order (`routing -> text_review -> location_review -> image_review -> report_review -> equipment_review -> aggregation`) before saving a result:
 
 1. Normalize ALM Description, Expected, Actual, numbered items, formatting signals, and
 	program-detected path and equipment candidates. Every candidate receives a stable ID.
-2. Run `alm-text-review` once. It reviews applicability, language quality, completeness, and
-	Expected/Actual support, then classifies the semantic role of every supplied candidate ID.
-3. Build the specialist plan from the validated first-pass output. ALM image attachments remain
-	mandatory checks and are routed directly to image review, while the application retains all
-	path-access and final-routing authority.
-4. Resolve approved images with deterministic path, file-signature, count, byte, and pixel
+2. Run `routing` (`evidence-routing` when reference candidates or an active equipment registry are
+	present; 0 AI calls otherwise) to classify candidate roles and extract verbatim equipment mentions.
+3. Run `alm-text-review` to evaluate Step applicability, Expected/Actual support, and language
+	quality, then clear external routes on Steps marked `not_applicable`.
+4. Run `location-consistency` when `location_review_enabled` is on and a single historical test-location
+	configuration row is ready at execution time.
+5. Resolve approved images with deterministic path, file-signature, count, byte, and pixel
 	guards. `image-evidence-review` sees only the bounded images granted by the application.
-5. Resolve and parse explicitly referenced HTML Reports with deterministic security and size
+6. Resolve and parse explicitly referenced HTML Reports with deterministic security and size
 	guards, then call `html-evidence-review` to judge current-Step coverage and result consistency.
-6. Validate equipment against the registry with deterministic rules. A clear first-pass role is
-	reused; only an uncertain role invokes `equipment-role`, which may select supplied IDs only.
-7. Aggregate all stage outcomes with code: any failure is Unqualified, otherwise any
+7. Validate equipment against the registry with deterministic rules. A clear routing-pass role is
+	reused; only an uncertain role or unmapped device name invokes `equipment-role`.
+8. Aggregate all stage outcomes deterministically: any failure is Unqualified, otherwise any
 	manual outcome needs manual review, and all-pass results are Qualified.
 
-Each Review always runs `alm-text-review`. `Enable external evidence review` independently controls
-approved HTML parsing and image review; `Enable equipment registry validation` independently
-controls registry, calibration, and `equipment-role` checks. When both are disabled, the Review
-runs only `alm-text-review` and records both optional stages as `disabled` in the pipeline.
+Each Review runs `alm-text-review` (plus `evidence-routing` whenever candidates or an active equipment
+registry exist). `Enable external evidence review` independently controls approved HTML parsing and
+image review; `Enable equipment registry validation` independently controls registry, calibration,
+and `equipment-role` checks; `Enable test location review` controls location consistency checks.
 
 The semantic Skill packages live under `app/review_skills/<skill-id>/`. Each package contains
-`skill.toml`, `instructions.md`, `input.schema.json`, `output.schema.json`, and `examples.json`.
-Changing semantic rules normally means editing `instructions.md` and examples, then bumping the
-manifest version. Contract field changes also require matching Python types and adapters. A
-manifest-only package with `status = "planned"` appears in the catalog but cannot be executed.
+`skill.toml`, `instructions.md`, and `examples.json`, while all input/output schemas and vLLM ID
+grammar constraints are derived from a single source of truth in `app/services/skill_schemas.py`.
+Changing semantic rules normally means editing `instructions.md` and `examples.json`, then bumping the
+manifest version. Contract field changes update the corresponding Pydantic models in `skill_schemas.py`.
+A manifest-only package with `status = "planned"` appears in the catalog but cannot be executed.
 
 Each text Review uses one AI call. Image batches and unresolved equipment roles add narrowly
 scoped calls only when applicable. Unknown or unreadable external evidence requires manual review

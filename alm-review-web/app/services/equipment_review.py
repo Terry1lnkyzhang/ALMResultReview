@@ -407,6 +407,17 @@ def _name_key(value: str) -> str:
 
 
 _PREVIOUS_DEVICE_NAME_ALIASES = {"ecgsimulator": "心电模拟器"}
+_LATIN_TOKEN_STOPWORDS = frozenset(
+    {"the", "and", "for", "with", "from", "into", "onto", "under", "over"}
+)
+_PATH_TOKEN_RE = re.compile(
+    r"(?:\\\\[^\s,;\"')]+|(?:https?|file)://[^\s,;\"')]+)",
+    re.IGNORECASE,
+)
+
+
+def _strip_paths(value: str) -> str:
+    return _PATH_TOKEN_RE.sub(" ", value)
 
 
 def _equipment_name_aliases(description: str) -> tuple[str, ...]:
@@ -420,9 +431,10 @@ def _equipment_name_aliases(description: str) -> tuple[str, ...]:
 
 def _latin_name_tokens(value: str) -> set[str]:
     return {
-        token.casefold()
+        folded
         for token in re.findall(r"[A-Za-z0-9]+", value)
         if len(token) >= 3
+        and (folded := token.casefold()) not in _LATIN_TOKEN_STOPWORDS
     }
 
 
@@ -516,8 +528,11 @@ def analyze_equipment_steps(
         expected = _normalized(step.get("expected"))
         raw_actual = str(step.get("actual") or "")
         actual = _normalized(raw_actual)
-        requirement_text = f"{description}\n{expected}"
-        combined_text = f"{requirement_text}\n{actual}"
+        prose_description = _normalized(_strip_paths(description))
+        prose_expected = _normalized(_strip_paths(expected))
+        prose_actual = _normalized(_strip_paths(raw_actual))
+        requirement_text = f"{prose_description}\n{prose_expected}"
+        combined_text = f"{requirement_text}\n{prose_actual}"
         strong_requirement = bool(_STRONG_REQUIREMENT_RE.search(requirement_text))
         device_hint = bool(_DEVICE_HINT_RE.search(combined_text))
         reported_identifiers = _reported_identifiers(raw_actual)
@@ -561,7 +576,7 @@ def analyze_equipment_steps(
         reported_range = _reported_calibration_range(raw_actual)
         reported_due_date = _reported_due_date(raw_actual)
         reported_asset_ranges = _reported_asset_ranges(raw_actual)
-        actual_candidates = _candidate_equipment(actual, registry)
+        actual_candidates = _candidate_equipment(prose_actual, registry)
         requirement_candidates = _candidate_equipment(requirement_text, registry)
         candidates = _candidate_equipment(combined_text, registry)
         candidate_ids = {item.id for item in candidates}

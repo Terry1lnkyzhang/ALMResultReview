@@ -96,31 +96,6 @@ def test_run_detail_exposes_image_stage_and_evidence_routing_trace() -> None:
     assert 'include_manually_resolved_temporary=(status == "temporary_evidence")' in web_source
 
 
-def test_run_detail_renders_agent_shadow_as_separate_cited_opinion() -> None:
-    source, _, _ = templates.env.loader.get_source(templates.env, "run_detail.html")
-    fragment = "{% set agent_shadow" + source.split("{% set agent_shadow", 1)[1].split(
-        "{% set routing_steps", 1
-    )[0]
-    html = templates.env.from_string(fragment).render(
-        review_pipeline={
-            "agent_shadow": {
-                "status": "completed",
-                "target_step": 2,
-                "assessment": "uncertain",
-                "reason": "Check the previous Step.",
-                "citations": [
-                    {"step": 1, "field": "actual", "quote": "ECG simulator SN: 0175"}
-                ],
-            }
-        }
-    )
-
-    assert "Qwen Code 旁路意见" in html
-    assert "仅供人工复核，不改变正式结论" in html
-    assert "证据不足" in html
-    assert "ECG simulator SN: 0175" in html
-
-
 def test_run_detail_explains_superseded_manual_qualification() -> None:
     source, _, _ = templates.env.loader.get_source(
         templates.env, "run_detail.html"

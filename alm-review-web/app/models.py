@@ -361,7 +361,7 @@ class ReviewResult(Base):
     )
     run_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     revision_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    prompt_version_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_version_id: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     review_policy_key: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)

@@ -158,8 +158,8 @@ flowchart TD
 复核，不会无声地算作通过；若已路由的图片路径意外没有检查记录，则记录
 `not_checked` 并同样要求人工复核。超出上限的证据不会发送给图像 Skill。
 
-[`_image_review_batches()`](../app/services/reviews.py#L1158) 只收集状态为 `ready` 的图片。
-[`_run_image_review_skill()`](../app/services/reviews.py#L1177) 随后：
+[`_image_review_batches()`](../app/services/stage_image_review.py) 只收集状态为 `ready` 的图片。
+[`_run_image_review_skill()`](../app/services/stage_image_review.py) 随后：
 
 1. 使用 Step、批次序号和 SHA-256 摘要前缀为每张图片生成 `media_id`。
 2. 把图片元数据放入对应 `review_step.images`。
@@ -168,14 +168,14 @@ flowchart TD
    `evidence.image.content`。
 5. 校验 Skill 返回的 `observed_media_ids` 是否完整、无重复且没有越权引用。
 
-Skill 输入合同见
-[`app/review_skills/image-evidence-review/input.schema.json`](../app/review_skills/image-evidence-review/input.schema.json)，
+Skill 输入/输出合同单一信源定义于
+[`app/services/skill_schemas.py`](../app/services/skill_schemas.py)，
 判断规则见
 [`app/review_skills/image-evidence-review/instructions.md`](../app/review_skills/image-evidence-review/instructions.md)。
 
 ### 7. 聚合最终结果
 
-[`_apply_capability_guards()`](../app/services/reviews.py#L492) 将确定性路径和读取状态转换为
+[`_apply_capability_guards()`](../app/services/stage_aggregation.py) 将确定性路径和读取状态转换为
 Step issue，并与图像 Skill 结果一起计算最终 Verdict。
 
 常见状态：

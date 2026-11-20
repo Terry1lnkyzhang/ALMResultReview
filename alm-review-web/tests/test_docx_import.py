@@ -83,6 +83,83 @@ def sample_docx(test_case_id: int = 51954, run_id: int = 152837) -> bytes:
     return output.getvalue()
 
 
+def _docx(body: str) -> bytes:
+    document = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>{body}</w:body></w:document>'
+    )
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", document)
+    return output.getvalue()
+
+
+def test_parse_alm_docx_reads_the_test_id_and_run_id_report_layout() -> None:
+    body = "".join(
+        (
+            _paragraph("1Test Set ID : 15390  - STD Couch9", "TOC1"),
+            _paragraph("1.1.1.1Run ID : 1186069", "TOC4"),
+            _paragraph("Test Set ID : 15390  - STD Couch", "Heading1"),
+            _paragraph("Test ID :  34597 - Axial scan length", "Heading2"),
+            _table(
+                [
+                    ["Field Label", "Field Value", "Field Label", "Field Value"],
+                    ["Test Configuration: Test ID", "34597", "Test: Test Name", "Axial scan"],
+                    ["Test: Designer", "310296473(Jiwei Zhao)", "Tester", "310274147(Li Lei)"],
+                    ["Exec Date", "5/15/25", "Status", "Passed"],
+                ]
+            ),
+            _table([["Test: Description"], ["Purpose: verify scan length."]]),
+            _paragraph("Test Instance Runs", "Heading3"),
+            _paragraph("Run ID : 118606", "Heading4"),
+            _table(
+                [
+                    ["Field Label", "Field Value", "Field Label", "Field Value"],
+                    ["Test: Test Name:", "Axial scan length", "Tester:", "310274147(Li Lei)"],
+                    ["Location:", "CHESS-CAST-10002", "Status:", "Passed"],
+                    ["Exec Date:", "5/16/25", "None", "None"],
+                ]
+            ),
+            _table(
+                [
+                    ["Step Name", "Description:", "Expected"],
+                    ["Step 1", "Record the tape details.", "Equipment code: __"],
+                ]
+            ),
+            _table([["Actual"], ["Equipment code: EQ-001"]]),
+        )
+    )
+
+    data = parse_alm_docx(_docx(body), "Appendix B.docx")
+
+    assert len(data["records"]) == 1
+    record = data["records"][0]
+    assert record["testSet"]["id"] == "15390"
+    assert record["testSet"]["name"] == "STD Couch"
+    assert record["testOwner"] == "310296473"
+    run = record["run"]
+    assert (run["id"], run["test-id"], run["test-name"]) == (
+        "118606",
+        "34597",
+        "Axial scan length",
+    )
+    assert (run["owner"], run["execution-date"], run["location"]) == (
+        "310274147",
+        "2025-05-16",
+        "CHESS-CAST-10002",
+    )
+    assert run["steps"] == [
+        {
+            "step-order": 1,
+            "name": "Step 1",
+            "descriptionText": "Record the tape details.",
+            "expectedText": "Equipment code: __",
+            "actualText": "Equipment code: EQ-001",
+            "status": "Passed",
+        }
+    ]
+
+
 def test_parse_alm_docx_ignores_toc_and_maps_run_steps() -> None:
     data = parse_alm_docx(sample_docx(), "verification.docx")
 

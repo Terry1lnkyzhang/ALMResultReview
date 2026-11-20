@@ -4,9 +4,9 @@ version = 1
 
 [[stage]]
 id = "routing"
-skill = ""
+skill = "evidence-routing"
 gate = ""
-writes = ["evidence_routing", "reference_decisions"]
+writes = ["evidence_routing", "reference_decisions", "extracted_equipment"]
 
 [[stage]]
 id = "text_review"

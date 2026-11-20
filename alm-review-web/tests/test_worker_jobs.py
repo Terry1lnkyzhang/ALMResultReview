@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import (
+    AiConfig,
     AlmRun,
     EvidenceConfig,
     ReviewJob,
@@ -20,7 +21,7 @@ from app.models import (
     Workspace,
     utcnow,
 )
-from app.services import reviews, scheduler, worker_tasks
+from app.services import review_jobs, reviews, scheduler, worker_tasks
 from app.services.alm import FolderBatch, FolderCollectionProgress
 from app.services.review_policy import current_review_policy_key
 from app.services.reviews import (
@@ -118,7 +119,7 @@ def test_review_renewal_rejects_lost_worker_singleton(monkeypatch) -> None:
         job = claim_next_review_job(db, "worker-one", lease_seconds=60)
         assert job is not None
         expiry = job.lease_expires_at
-        monkeypatch.setattr(reviews, "fence_worker_lease", lambda *_args: False)
+        monkeypatch.setattr(review_jobs, "fence_worker_lease", lambda *_args: False)
 
         assert not reviews.renew_review_job_lease(
             db, job.id, "worker-one", 1, 120, worker_owner_token="former-owner"
@@ -143,7 +144,7 @@ def test_stale_review_failure_does_not_fail_a_reclaimed_job(monkeypatch) -> None
             _db.commit()
             raise RuntimeError("old attempt failed")
 
-        monkeypatch.setattr(reviews, "process_job", fail_after_reclaim)
+        monkeypatch.setattr(review_jobs, "process_job", fail_after_reclaim)
         assert reviews.process_claimed_review_job(
             db, first.id, expected_attempt=1, expected_claimed_by="worker-one"
         ) == (0, 0)
@@ -195,14 +196,13 @@ def test_expired_attempt_cannot_save_a_result_after_reclaim(tmp_path, monkeypatc
         db.get(AlmRun, 42).current_revision_id = revision.id
         db.add_all((
             ReviewJob(workspace_id=workspace.id, run_id=42, revision_id=revision.id),
-            reviews.AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
-            reviews.PromptVersion(name="test", template="test", is_active=True),
+            AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
         ))
         db.commit()
         old = claim_next_review_job(db, "worker-one", lease_seconds=60)
         assert old is not None
 
-        monkeypatch.setattr(reviews, "load_location_assessment", lambda *_args: {})
+        monkeypatch.setattr(review_jobs, "load_location_assessment", lambda *_args: {})
 
         def finish_after_reclaim(_ctx):
             with Session(engine) as competing_db:
@@ -222,7 +222,7 @@ def test_expired_attempt_cannot_save_a_result_after_reclaim(tmp_path, monkeypatc
                 raw_response="{}",
             )
 
-        monkeypatch.setattr(reviews, "execute_review", finish_after_reclaim)
+        monkeypatch.setattr(review_jobs, "execute_review", finish_after_reclaim)
         with pytest.raises(reviews.ReviewJobLeaseLost):
             reviews.process_job(
                 db, old, expected_attempt=1, expected_claimed_by="worker-one"
@@ -254,13 +254,12 @@ def test_review_can_finish_after_renewal_from_another_session(tmp_path, monkeypa
         db.get(AlmRun, 42).current_revision_id = revision.id
         db.add_all((
             ReviewJob(workspace_id=workspace.id, run_id=42, revision_id=revision.id),
-            reviews.AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
-            reviews.PromptVersion(name="test", template="test", is_active=True),
+            AiConfig(id=1, enabled=True, model_name="test", base_url="http://ai.test"),
         ))
         db.commit()
         claimed = claim_next_review_job(db, "worker-one", lease_seconds=60)
         assert claimed is not None
-        monkeypatch.setattr(reviews, "load_location_assessment", lambda *_args: {})
+        monkeypatch.setattr(review_jobs, "load_location_assessment", lambda *_args: {})
 
         def finish_after_renewal(_ctx):
             with Session(engine) as heartbeat_db:
@@ -276,7 +275,7 @@ def test_review_can_finish_after_renewal_from_another_session(tmp_path, monkeypa
                 raw_response="{}",
             )
 
-        monkeypatch.setattr(reviews, "execute_review", finish_after_renewal)
+        monkeypatch.setattr(review_jobs, "execute_review", finish_after_renewal)
         result = reviews.process_job(
             db, claimed, expected_attempt=1, expected_claimed_by="worker-one"
         )
@@ -736,7 +735,7 @@ def test_terminal_review_failure_is_not_retried(monkeypatch) -> None:
         def fail_terminally(_db, _job):
             raise SkillFailure("Model output violates the contract.", retryable=False)
 
-        monkeypatch.setattr(reviews, "process_job", fail_terminally)
+        monkeypatch.setattr(review_jobs, "process_job", fail_terminally)
 
         assert reviews.process_claimed_review_job(db, 1) == (0, 1)
 

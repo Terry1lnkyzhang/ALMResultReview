@@ -33,7 +33,6 @@ from app.models import (
     EquipmentRegistry,
     EvidenceConfig,
     ManualDecision,
-    PromptVersion,
     ReviewJob,
     ReviewResult,
     RunRevision,
@@ -43,7 +42,11 @@ from app.models import (
     WorkerHeartbeat,
     Workspace,
 )
-from app.services.ai_transport import ai_endpoint_available, ai_endpoint_health_status
+from app.services.ai_transport import (
+    ai_endpoint_available,
+    ai_endpoint_health_status,
+    test_ai_connection,
+)
 from app.services.decision_reason import (
     DecisionAnswer,
     DecisionRow,
@@ -82,14 +85,13 @@ from app.services.review_status import (
     is_force_qualified,
     review_update_reasons,
 )
-from app.services.reviews import (
+from app.services.manual_decisions import (
     FORCE_QUALIFIED_DECISIONS,
     CurrentReview,
     allowed_manual_decisions,
     current_review,
     revoke_manual_decision,
     save_manual_decision,
-    test_ai_connection,
 )
 from app.services.rich_text import render_alm_rich_text, snapshot_step_fields
 from app.services.scheduler import configure_scheduler
@@ -201,6 +203,10 @@ def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
         trace.setdefault("mode", mode)
         traces.append(trace)
 
+    routing = stages.get("routing", {})
+    if isinstance(routing, dict):
+        for trace in routing.get("skills", []):
+            add("routing", trace)
     text = stages.get("text_review", {})
     if isinstance(text, dict):
         for trace in text.get("skills", []):
@@ -212,6 +218,10 @@ def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(image, dict):
         for trace in image.get("skills", []):
             add("image_review", trace)
+    report = stages.get("report_review", {})
+    if isinstance(report, dict):
+        for trace in report.get("skills", []):
+            add("report_review", trace)
     equipment = stages.get("equipment_review", {})
     if isinstance(equipment, dict):
         add("equipment_review", equipment.get("skill"))
@@ -303,7 +313,6 @@ def _run_view(
     policy_key: str,
     users: dict[str, AlmUser],
     review=None,
-    prompt_version_id: int | None = None,
     model_name: str | None = None,
 ) -> dict:
     if review is None:
@@ -323,7 +332,6 @@ def _run_view(
         "review_update_reasons": review_update_reasons(
             review.result,
             policy_key,
-            prompt_version_id,
             model_name,
         ),
     }
@@ -848,12 +856,6 @@ def dashboard(
         .order_by(desc(AlmRun.execution_at), desc(AlmRun.run_id))
     ).all()
     policy_key = current_review_policy_key(db, current_workspace.id)
-    active_prompt = db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.is_active.is_(True))
-        .order_by(desc(PromptVersion.id))
-        .limit(1)
-    )
     ai_configs = db.scalars(select(AiConfig).order_by(AiConfig.id)).all()
     ai_config = next((config for config in ai_configs if config.id == 1), None)
     active_model_names = list(
@@ -875,7 +877,6 @@ def dashboard(
             policy_key,
             users,
             reviews_by_run[run.run_id],
-            active_prompt.id if active_prompt else None,
             active_model_name,
         )
         for run in runs
@@ -1836,17 +1837,10 @@ def _run_detail_response(
         test_location_resolution = SimpleNamespace(status="unavailable", version=None)
     policy_key = current_review_policy_key(db, run.workspace_id)
     review = current_review(db, run, policy_key)
-    active_prompt = db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.is_active.is_(True))
-        .order_by(desc(PromptVersion.id))
-        .limit(1)
-    )
     ai_config = db.get(AiConfig, 1)
     update_reasons = review_update_reasons(
         review.result,
         policy_key,
-        active_prompt.id if active_prompt else None,
         ai_config.model_name if ai_config else None,
     )
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
@@ -3118,12 +3112,6 @@ def configuration(
     ai_config = db.get(AiConfig, 1)
     ai_config_secondary = db.get(AiConfig, 2) or AiConfig(id=2, enabled=False)
     evidence_config = workspace_evidence_config(db, current_workspace.id)
-    prompt = db.scalar(
-        select(PromptVersion)
-        .where(PromptVersion.is_active.is_(True))
-        .order_by(desc(PromptVersion.id))
-        .limit(1)
-    )
     source_locked = bool(
         db.scalar(
             select(AlmRun.run_id)
@@ -3168,14 +3156,12 @@ def configuration(
                 ai_config_secondary
             ),
             "evidence_config": evidence_config,
-            "prompt": prompt,
             "skill_catalog": _skill_catalog(),
             "app_timezone": get_settings().app_timezone,
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
     )
-
 
 @router.post("/ops/test-ai")
 def test_ai(
@@ -3270,13 +3256,10 @@ def save_configuration(
     external_evidence_review_enabled: bool = Form(False),
     equipment_review_enabled: bool = Form(False),
     location_review_enabled: bool = Form(False),
-    review_mode: str = Form("standard"),
     equipment_area_filter: str = Form(""),
     review_queue_paused: bool = Form(False),
     sync_queue_paused: bool = Form(False),
     queue_priority: int = Form(0),
-    prompt_name: str = Form(...),
-    prompt_template: str = Form(...),
     db: Session = Depends(get_db),
 ):
     workspace = db.get(Workspace, workspace_id)
@@ -3324,9 +3307,6 @@ def save_configuration(
         )
     workspace.name = normalized_workspace_name
     workspace.project = workspace_project.strip()
-    if review_mode not in {"standard", "compare"}:
-        return _redirect(redirect_path, "Invalid review mode.", "error")
-    workspace.review_mode = review_mode
     workspace.equipment_review_enabled = equipment_review_enabled
     workspace.location_review_enabled = location_review_enabled is True
     workspace.equipment_area_filter = equipment_area_filter.strip()
@@ -3486,17 +3466,6 @@ def save_configuration(
         external_evidence_review_enabled
     )
 
-    active_prompt = db.scalar(select(PromptVersion).where(PromptVersion.is_active.is_(True)))
-    if active_prompt is None or (
-        active_prompt.name != prompt_name.strip() or active_prompt.template != prompt_template
-    ):
-        if active_prompt is not None:
-            active_prompt.is_active = False
-        db.add(
-            PromptVersion(
-                name=prompt_name.strip(), template=prompt_template, is_active=True
-            )
-        )
     db.commit()
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
@@ -3614,7 +3583,6 @@ def create_workspace(
         project=source.project if source else "",
         equipment_review_enabled=source.equipment_review_enabled if source else True,
         location_review_enabled=source.location_review_enabled if source else True,
-        review_mode=source.review_mode if source else "standard",
         equipment_area_filter=source.equipment_area_filter if source else "",
         queue_priority=source.queue_priority if source else 0,
         archived=False,

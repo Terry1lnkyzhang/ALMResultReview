@@ -1,392 +1,412 @@
 [
   {
     "input": {
-      "review_step": 1,
-      "description": "Measure voltage using Fluke 87V.",
-      "expected": "Voltage shall be between 12.0 V and 13.0 V.",
-      "actual": "Voltage was 12.4 V. See \\\\server\\results\\screen.png.",
-      "actual_format": {"layout_text": "Voltage was 12.4 V.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": [
-        {"candidate_id": "eq-01", "type": "equipment", "value": "Fluke 87V", "source_field": "description", "detection_source": "equipment_registry_match"},
-        {"candidate_id": "img-01", "type": "image", "value": "\\\\server\\results\\screen.png", "source_field": "actual", "detection_source": "path_extension"}
+      "project": "Alpha_V2",
+      "alm_run_status": "Passed",
+      "execution_location_config": null,
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Passed",
+          "description": "Measure supply voltage.",
+          "expected": "Voltage shall be between 12.0 V and 13.0 V.",
+          "actual": "Voltage was 12.4 V. See \\\\server\\results\\screen.png.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": ["\\\\server\\results\\screen.png"]
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "Record current and voltage.",
+          "expected": "1. Current is 2 A. 2. Voltage is 12 V.",
+          "actual": "1. Current was 2 A.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [
+            {"number": 1, "expected": "Current is 2 A.", "actual": "Current was 2 A."},
+            {"number": 2, "expected": "Voltage is 12 V.", "actual": ""}
+          ],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 3,
+          "alm_step_status": "Passed",
+          "description": "Run the primary job and the secondary batch.",
+          "expected": "1. Record job name: _. 2. The primary job should transition normally(Pending->Active->Failed). The secondary batch completes successfully.",
+          "actual": "1. Record job name: Job-A, Batch-B. 2. The primary job transitioned normally(Pending->Active->Failed). The secondary batch completed successfully.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [
+            {"number": 1, "expected": "Record job name: _.", "actual": "Record job name: Job-A, Batch-B."},
+            {"number": 2, "expected": "The primary job should transition normally(Pending->Active->Failed). The secondary batch completes successfully.", "actual": "The primary job transitioned normally(Pending->Active->Failed). The secondary batch completed successfully."}
+          ],
+          "routed_evidence_references": []
+        }
       ]
     },
     "output": {
-      "review_step": 1,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [
-        {"candidate_id": "eq-01", "role": "test_equipment", "requires_check": true, "reason": "该设备用于产生已记录的测量结果。"},
-        {"candidate_id": "img-01", "role": "result_evidence", "requires_check": true, "reason": "Actual 引用了该图像作为结果证据。"}
-      ],
-      "extracted_equipment": [
-        {"device_name": "Fluke 87V", "equipment_id": "", "serial_number": "", "reported_calibration_due_date": "", "source_text": "Measure voltage using Fluke 87V."}
-      ],
-      "summary": "Actual 记录的数值在 Expected 范围内，并提供了支持性证据。"
+      "assessments": [
+        {
+          "review_step": 1,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "Voltage", "bound": "12.0 V .. 13.0 V", "actual": "12.4 V", "within_bound": true}
+          ],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "Actual 记录的数值在 Expected 范围内，并提供了支持性证据。"
+        },
+        {
+          "review_step": 2,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "Current", "bound": "= 2 A", "actual": "2 A", "within_bound": true}
+          ],
+          "conclusion_checks": [],
+          "findings": [
+            {"code": "actual_insufficient", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 缺少 Expected 编号项 2 所要求的电压结果。"}
+          ],
+          "summary": "Actual 仅记录了两个必需结果中的一个。"
+        },
+        {
+          "review_step": 3,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [
+            {"claim_excerpt": "The primary job transitioned normally(Pending->Active->Failed). The secondary batch completed successfully.", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [],
+          "summary": "Expected 将 Pending->Active->Failed 规定为正常状态转移，Actual 与其完全一致，因此该步骤通过。"
+        }
+      ]
     }
   },
   {
     "input": {
-      "review_step": 2,
-      "description": "Record current and voltage.",
-      "expected": "1. Current is 2 A. 2. Voltage is 12 V.",
-      "actual": "1. Current was 2 A.",
-      "actual_format": {"layout_text": "1. Current was 2 A.", "signals": []},
-      "numbered_comparison": [
-        {"number": 1, "expected": "Current is 2 A.", "actual": "Current was 2 A."},
-        {"number": 2, "expected": "Voltage is 12 V.", "actual": ""}
-      ],
-      "reference_candidates": []
+      "project": "Alpha_V2",
+      "alm_run_status": "Passed",
+      "execution_location_config": null,
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Passed",
+          "description": "Update module firmware manually. (only for Beta)",
+          "expected": "Firmware updates successfully.",
+          "actual": "This execution was on Alpha.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "This step is only for configurations supporting 0.34s cycle mode. Perform high-speed acquisition.",
+          "expected": "Acquisition completes at 0.34s.",
+          "actual": "System Model-B only supports 0.35s/0.40s/0.50s cycle modes.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 3,
+          "alm_step_status": "Passed",
+          "description": "Record the part number and version of the Service Utility defined in the plan.",
+          "expected": "Record Service Utility part number, Rev and Version.",
+          "actual": "This step does not apply because Service Utility is installed on the external service laptop, so the environment check is performed there rather than on the test bay.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 4,
+          "alm_step_status": "Passed",
+          "description": "Inspect the verification report for range coverage, matrix size, and bit depth.",
+          "expected": "Record report ID, revision, section, and conclusion.",
+          "actual": "DOC-10042 Rev A, Section 5.3: Passed.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        }
+      ]
     },
     "output": {
-      "review_step": 2,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "actual_insufficient", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 缺少 Expected 编号项 2 所要求的电压结果。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Actual 仅记录了两个必需结果中的一个。"
+      "assessments": [
+        {
+          "review_step": 1,
+          "applicability": "not_applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "Description 将该步骤限定为 Beta，而当前项目及 Actual 均为 Alpha，因此该步骤不适用。"
+        },
+        {
+          "review_step": 2,
+          "applicability": "not_applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [
+            {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只列出了可用档位，未明确记载本步骤不适用的结论及原因，需人工核对。"}
+          ],
+          "summary": "可能不适用当前配置，但 Actual 缺少明确的 N/A 结论与原因。"
+        },
+        {
+          "review_step": 3,
+          "applicability": "not_applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "Actual 已明确给出不适用结论及具体原因，不要求补充预期版本值。"
+        },
+        {
+          "review_step": 4,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [
+            {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 仅给出受控文档章节和整体 Passed，无法对应范围、矩阵及位深各项独立要求的验证结果，需人工核对。"}
+          ],
+          "summary": "文档引用已给出，但多项独立验收要求缺少可复核的对应说明。"
+        }
+      ]
     }
   },
   {
     "input": {
-      "review_step": 3,
-      "description": "Use the CDM Programming tool to update the CDM firmware for DMS. (only for Taichi)",
-      "expected": "All firmware using manual refresh software shall be updated successfully.",
-      "actual": "This was Earth.",
-      "actual_format": {"layout_text": "This was Earth.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
+      "project": "Alpha_V2",
+      "alm_run_status": "Passed",
+      "execution_location_config": null,
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Passed",
+          "description": "Tilt angle = -5 deg, mode = Soft, thickness = 1.25.",
+          "expected": "The output displays the configured parameters.",
+          "actual": "The automated test passed. Refer to \\\\server\\results\\58125\\Automated_Tilt_Standard_58125.html.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": ["\\\\server\\results\\58125\\Automated_Tilt_Standard_58125.html"]
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "Tilt angle = -5 deg.",
+          "expected": "The output displays the configured parameters.",
+          "actual": "Tilt angle was 5 deg. Refer to \\\\server\\results\\58125\\Tilt_58125.html.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": ["\\\\server\\results\\58125\\Tilt_58125.html"]
+        },
+        {
+          "review_step": 3,
+          "alm_step_status": "Passed",
+          "description": "Measure output voltage 3 times.",
+          "expected": "Record 3 voltage trials in the table.",
+          "actual": "| Trial | Voltage (V) |\n| --- | --- |\n| 1 | 5.01 |\n| 2 | 5.02 |\n| 3 | 5.00 |\n\nThe angle of 0 deg was satisfied with 0 ± 0 deg.\n\nNormality test:\n| Metric | Voltage (V) |\n| --- | --- |\n| Result | Passed |\n\nThe data failed the normality test.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        }
+      ]
     },
     "output": {
-      "review_step": 3,
-      "applicability": "not_applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Description 将该步骤限定为 Taichi，而 Actual 记录本次执行为 Earth，因此该步骤不适用。"
+      "assessments": [
+        {
+          "review_step": 1,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "脚本名和文件名仅标识证据位置，不证明报告缺少 -5 deg 参数；报告内容由下游 HTML 阶段核验。"
+        },
+        {
+          "review_step": 2,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "Tilt angle", "bound": "= -5 deg", "actual": "5 deg", "within_bound": false}
+          ],
+          "conclusion_checks": [],
+          "findings": [
+            {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 正文明确记录 Tilt angle 为 5 deg，与要求的 -5 deg 直接冲突。"}
+          ],
+          "summary": "Actual 正文记录的角度值与要求直接冲突。"
+        },
+        {
+          "review_step": 3,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [
+            {"claim_excerpt": "The angle of 0 deg was satisfied with 0 ± 0 deg.", "matches_expected_subject_and_unit": false, "matches_recorded_data": true},
+            {"claim_excerpt": "The data failed the normality test.", "matches_expected_subject_and_unit": true, "matches_recorded_data": false}
+          ],
+          "findings": [
+            {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 中出现了与本步电压（V）测量不符的角度（deg）结论语句，物理量与单位错误。"},
+            {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 正态性检验表记录 Result 为 Passed，但末尾文字结论却称未通过正态性检验，内部记录直接矛盾。"}
+          ],
+          "summary": "Actual 包含物理量与单位错误的残留结论语句，且正态性文字结论与表格结果直接矛盾。"
+        }
+      ]
     }
   },
   {
     "input": {
-      "review_step": 12,
-      "alm_step_status": "Passed",
-      "description": "Inspect the report for metal detection across FOV and Z range, 512x512 images, and 12/16-bit depth.",
-      "expected": "Record report name, revision, section, and conclusion.",
-      "actual": "D002566624 Rev A, Section 5.3: Passed.",
-      "actual_format": {"layout_text": "D002566624 Rev A, Section 5.3: Passed.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 12,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只给出报告章节和整体 Passed，无法对应 FOV、Z 范围、图像矩阵及位深的各项验证结果，需人工核对所引报告。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "报告引用已标识，但多个验收要素缺少可复核的对应说明。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 13,
-      "alm_step_status": "Passed",
-      "description": "This step is only for configurations supporting 0.34s/r rotation. Perform a cardiac scan.",
-      "expected": "The scan completes at 0.34s/r.",
-      "actual": "Earth CT5300 only has 0.35s/0.40s/0.50s rotation time.",
-      "actual_format": {"layout_text": "Earth CT5300 only has 0.35s/0.40s/0.50s rotation time.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 13,
-      "applicability": "not_applicable",
-      "findings": [
-        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "Actual 只列出了可用转速，没有明确记载本步骤不适用的结论及原因，需人工核对。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "可能不适用该配置，但 Actual 没有明确的 N/A 结论和原因。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 14,
-      "alm_step_status": "Passed",
-      "description": "Record the 12NC and version of Service Tool file defined in the plan.",
-      "expected": "Record Service Tool 12NC, Rev and Version.",
-      "actual": "This step does not apply because Service Tool is installed on the service laptop, so the environment check is performed there and does not depend on the Test bay.",
-      "actual_format": {"layout_text": "This step does not apply because Service Tool is installed on the service laptop.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 14,
-      "applicability": "not_applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Actual 已明确说明本 Test bay 不适用及原因；不要求在此步骤记录版本值或另附批准依据。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 15,
-      "alm_step_status": "Passed",
+      "project": "Alpha_V2",
+      "alm_run_status": "Passed",
       "execution_location_config": {
-        "item": "SY Bay09(CHESS-SCIM-0338)", "product": "IncisiveCT V7.0",
-        "dms_version": "V2", "dms_coverage": "4cm",
-        "couch": "Incisive STD", "computer": "Incisive G4 STD"
+        "item": "Lab Bay01(SYS-UNIT-01)",
+        "product": "ModelA V7.0",
+        "dms_version": "V2",
+        "dms_coverage": "4cm",
+        "couch": "Standard Couch",
+        "computer": "Tier1 STD"
       },
-      "description": "Record the max IPS of the executed DMS configuration.",
-      "expected": "For 4cm DMS configuration: max IPS>=80. For 2cm DMS configuration: max IPS>=60.",
-      "actual": "For 4cm DMS configuration: max IPS was 87.5, meeting the 80 IPS requirement.",
-      "actual_format": {"layout_text": "For 4cm DMS configuration: max IPS was 87.5.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 15,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "执行时 Location 为 4cm DMS，Actual 只记录了 4cm 分支的合格数值，未明确说明本次执行配置是 4cm，也未说明 2cm 配置不适用及原因，需人工确认记录范围。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "4cm 分支有结果；Actual 未明确本次配置及 2cm 分支 N/A，不以缺少 2cm 数值直接判失败。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 16,
-      "alm_step_status": "Passed",
-      "execution_location_config": {
-        "item": "SY Bay09(CHESS-SCIM-0338)", "product": "IncisiveCT V7.0",
-        "dms_version": "V2", "dms_coverage": "4cm",
-        "couch": "Incisive STD", "computer": "Incisive G4 STD"
-      },
-      "description": "Record the max IPS of the executed DMS configuration.",
-      "expected": "For 4cm DMS configuration: max IPS>=80. For 2cm DMS configuration: max IPS>=60.",
-      "actual": "For 4cm DMS configuration: max IPS was 70. The 2cm branch is N/A because this Location has 4cm DMS.",
-      "actual_format": {"layout_text": "For 4cm DMS configuration: max IPS was 70.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 16,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "当前 Location 为 4cm DMS，Actual 的 max IPS=70 小于适用要求 80；2cm 已说明 N/A，不能抵消 4cm 的明确失败。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "当前 4cm 分支结果与 Expected 冲突，因此记录不合格。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 4,
-      "description": "Check the computer environment used.",
-      "expected": "The computer parameters are the same or higher than the following: CPU 1.7GHZ, RAM 16G. Record computer parameters: ______.",
-      "actual": "The computer parameters were the same or higher than the following: CPU 1.7GHZ, RAM 16G.\nRecorded computer parameters: \\\\code1\\results\\Cycle01\\70290\\Step1.ipg",
-      "actual_format": {"layout_text": "Recorded computer parameters:", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": [
-        {"candidate_id": "file-01", "type": "file", "value": "\\\\code1\\results\\Cycle01\\70290\\Step1.ipg", "source_field": "actual", "detection_source": "path_extension"}
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Passed",
+          "description": "Record the max throughput of the executed detector coverage configuration.",
+          "expected": "For 4cm coverage: throughput>=80. For 2cm coverage: throughput>=60.",
+          "actual": "For 4cm coverage: throughput was 87.5, meeting the >=80 requirement.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "Passed",
+          "description": "Record the max throughput of the executed detector coverage configuration.",
+          "expected": "For 4cm coverage: throughput>=80. For 2cm coverage: throughput>=60.",
+          "actual": "For 4cm coverage: throughput was 70. The 2cm branch is N/A because this test bay is configured with 4cm coverage.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        }
       ]
     },
     "output": {
-      "review_step": 4,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [
-        {"candidate_id": "file-01", "role": "result_evidence", "requires_check": true, "reason": "Actual 通过引用该证据文件满足了记录要求。"}
-      ],
-      "extracted_equipment": [],
-      "summary": "Actual 确认了所需参数，并引用证据文件记录相关数值。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 5,
-      "description": "Run the MPR recon and the volume batch.",
-      "expected": "1. Record batch name: _. 2. The mpr recon should be executed normally(Pending->Active->Failed). The volume batch should be able to complete recon successfully.",
-      "actual": "1. Record batch name: Oblique MPR, Volume Batch. 2. The MPR recon was executed normally(Pending->Active->Failed). The volume batch was able to complete recon successfully.",
-      "actual_format": {"layout_text": "1. Record batch name: Oblique MPR, Volume Batch.", "signals": []},
-      "numbered_comparison": [
-        {"number": 1, "expected": "Record batch name: _.", "actual": "Record batch name: Oblique MPR, Volume Batch."},
-        {"number": 2, "expected": "The mpr recon should be executed normally(Pending->Active->Failed). The volume batch should be able to complete recon successfully.", "actual": "The MPR recon was executed normally(Pending->Active->Failed). The volume batch was able to complete recon successfully."}
-      ],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 5,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Expected 将 Pending->Active->Failed 规定为正常结果，Actual 与其完全一致，因此该步骤通过。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 6,
-      "description": "Record the stopwatch used for the timing measurement.",
-      "expected": "Record equipment and calibration due date: ______.",
-      "actual": "Stop watch S/N: C1221B993G, Calibration Due date: 2027/07/05. Elapsed time was 4.2 s.",
-      "actual_format": {"layout_text": "Stop watch S/N: C1221B993G", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 6,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [
-        {"device_name": "Stop watch", "equipment_id": "", "serial_number": "C1221B993G", "reported_calibration_due_date": "2027-07-05", "source_text": "Stop watch S/N: C1221B993G, Calibration Due date: 2027/07/05."}
-      ],
-      "summary": "Actual 记录了 Expected 要求的秒表、序列号和校准到期日。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 7,
-      "description": "Run the protocol and review the reconstructed images.",
-      "expected": "The scan completes successfully and image quality is acceptable.",
-      "actual": "The scan completed. Screenshot referred to \\\\server\\results\\Cycle01\\Bay10_105613.",
-      "actual_format": {"layout_text": "The scan completed.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": [
-        {"candidate_id": "folder-01", "type": "folder_or_unknown", "value": "\\\\server\\results\\Cycle01\\Bay10_105613", "source_field": "actual", "detection_source": "path_without_extension"}
+      "assessments": [
+        {
+          "review_step": 1,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "throughput (4cm coverage)", "bound": ">= 80", "actual": "87.5", "within_bound": true}
+          ],
+          "conclusion_checks": [
+            {"claim_excerpt": "meeting the >=80 requirement", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [
+            {"code": "record_documentation_gap", "severity": "manual", "basis": "direct_step_text", "reason": "执行时台位配置为 4cm，Actual 只记录了 4cm 分支的合格数值，未明确说明本次执行配置为 4cm 且 2cm 分支不适用及原因，需人工确认记录范围。"}
+          ],
+          "summary": "4cm 分支数值合格，但缺少对本次执行配置及 2cm 分支 N/A 原因的说明。"
+        },
+        {
+          "review_step": 2,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "throughput (4cm coverage)", "bound": ">= 80", "actual": "70", "within_bound": false}
+          ],
+          "conclusion_checks": [],
+          "findings": [
+            {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "当前台位配置为 4cm，Actual 记录的 throughput=70 小于适用下限 80；2cm 分支 N/A 不能抵消当前适用分支的超限失败。"}
+          ],
+          "summary": "当前适用的 4cm 分支实测值违反下限要求，记录不合格。"
+        }
       ]
-    },
-    "output": {
-      "review_step": 7,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [
-        {"candidate_id": "folder-01", "role": "result_evidence_location", "requires_check": true, "reason": "Actual 将该文件夹引用为截图结果证据的存放位置。"}
-      ],
-      "extracted_equipment": [],
-      "summary": "Actual 记录了扫描完成，并引用了包含支持性图像证据的文件夹。"
     }
   },
   {
     "input": {
-      "review_step": 8,
-      "description": "Gantry angle = -5 degrees, Image definition=Soft tissue, slice thickness=1.25.",
-      "expected": "The image displays the configured parameters.",
-      "actual": "The automated test passed. Refer to \\\\server\\results\\58125\\CT-NMP.SRS.Fun.576.Precise Image_Gantry tilt_Standard Couch_58125.html.",
-      "actual_format": {"layout_text": "The automated test passed.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": [
-        {"candidate_id": "html-08", "type": "html_report", "value": "\\\\server\\results\\58125\\CT-NMP.SRS.Fun.576.Precise Image_Gantry tilt_Standard Couch_58125.html", "source_field": "actual", "detection_source": "path_extension"}
-      ]
-    },
-    "output": {
-      "review_step": 8,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [
-        {"candidate_id": "html-08", "role": "result_evidence", "requires_check": true, "reason": "Actual 引用了整案自动化报告；参数覆盖情况由后续 HTML 证据评审确认。"}
-      ],
-      "extracted_equipment": [],
-      "summary": "脚本名和文件名是证据身份，不证明报告缺少 -5 度参数；该引用已转交 HTML 证据评审。"
-    }
-  },
-  {
-    "input": {
-      "review_step": 9,
-      "description": "Gantry angle = -5 degrees.",
-      "expected": "The image displays the configured parameters.",
-      "actual": "Gantry angle was 5 degrees. Refer to \\\\server\\results\\58125\\Gantry tilt_58125.html.",
-      "actual_format": {"layout_text": "Gantry angle was 5 degrees.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": [
-        {"candidate_id": "html-09", "type": "html_report", "value": "\\\\server\\results\\58125\\Gantry tilt_58125.html", "source_field": "actual", "detection_source": "path_extension"}
-      ]
-    },
-    "output": {
-      "review_step": 9,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 正文记录 Gantry angle 为 5 度，与要求的 -5 度直接冲突。"}
-      ],
-      "reference_decisions": [
-        {"candidate_id": "html-09", "role": "result_evidence", "requires_check": true, "reason": "Actual 还引用了自动化报告作为结果证据。"}
-      ],
-      "extracted_equipment": [],
-      "summary": "Actual 正文明示的角度与要求直接冲突，因此不能由报告引用自动消除。"
-    }
-  },
-  {
-    "input": {
+      "project": "Alpha_V2",
       "alm_run_status": "Failed",
-      "review_step": 10,
-      "alm_step_status": "Failed",
-      "description": "Measure the startup time.",
-      "expected": "Startup time shall be no more than 10 seconds.",
-      "actual": "Startup took 14.2 seconds, exceeding the 10 second limit.",
-      "actual_format": {"layout_text": "Startup took 14.2 seconds.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
+      "execution_location_config": null,
+      "steps": [
+        {
+          "review_step": 1,
+          "alm_step_status": "Failed",
+          "description": "Measure the startup time.",
+          "expected": "Startup time shall be no more than 10 seconds.",
+          "actual": "Startup took 14.2 seconds, exceeding the 10 second limit.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 2,
+          "alm_step_status": "No Run",
+          "description": "Execute the remaining regression step.",
+          "expected": "The regression step passes.",
+          "actual": "",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 3,
+          "alm_step_status": "Failed",
+          "description": "Measure the startup time.",
+          "expected": "Startup time shall be no more than 10 seconds.",
+          "actual": "Startup completed successfully in 8.1 seconds.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 4,
+          "alm_step_status": "Failed",
+          "description": "Select the primary item and verify secondary item deselection.",
+          "expected": "(For V1.0) Secondary item cannot be deselected. (For V2.0) Secondary item can be deselected.",
+          "actual": "BUG-2048 Secondary item could not be deselected on V2.0.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        }
+      ]
     },
     "output": {
-      "review_step": 10,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Actual 清楚记录了未满足 Expected 的测量结果，与 Failed 状态一致，因此该失败记录合格。"
-    }
-  },
-  {
-    "input": {
-      "alm_run_status": "Failed",
-      "review_step": 11,
-      "alm_step_status": "No Run",
-      "description": "Execute the remaining regression test.",
-      "expected": "The regression test passes.",
-      "actual": "",
-      "actual_format": {"layout_text": "", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 11,
-      "applicability": "applicable",
-      "findings": [],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Run 已失败且该步骤状态为 No Run，空白 Actual 与未执行状态一致。"
-    }
-  },
-  {
-    "input": {
-      "alm_run_status": "Failed",
-      "review_step": 12,
-      "alm_step_status": "Failed",
-      "description": "Measure the startup time.",
-      "expected": "Startup time shall be no more than 10 seconds.",
-      "actual": "Startup completed successfully in 8.1 seconds.",
-      "actual_format": {"layout_text": "Startup completed successfully in 8.1 seconds.", "signals": []},
-      "numbered_comparison": [],
-      "reference_candidates": []
-    },
-    "output": {
-      "review_step": 12,
-      "applicability": "applicable",
-      "findings": [
-        {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 记录了满足 Expected 的成功结果，与可信的 Failed 状态矛盾。"}
-      ],
-      "reference_decisions": [],
-      "extracted_equipment": [],
-      "summary": "Actual 描述成功结果，但 ALM 步骤状态为 Failed，记录不一致。"
+      "assessments": [
+        {
+          "review_step": 1,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "Startup time", "bound": "<= 10 seconds", "actual": "14.2 seconds", "within_bound": false}
+          ],
+          "conclusion_checks": [
+            {"claim_excerpt": "exceeding the 10 second limit", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [],
+          "summary": "Actual 清楚记录了未满足 Expected 的超限结果，与可信的 Failed 状态一致，因此该失败记录合格。"
+        },
+        {
+          "review_step": 2,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "Run 已失败且该步骤状态为 No Run，空白 Actual 与未执行状态一致。"
+        },
+        {
+          "review_step": 3,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "Startup time", "bound": "<= 10 seconds", "actual": "8.1 seconds", "within_bound": true}
+          ],
+          "conclusion_checks": [
+            {"claim_excerpt": "Startup completed successfully in 8.1 seconds.", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [
+            {"code": "expected_actual_mismatch", "severity": "fail", "basis": "direct_step_text", "reason": "Actual 记录了满足 Expected 的成功结果，与可信的 Failed 步骤状态直接矛盾。"}
+          ],
+          "summary": "Actual 描述成功结果，但 ALM 步骤状态为 Failed，记录不一致。"
+        },
+        {
+          "review_step": 4,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [
+            {"claim_excerpt": "BUG-2048 Secondary item could not be deselected on V2.0.", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [],
+          "summary": "步骤状态为 Failed，Actual 清楚记录了未满足 V2.0 预期行为的缺陷现象及编号，失败记录合格。"
+        }
+      ]
     }
   }
 ]

@@ -1,0 +1,78 @@
+[
+  {
+    "input": {
+      "steps": [
+        {
+          "review_step": 1,
+          "description": "Measure voltage using Multimeter M87.",
+          "expected": "Voltage shall be between 12.0 V and 13.0 V.",
+          "actual": "Voltage was 12.4 V. See \\\\server\\results\\screen.png.",
+          "reference_candidates": [
+            {"candidate_id": "step-1-ref-1", "type": "equipment", "value": "Multimeter M87", "source_field": "description", "detection_source": "equipment_registry_match"},
+            {"candidate_id": "step-1-ref-2", "type": "image", "value": "\\\\server\\results\\screen.png", "source_field": "actual", "detection_source": "path_extension"}
+          ]
+        },
+        {
+          "review_step": 2,
+          "description": "Record the stopwatch used for the timing measurement.",
+          "expected": "Record equipment and calibration due date: ______.",
+          "actual": "Stop watch S/N: SW-9931, Calibration Due date: 2027/07/05. Elapsed time was 4.2 s.",
+          "reference_candidates": []
+        },
+        {
+          "review_step": 3,
+          "description": "Run the test sequence and archive screenshots.",
+          "expected": "The sequence completes and output is acceptable.",
+          "actual": "Completed. Screenshot referred to \\\\server\\results\\Cycle01\\Case_10501.",
+          "reference_candidates": [
+            {"candidate_id": "step-3-ref-1", "type": "folder_or_unknown", "value": "\\\\server\\results\\Cycle01\\Case_10501", "source_field": "actual", "detection_source": "path_without_extension"}
+          ]
+        },
+        {
+          "review_step": 4,
+          "description": "Record the controller module serial number on the unit under test.",
+          "expected": "Controller SN: ______.",
+          "actual": "Controller SN: MOD-52105.",
+          "reference_candidates": [
+            {"candidate_id": "step-4-ref-1", "type": "equipment", "value": "MOD-52105", "source_field": "actual", "detection_source": "equipment_identifier"}
+          ]
+        }
+      ]
+    },
+    "output": {
+      "decisions": [
+        {
+          "review_step": 1,
+          "reference_decisions": [
+            {"candidate_id": "step-1-ref-1", "role": "test_equipment", "requires_check": true, "reason": "该仪表用于产生已记录的测量结果。"},
+            {"candidate_id": "step-1-ref-2", "role": "result_evidence", "requires_check": true, "reason": "Actual 引用了该图像作为结果证据。"}
+          ],
+          "extracted_equipment": [
+            {"device_name": "Multimeter M87", "equipment_id": "", "serial_number": "", "reported_calibration_due_date": "", "source_text": "Measure voltage using Multimeter M87."}
+          ]
+        },
+        {
+          "review_step": 2,
+          "reference_decisions": [],
+          "extracted_equipment": [
+            {"device_name": "Stop watch", "equipment_id": "", "serial_number": "SW-9931", "reported_calibration_due_date": "2027-07-05", "source_text": "Stop watch S/N: SW-9931, Calibration Due date: 2027/07/05."}
+          ]
+        },
+        {
+          "review_step": 3,
+          "reference_decisions": [
+            {"candidate_id": "step-3-ref-1", "role": "result_evidence_location", "requires_check": true, "reason": "Actual 将该文件夹引用为截图结果证据的存放位置。"}
+          ],
+          "extracted_equipment": []
+        },
+        {
+          "review_step": 4,
+          "reference_decisions": [
+            {"candidate_id": "step-4-ref-1", "role": "dut_or_other", "requires_check": false, "reason": "控制器模块属于被测系统部件，而非受控测量设备。"}
+          ],
+          "extracted_equipment": []
+        }
+      ]
+    }
+  }
+]

@@ -17,9 +17,10 @@ from app.models import (
     RunStep,
     SyncJob,
 )
+from app.services.manual_decisions import current_review
+from app.services.review_jobs import MAX_REVIEW_JOB_ATTEMPTS
 from app.services.review_policy import current_review_policy_key
 from app.services.review_status import current_reviews, is_force_qualified
-from app.services.reviews import MAX_REVIEW_JOB_ATTEMPTS, current_review
 from app.services.run_status import REVIEWABLE_RUN_STATUSES
 from app.services.workspaces import resolve_workspace
 

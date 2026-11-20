@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.services.evidence import html_path_testcase_ids
+from app.services.timezones import alm_execution_in_app_timezone
 
 _SCRIPT_NAME_RE = re.compile(
     r"test\s+scripts?\s+name\s*:\s*(.+?)"
@@ -33,7 +37,7 @@ _RELEASE_QUERY = text(
     "FROM atframeworkdb.releasetable "
     "WHERE LOWER(ProjectName) = LOWER(:project_name) "
     "AND TRIM(TestcaseID) = :testcase_id "
-    "ORDER BY ReleaseRevision DESC, ReleaseTime DESC, ID DESC"
+    "ORDER BY ReleaseTime DESC, ReleaseRevision DESC, ID DESC"
 )
 _RELEASE_POLICY_QUERY = text(
     "SELECT ID, TestcaseID, ProjectName, FilePath, ReleaseTime, ReleaseVersion, "
@@ -80,7 +84,8 @@ def _document_parts(value: Any) -> tuple[str, str]:
 
 
 def _script_key(value: Any) -> str:
-    return " ".join(_string(value).split()).strip(" ,.;").casefold()
+    key = " ".join(_string(value).split()).strip(" ,.;").casefold()
+    return re.sub(r"\.ya?ml$", "", key)
 
 
 def _script_without_testcase_id(value: Any) -> str:
@@ -108,7 +113,7 @@ def _claimed_testcase_id(script_name: str) -> str:
 
 def _html_script_name(path: str, testcase_id: str) -> str:
     stem = PureWindowsPath(path).stem.strip()
-    without_fragment = re.sub(r"_[2-9]\d*$", "", stem)
+    without_fragment = re.sub(r"_(?:[2-9]|[1-9]\d+)$", "", stem)
     if testcase_id in _claimed_testcase_ids(without_fragment):
         return without_fragment
     return stem
@@ -209,6 +214,92 @@ def automation_release_policy_snapshot(
     }
 
 
+def _parse_release_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    raw = _string(value)
+    if not raw:
+        return None
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, pattern)
+        except ValueError:
+            continue
+    return None
+
+
+def effective_step_execution_at(
+    step: Mapping[str, Any],
+    run_execution_at: datetime | None,
+) -> datetime | None:
+    """Resolve a Step's business-timezone execution timestamp for release lookup."""
+    exec_date = _string(step.get("execution_date"))
+    exec_time = _string(step.get("execution_time"))
+    if exec_date and exec_time:
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                parsed = datetime.strptime(f"{exec_date} {exec_time}", pattern)
+                converted = alm_execution_in_app_timezone(parsed)
+                return converted.replace(tzinfo=None) if converted else None
+            except ValueError:
+                continue
+    if run_execution_at is not None:
+        converted = alm_execution_in_app_timezone(run_execution_at)
+        return converted.replace(tzinfo=None) if converted else None
+    if exec_date:
+        try:
+            parsed_date = datetime.strptime(exec_date, "%Y-%m-%d").date()
+            return datetime.combine(parsed_date, dt_time(23, 59, 59))
+        except ValueError:
+            return None
+    return None
+
+
+def _select_effective_release(
+    releases: tuple[AutomationReleaseRecord, ...],
+    execution_at: datetime | None,
+) -> tuple[AutomationReleaseRecord | None, bool]:
+    """Select the latest release effective at `execution_at`, flagging pre-release runs."""
+    if not releases:
+        return None, False
+    if execution_at is None:
+        return releases[0], False
+    if execution_at.tzinfo is not None:
+        execution_naive = execution_at.astimezone(
+            ZoneInfo(get_settings().app_timezone)
+        ).replace(tzinfo=None)
+    else:
+        execution_naive = execution_at
+
+    parsed_rows = [
+        (record, _parse_release_datetime(record.release_time))
+        for record in releases
+    ]
+    effective = [
+        (record, parsed_time)
+        for record, parsed_time in parsed_rows
+        if parsed_time is not None and parsed_time <= execution_naive
+    ]
+    if effective:
+        effective.sort(
+            key=lambda item: (
+                item[1],
+                item[0].release_revision if item[0].release_revision is not None else -1,
+                item[0].release_id,
+            ),
+            reverse=True,
+        )
+        return effective[0][0], False
+    untimed = [record for record, parsed_time in parsed_rows if parsed_time is None]
+    if untimed:
+        return untimed[0], False
+    earliest = min(
+        (item for item in parsed_rows if item[1] is not None),
+        key=lambda item: (item[1], item[0].release_id),
+    )[0]
+    return earliest, True
+
+
 def assess_automation_release(
     *,
     actual: str,
@@ -217,6 +308,7 @@ def assess_automation_release(
     testcase_id: str,
     releases: tuple[AutomationReleaseRecord, ...],
     lookup_error: str = "",
+    execution_at: datetime | None = None,
 ) -> dict[str, Any]:
     project_name = project_name.strip()
     testcase_id = testcase_id.strip()
@@ -283,6 +375,7 @@ def assess_automation_release(
     else:
         actual_name_match = "mismatch"
     claimed_document_number, claimed_document_revision = _document_parts(actual)
+    selected, before_all_releases = _select_effective_release(releases, execution_at)
     base = {
         "project_name": project_name,
         "testcase_id": testcase_id,
@@ -296,7 +389,7 @@ def assess_automation_release(
         "failure_code": "",
         "claimed_document_number": claimed_document_number,
         "claimed_document_revision": claimed_document_revision,
-        "selected_release": releases[0].as_dict() if releases else None,
+        "selected_release": selected.as_dict() if selected is not None else None,
     }
     if not claimed_script_testcase_id:
         return {
@@ -330,9 +423,9 @@ def assess_automation_release(
             "reason": "Actual 未提供可用于发布校验的 HTML 报告文件名。",
         }
     script_name_match = "not_checked"
-    if releases and releases[0].testcase_id == testcase_id:
+    if selected is not None and selected.testcase_id == testcase_id:
         release_script_matches = [
-            _script_name_match(html_name, releases[0].script_name)
+            _script_name_match(html_name, selected.script_name)
             for html_name in html_script_names
         ]
         if release_script_matches and all(
@@ -397,7 +490,7 @@ def assess_automation_release(
             ),
         }
 
-    selected = releases[0]
+    assert selected is not None
     if selected.testcase_id != testcase_id:
         return {
             **base,
@@ -408,6 +501,23 @@ def assess_automation_release(
             "reason": (
                 f"Release Table Testcase ID 为 {selected.testcase_id}，"
                 f"但 ALM Test ID 为 {testcase_id}。"
+            ),
+        }
+    if before_all_releases:
+        exec_label = (
+            execution_at.isoformat(sep=" ")
+            if execution_at is not None
+            else "未知时间"
+        )
+        return {
+            **base,
+            "status": "mismatch",
+            "failure_code": "release_not_effective_yet",
+            "script_name_match": script_name_match,
+            "document_match": "not_checked",
+            "reason": (
+                f"测试执行时间 ({exec_label}) 早于最早一条自动化脚本发布记录 "
+                f"({selected.release_time})。"
             ),
         }
     document_complete = bool(claimed_document_number and claimed_document_revision)

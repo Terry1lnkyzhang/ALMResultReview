@@ -52,7 +52,7 @@ def parent_name(folder_path: str) -> str:
     return next(
         (
             segment.strip()
-            for segment in reversed(folder_path.split("/"))
+            for segment in reversed(re.split(r"[/\\]+", folder_path))
             if segment.strip()
         ),
         "",
@@ -94,7 +94,7 @@ def assess_location_config(
             **base,
             "status": "fail",
             "failure_code": "alm_location_missing",
-            "reason": "ALM Run Location is empty.",
+            "reason": "ALM Run 的执行位置（Location）为空。",
         }
     if location.casefold() in non_site_location_keys:
         if not review_parent_name:
@@ -102,7 +102,7 @@ def assess_location_config(
                 **base,
                 "status": "fail",
                 "failure_code": "parent_name_missing",
-                "reason": "The ALM test-set folder name is empty.",
+                "reason": "ALM 测试集文件夹名称为空。",
             }
         asserted_fields = sorted(required_parent_fields(review_parent_name))
         if asserted_fields:
@@ -111,9 +111,8 @@ def assess_location_config(
                 "status": "manual",
                 "failure_code": "non_site_location_configuration_claim",
                 "reason": (
-                    f"ALM Location {location} is a non-site execution mode, but "
-                    "the test-set folder declares configuration fields "
-                    f"{', '.join(asserted_fields)}; manual review is required."
+                    f"ALM 位置 {location} 为非现场执行模式，但测试集文件夹声明了配置项 "
+                    f"{', '.join(asserted_fields)}，需人工复核。"
                 ),
             }
         return {
@@ -121,8 +120,8 @@ def assess_location_config(
             "status": "not_applicable",
             "failure_code": "",
             "reason": (
-                f"ALM Location {location} is a recognized non-site execution mode; "
-                "physical test-location configuration review does not apply."
+                f"ALM 位置 {location} 为已配置的非现场执行模式，"
+                "不适用物理测试位置配置核对。"
             ),
         }
 
@@ -142,7 +141,7 @@ def assess_location_config(
             **candidate_base,
             "status": "fail",
             "failure_code": "location_config_not_found",
-            "reason": f"No test-location configuration matches ALM Location {location}.",
+            "reason": f"未找到与 ALM 位置 {location} 匹配的测试位置配置。",
         }
     if len(candidates) != 1:
         return {
@@ -150,8 +149,7 @@ def assess_location_config(
             "status": "fail",
             "failure_code": "location_config_ambiguous",
             "reason": (
-                f"ALM Location {location} matches {len(candidates)} "
-                "test-location configuration rows."
+                f"ALM 位置 {location} 匹配到 {len(candidates)} 条测试位置配置记录，存在歧义。"
             ),
         }
 
@@ -163,20 +161,20 @@ def assess_location_config(
             **selected_base,
             "status": "fail",
             "failure_code": "location_config_empty",
-            "reason": f"Test-location configuration for {location} is empty.",
+            "reason": f"测试位置 {location} 的配置字段全部为空。",
         }
     if not review_parent_name:
         return {
             **selected_base,
             "status": "fail",
             "failure_code": "parent_name_missing",
-            "reason": "The ALM test-set folder name is empty.",
+            "reason": "ALM 测试集文件夹名称为空。",
         }
     return {
         **selected_base,
         "status": "ready",
         "failure_code": "",
-        "reason": "The location has one effective configuration row.",
+        "reason": "已匹配到唯一生效的测试位置配置记录。",
     }
 
 
@@ -236,7 +234,7 @@ def assess_location_history(
             **base,
             "status": "fail",
             "failure_code": "location_config_ambiguous",
-            "reason": "Multiple test-location history versions match the execution time.",
+            "reason": "执行时间命中了多条重叠的测试位置历史版本。",
         }
     if resolution.status in {"not_found", "missing_execution_time"}:
         current = [
@@ -253,10 +251,7 @@ def assess_location_history(
                 "candidate_items": [config.item for config in current],
                 "status": "manual",
                 "failure_code": "location_execution_time_missing",
-                "reason": (
-                    "The ALM execution time is missing; no historical location "
-                    "version can be selected."
-                ),
+                "reason": "ALM 执行时间缺失，无法匹配对应的历史测试位置版本。",
             }
         if not current or len(current) > 1:
             return {
@@ -268,9 +263,9 @@ def assess_location_history(
                     "location_config_not_found" if not current else "location_config_ambiguous"
                 ),
                 "reason": (
-                    f"No test-location configuration matches ALM Location {location}."
+                    f"未找到与 ALM 位置 {location} 匹配的测试位置配置。"
                     if not current
-                    else "Multiple test-location configurations match the ALM Location."
+                    else "多条测试位置配置同时匹配该 ALM 位置。"
                 ),
             }
         return {
@@ -280,8 +275,8 @@ def assess_location_history(
             "status": "manual",
             "failure_code": "location_history_unknown",
             "reason": (
-                "The location exists, but its execution-time configuration has no "
-                "recorded history; current configuration cannot be used."
+                "测试位置存在，但缺少执行时间对应的历史配置记录；"
+                "不能直接使用当前配置，需人工复核。"
             ),
         }
     return {
@@ -292,10 +287,10 @@ def assess_location_history(
             "history_unknown": "location_history_unknown",
         }[resolution.status],
         "reason": {
-            "retired": "No location configuration was effective at the ALM execution time.",
+            "retired": "ALM 执行时间没有处于生效期内的测试位置配置记录。",
             "history_unknown": (
-                "The ALM execution time is outside the recorded location history; "
-                "current configuration cannot be used."
+                "ALM 执行时间超出已记录的测试位置历史范围；"
+                "不能直接使用当前配置，需人工复核。"
             ),
         }[resolution.status],
     }
@@ -316,7 +311,7 @@ def load_location_assessment(
         return {
             "status": "disabled",
             "failure_code": "unsupported_database",
-            "reason": "Test-location review requires the MySQL configuration schema.",
+            "reason": "测试位置核对需要连接 MySQL 配置库。",
             "alm_location": execution_location.strip(),
             "folder_path": folder_path.strip(),
             "parent_name": parent_name(folder_path),

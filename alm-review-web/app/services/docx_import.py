@@ -13,9 +13,16 @@ MAX_DOCX_BYTES = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_BYTES = 150 * 1024 * 1024
 MAX_DOCUMENT_XML_BYTES = 50 * 1024 * 1024
 
-TEST_SET_PATTERN = re.compile(r"^Test Set:\s*(\d+)\s*-\s*(.+)$", re.IGNORECASE)
-TEST_CASE_PATTERN = re.compile(r"^Test Case:\s*(\d+)\s*-\s*(.+)$", re.IGNORECASE)
-TEST_RUN_PATTERN = re.compile(r"^Test Run:\s*(\d+)\s*$", re.IGNORECASE)
+# Two ALM report templates exist: "Test Set / Test Case / Test Run" and
+# "Test Set ID / Test ID / Run ID".
+TEST_SET_PATTERN = re.compile(r"^Test Set(?:\s+ID)?\s*:\s*(\d+)\s*-\s*(.+)$", re.IGNORECASE)
+TEST_CASE_PATTERN = re.compile(r"^Test (?:Case|ID)\s*:\s*(\d+)\s*-\s*(.+)$", re.IGNORECASE)
+TEST_RUN_PATTERN = re.compile(r"^(?:Test Run|Run ID)\s*:\s*(\d+)\s*$", re.IGNORECASE)
+METADATA_LABEL_ALIASES = {
+    "test configuration test id": "test id",
+    "test test name": "test name",
+    "test designer": "designer",
+}
 
 
 def _text(node: ElementTree.Element) -> str:
@@ -61,6 +68,7 @@ def _metadata(rows: list[list[str]]) -> dict[str, str]:
     for row in rows[1:]:
         for index in range(0, len(row) - 1, 2):
             label = _normalized_label(row[index])
+            label = METADATA_LABEL_ALIASES.get(label, label)
             value = row[index + 1].strip()
             if label and value and value.casefold() != "none":
                 values[label] = value
@@ -262,6 +270,8 @@ def parse_alm_docx(content: bytes, filename: str = "ALM export.docx") -> dict[st
     finish_run()
     if not records:
         raise ValueError(
-            "No ALM Test Runs were found. Export a Design Verification Record as DOCX."
+            "No ALM Test Runs were found. Expected headings such as "
+            "'Test Set ID : <id> - <name>', 'Test ID : <id> - <name>' and "
+            "'Run ID : <id>' (or 'Test Set:', 'Test Case:', 'Test Run:')."
         )
     return {"users": list(users.values()), "records": records}

@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from html import unescape
+from html.parser import HTMLParser
 from typing import Any
 
 from app.services.evidence import CAPABILITIES, step_evidence_profile
@@ -13,6 +14,118 @@ _BREAK_RE = re.compile(r"<(?:br\s*/?|/p|/div)>\s*", re.IGNORECASE)
 _WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 _NUMBERED_ITEM_RE = re.compile(r"(?<!\S)(?P<number>[1-9]\d?)\.(?!\d)\s*")
+
+
+class _TableAwareTextParser(HTMLParser):
+    """Render HTML `<table>` grids as Markdown pipe tables while stripping other tags."""
+
+    _BLOCK_END_TAGS = frozenset(
+        {"p", "div", "li", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6", "hr"}
+    )
+    _IGNORED_TAGS = frozenset({"script", "style", "template", "noscript"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self._ignored_depth = 0
+        self._table_stack: list[list[list[str]]] = []
+        self._cell_stack: list[tuple[list[str], int]] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        normalized_tag = tag.casefold()
+        if self._ignored_depth:
+            self._ignored_depth += 1
+            return
+        if normalized_tag in self._IGNORED_TAGS:
+            self._ignored_depth = 1
+            return
+        if normalized_tag == "table":
+            self._table_stack.append([])
+        elif normalized_tag == "tr" and self._table_stack:
+            self._table_stack[-1].append([])
+        elif normalized_tag in {"td", "th"} and self._table_stack:
+            if not self._table_stack[-1]:
+                self._table_stack[-1].append([])
+            attr_map = {key.casefold(): (val or "") for key, val in attrs}
+            raw_colspan = attr_map.get("colspan", "1")
+            colspan = (
+                int(raw_colspan)
+                if raw_colspan.isdigit() and 1 <= int(raw_colspan) <= 20
+                else 1
+            )
+            self._cell_stack.append(([], colspan))
+        elif normalized_tag == "br":
+            if self._cell_stack:
+                self._cell_stack[-1][0].append(" / ")
+            else:
+                self.out.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.casefold()
+        if self._ignored_depth:
+            self._ignored_depth -= 1
+            return
+        if normalized_tag in {"td", "th"} and self._cell_stack and self._table_stack:
+            buf, colspan = self._cell_stack.pop()
+            cell_text = " ".join("".join(buf).split()).replace("|", "\\|")
+            self._table_stack[-1][-1].append(cell_text)
+            for _ in range(colspan - 1):
+                self._table_stack[-1][-1].append("")
+        elif normalized_tag == "table" and self._table_stack:
+            raw_rows = self._table_stack.pop()
+            rows = [
+                row
+                for row in raw_rows
+                if any(cell != "" for cell in row) or len(row) > 1
+            ]
+            if rows:
+                col_count = max(len(row) for row in rows)
+                padded = [row + [""] * (col_count - len(row)) for row in rows]
+                lines = [
+                    "| " + " | ".join(padded[0]) + " |",
+                    "| " + " | ".join(["---"] * col_count) + " |",
+                    *("| " + " | ".join(row) + " |" for row in padded[1:]),
+                ]
+                rendered = "\n" + "\n".join(lines) + "\n"
+                if self._cell_stack:
+                    self._cell_stack[-1][0].append(" " + " ; ".join(lines) + " ")
+                else:
+                    self.out.append(rendered)
+        elif normalized_tag in self._BLOCK_END_TAGS:
+            if self._cell_stack:
+                self._cell_stack[-1][0].append(" ")
+            else:
+                self.out.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        if self._cell_stack:
+            self._cell_stack[-1][0].append(data)
+        else:
+            self.out.append(data)
+
+
+def normalize_table_text(value: Any) -> str:
+    """Normalize ALM HTML text while preserving `<table>` 2D row/column alignment."""
+    if value is None:
+        return ""
+    raw = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    if "<table" not in raw.casefold():
+        return normalize_text(raw)
+    parser = _TableAwareTextParser()
+    parser.feed(raw)
+    parser.close()
+    rendered = "".join(parser.out)
+    cleaned_lines = [
+        line.strip()
+        if line.lstrip().startswith("|")
+        else _WHITESPACE_RE.sub(" ", line).strip()
+        for line in rendered.splitlines()
+    ]
+    return _BLANK_LINES_RE.sub("\n\n", "\n".join(cleaned_lines)).strip()
 
 
 def normalize_text(value: Any) -> str:
@@ -187,11 +300,20 @@ def review_payload(
     ):
         step = dict(normalized)
         step["review_step"] = review_step
+        step["description"] = normalize_table_text(
+            raw.get("descriptionText", raw.get("description"))
+        )
+        step["expected"] = normalize_table_text(
+            raw.get("expectedText", raw.get("expected"))
+        )
+        step["actual"] = normalize_table_text(
+            raw.get("actualText", raw.get("actual"))
+        )
         step["actual_format"] = actual_format_profile(
             raw.get("actualText", raw.get("actual"))
         )
-        expected_items = _numbered_items(step["expected"])
-        actual_items = _numbered_items(step["actual"])
+        expected_items = _numbered_items(normalized["expected"])
+        actual_items = _numbered_items(normalized["actual"])
         if expected_items or actual_items:
             step["numbered_comparison"] = [
                 {

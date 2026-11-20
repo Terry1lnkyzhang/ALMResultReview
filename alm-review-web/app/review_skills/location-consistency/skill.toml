@@ -1,7 +1,7 @@
 [skill]
 id = "location-consistency"
 name = "Test Location Consistency Review"
-version = "1.0.1"
+version = "1.1.1"
 stage = "location_review"
 enabled = true
 

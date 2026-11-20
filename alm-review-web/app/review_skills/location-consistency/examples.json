@@ -1,10 +1,10 @@
 [
   {
     "input": {
-      "alm_location": "CHESS-CAST-20140",
-      "folder_path": "Testing / Zhao Yize / 0. Common Config",
+      "alm_location": "SYS-UNIT-01",
+      "folder_path": "Testing / Tester A / 0. Common Config",
       "parent_name": "0. Common Config",
-      "location_config": {"item": "SZ Bay03(CHESS-CAST-20140)", "product": "CT5300 V7.0", "dms_version": "V6", "dms_coverage": "4cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara G5 Prem"}
+      "location_config": {"item": "Lab Bay01(SYS-UNIT-01)", "product": "ModelB V7.0", "dms_version": "V6", "dms_coverage": "4cm", "couch": "Standard Couch", "computer": "ModelA Tier2 Prem"}
     },
     "output": {
       "has_configuration_claim": false,
@@ -15,10 +15,10 @@
   },
   {
     "input": {
-      "alm_location": "CHESS-CAST-20006",
-      "folder_path": "Automation Testing Phase2 / Li Xianjin / 4.6 DMS-4cm V2 or V6",
+      "alm_location": "SYS-UNIT-02",
+      "folder_path": "Testing / Tester B / 4.6 DMS-4cm V2 or V6",
       "parent_name": "4.6 DMS-4cm V2 or V6",
-      "location_config": {"item": "SY Bay10(CHESS-CAST-20006)", "product": "Tenara", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara/CT 5300 G5 STD"}
+      "location_config": {"item": "Lab Bay02(SYS-UNIT-02)", "product": "ModelA", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Standard Couch", "computer": "ModelA/ModelB Tier2 STD"}
     },
     "output": {
       "has_configuration_claim": true,
@@ -32,16 +32,16 @@
   },
   {
     "input": {
-      "alm_location": "CHESS-CAST-20006",
-      "folder_path": "Testing / Zhao Yize / 6.5 Product-CT Tenara+V6 2cm",
-      "parent_name": "6.5 Product-CT Tenara+V6 2cm",
-      "location_config": {"item": "SY Bay10(CHESS-CAST-20006)", "product": "Tenara", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Enhance Incisive STD", "computer": "CT Tenara/CT 5300 G5 STD"}
+      "alm_location": "SYS-UNIT-02",
+      "folder_path": "Testing / Tester A / 6.5 Product-Unit ModelA+V6 2cm",
+      "parent_name": "6.5 Product-Unit ModelA+V6 2cm",
+      "location_config": {"item": "Lab Bay02(SYS-UNIT-02)", "product": "ModelA", "dms_version": "V6", "dms_coverage": "2cm", "couch": "Standard Couch", "computer": "ModelA/ModelB Tier2 STD"}
     },
     "output": {
       "has_configuration_claim": true,
       "status": "pass",
       "comparisons": [
-        {"field": "product", "parent_text": "CT Tenara", "status": "matched", "reason": "CT Tenara 与数据库产品 Tenara 语义一致。"},
+        {"field": "product", "parent_text": "Unit ModelA", "status": "matched", "reason": "Unit ModelA 与数据库产品 ModelA 语义一致。"},
         {"field": "dms_version", "parent_text": "V6", "status": "matched", "reason": "DMS 版本均为 V6。"},
         {"field": "dms_coverage", "parent_text": "2cm", "status": "matched", "reason": "DMS 覆盖范围均为 2cm。"}
       ],

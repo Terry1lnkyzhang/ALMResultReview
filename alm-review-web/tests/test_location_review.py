@@ -47,6 +47,9 @@ def test_parent_name_uses_the_last_nonempty_folder_segment() -> None:
     assert parent_name("Testing / Zhao Yize / 4.6 DMS-4cm V2 or V6 / ") == (
         "4.6 DMS-4cm V2 or V6"
     )
+    assert parent_name(
+        r"Root\Software SubSystem Test\Earth Verification\CT Tenara & CT 5300\Cycle07\\"
+    ) == "Cycle07"
 
 
 def test_location_requires_one_effective_configuration() -> None:
