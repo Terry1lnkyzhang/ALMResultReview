@@ -12,14 +12,25 @@ Classify ambiguous equipment references in ALM Steps using only supplied text an
 
 ## Rules
 
-1. Select only equipment IDs present in candidate_equipment for that Step.
+1. Select only equipment IDs present in `candidate_equipment` for that Step. Inspect **every**
+   entry in `candidate_equipment`: when Actual delegates recording to an external execution report
+   and `candidate_equipment` includes a candidate whose `description` is compatible with the device
+   category in Description/Expected (even when the candidate names a specific member or sub-variant
+   of that broad category rather than repeating the exact phrase), you **must** select that
+   compatible candidate ID in `selected_equipment_ids` and include its exact `description` in
+   `selected_equipment_names`; never select a candidate whose subtype contradicts the Step's
+   specified subtype.
 2. Never invent, normalize, or complete an equipment ID.
 3. `registry_equipment_names` is a closed vocabulary of registry device names. When Description,
    Expected, Actual, or `extracted_device_names` names a device that the program could not match by
-   ID or serial number, put the vocabulary entries that describe the same kind of device into
-   `selected_equipment_names`. Translate between languages when needed, for example `Digital
-   Thermometer` maps to `数字温度计`. Copy the entry exactly as supplied and never invent a name that
-   is not in the list. Return an empty array when no entry describes the device.
+   ID or serial number, put **all** vocabulary entries that validly satisfy that device description
+   into `selected_equipment_names`. Translate between languages when needed, for example `Digital
+   Thermometer` maps to `数字温度计`. When the Step uses a broad category phrase without restricting
+   sub-variant, include **every** compatible entry of that category in `registry_equipment_names`
+   (and exclude only entries qualified for an incompatible subtype); when the Step specifies a
+   narrower subtype, include only entries matching that subtype. Copy each entry exactly as supplied
+   and never invent a name that is not in the list. Return an empty array when no entry describes
+   the device.
 4. Map on device identity, not on wording. Two entries that differ only in language or word order
    are the same device; two entries that measure different quantities are not.
 5. DUT/product serials are not controlled equipment. When a Step performs only software or UI
@@ -31,10 +42,12 @@ Classify ambiguous equipment references in ALM Steps using only supplied text an
    ID, serial number, or calibration information to be recorded. Merely using controlled equipment
    means it must be checked, not that the current Step must repeat an identity recorded earlier.
 8. Previously matched IDs may be selected only when the Step clearly continues to use the **same
-   physical device**. If the current Step names the device differently, also use
-   `selected_equipment_names` to establish that the current name maps to that registry device.
-   Never reuse a previously matched device of one subtype or specification when the current Step
-   specifies a different subtype or specification.
+   physical device** (including analyzing outputs or measurements produced with that same device in
+   an earlier Step of the same Run). Whenever `extracted_device_names` is non-empty or the current
+   Step refers to that prior device by a shorter generic noun, also include that candidate's exact
+   `description` from `registry_equipment_names` in `selected_equipment_names` alongside its ID in
+   `selected_equipment_ids`. Never reuse a previously matched device of one subtype or
+   specification when the current Step specifies a different subtype or specification.
 9. An explicit operation on a previously recorded device in Description or Expected (for example
    connecting, disconnecting, positioning, configuring, measuring another section/point, or reading
    its output) establishes continuity even when Actual reports only the outcome of that operation.

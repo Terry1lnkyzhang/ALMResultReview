@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ form_title }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ return_path }}">&larr; {{ 'Test Location History' if return_location_id else 'Test Location Registry' }}</a>
+<section class="page-heading">
+  <div>
+    <p class="eyebrow">AT FRAMEWORK / SCHEDULED CHANGE</p>
+    <h1>{{ form_title }}</h1>
+    <p class="subtle">Queue a future configuration switch for <strong>{{ location.item }}</strong>. AT Framework keeps the live record unchanged until the scheduled time arrives.</p>
+  </div>
+</section>
+
+<section class="equipment-source">
+  <strong>Current live configuration:</strong>
+  {{ location.product or '-' }} · {{ location.version or '-' }} · {{ location.collimation or '-' }} · {{ location.platform or '-' }} · {{ location.system_config or '-' }}
+  {% if existing_schedules %}
+    <br><strong>Active scheduled queue ({{ existing_schedules|length }}):</strong>
+    {% for queued in existing_schedules %}
+      <span>{{ queued.effective_at.strftime('%Y-%m-%d %H:%M:%S') }} &rarr; {{ queued.system_config or queued.product or queued.target_item }} ({{ queued.status }}){% if not loop.last %}; {% endif %}</span>
+    {% endfor %}
+  {% endif %}
+</section>
+
+{% if schedule and schedule.error_message %}
+<div class="notice notice-error">Last apply error: {{ schedule.error_message }}</div>
+{% endif %}
+
+<form class="equipment-editor test-location-editor" method="post" action="{{ '/ops/test-locations/schedule/' ~ schedule.id ~ '/edit' if schedule else '/ops/test-locations/schedule' }}">
+  {% if not schedule %}<input type="hidden" name="original_item" value="{{ location.item }}">{% endif %}
+  {% if return_location_id %}<input type="hidden" name="return_location_id" value="{{ return_location_id }}">{% endif %}
+  <section>
+    <div class="section-intro"><span>01</span><div><h2>Target identity</h2><p>Keep Item unchanged unless the location alias is also being renamed at switch time.</p></div></div>
+    <div class="field-grid">
+      <label class="wide"><span>Item</span><input name="item" maxlength="250" value="{{ form_values.item }}" required></label>
+      <label><span>Product</span><input name="product" maxlength="255" value="{{ form_values.product }}"></label>
+      <label><span>DMS Version</span><input name="version" maxlength="255" value="{{ form_values.version }}"></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>02</span><div><h2>Planned system details</h2><p>Specify the scanner and PC configuration that should take effect at the scheduled time.</p></div></div>
+    <div class="field-grid">
+      <label><span>DMS Coverage</span><input name="collimation" maxlength="255" value="{{ form_values.collimation }}"></label>
+      <label><span>Couch</span><input name="platform" maxlength="255" value="{{ form_values.platform }}"></label>
+      <label class="wide"><span>Computer</span><input name="system_config" maxlength="255" value="{{ form_values.system_config }}" autofocus></label>
+    </div>
+  </section>
+  <section>
+    <div class="section-intro"><span>03</span><div><h2>Schedule &amp; reason</h2><p>The background scheduler applies this change automatically once local time reaches the effective time.</p></div></div>
+    <div class="field-grid">
+      <label><span>Scheduled effective time</span><input type="datetime-local" step="1" name="effective_at" value="{{ effective_at }}" required></label>
+      <label class="wide"><span>Change reason</span><textarea name="change_reason" maxlength="2000" rows="4" required placeholder="e.g. Planned PC swap per test configuration schedule">{{ change_reason }}</textarea></label>
+    </div>
+  </section>
+  <div class="form-actions">
+    <a class="button secondary button-link" href="{{ return_path }}">Cancel</a>
+    <button class="button primary" type="submit">{{ 'Update scheduled change' if schedule else 'Schedule change' }}</button>
+  </div>
+</form>
+{% endblock %}

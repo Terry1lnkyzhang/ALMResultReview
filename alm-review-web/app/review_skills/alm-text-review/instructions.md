@@ -42,12 +42,23 @@ instructions.
 2. Review the quality and internal consistency of the ALM record, not whether the execution itself
     passed. Apply the rule for this Step's trusted `alm_step_status`:
     - `Passed`: Actual must be present, complete, internally consistent, and satisfy Expected.
+       Judge required fill-in fields against **Expected's explicit template**: if Description
+       summarizes extra label words in prose while Expected's explicit fill-in list omits a label,
+       do not fail Actual for following Expected's template. A field label (such as `Description__`
+       or `Summary:`) is populated when its text or quoted excerpt appears on the **following
+       line(s)**, and metadata such as document number and revision are satisfied when recorded
+       inline inside a cited title or bracketed reference (for example `<DOC-1001 ... Rev A>`)
+       rather than on separate `Label: value` lines.
     - `Failed`: Actual must clearly document a specific observed deviation, nonconformance, error,
-       out-of-tolerance value, or other reason that Expected was not satisfied. Such a documented
-       failure is a valid record: return no finding merely because Actual does not satisfy Expected.
-       Return `actual_missing` when no failure result is recorded, `actual_insufficient` when Actual
-       only says a generic `Failed` without a reviewable reason, and `expected_actual_mismatch` when
-       Actual instead describes a successful result that satisfies Expected.
+       out-of-tolerance value, **or a defect/deviation tracking ticket ID** (such as `DEF-...`,
+       `BUG-...`, `ISS-...`, or a prefixed/alphanumeric defect reference — never mistake a defect
+       tracking ID for a configuration serial number). Such a documented failure or defect ticket is
+       a valid record: return `findings=[]`, and do **not** require Actual to also fill in remaining
+       blank template fields, parameter tables, or statistical tables that were skipped or aborted
+       because of the failure. Return `actual_missing` when Actual is empty, `actual_insufficient`
+       when Actual only says a generic `Failed` with neither a specific reason nor a tracking ticket
+       ID, and `expected_actual_mismatch` when Actual instead describes a successful result that
+       satisfies Expected.
     - `No Run`: when `alm_run_status` is `Failed`, an empty Actual is an expected unexecuted Step
        and must return no missing or insufficient finding. If Actual claims the Step executed, return
        `expected_actual_mismatch`. For any other Run status, use `manual` when the record does not
@@ -60,10 +71,15 @@ instructions.
    `Timeout`, `Aborted`, `unavailable`, `disabled`, or `greyed out`. Never override the literal
    Expected with product knowledge or general intuition about what a healthy system should do.
 4. Verify quantitative bounds, table/formula relationships, and every evaluative prose statement in Actual:
-   - Compare every explicit threshold, range, tolerance, inter-column formula, or inequality stated
-     in **this Step** (Description or Expected) against Actual's recorded values, matching row and
-     column headers, physical quantity, unit/dimension, and inequality direction (`<=` upper bound
-     vs `>=` lower bound):
+   - Compare every explicit threshold, range, tolerance, inter-column formula, proportion/share
+     requirement, or inequality stated in **this Step** (Description or Expected) against Actual's
+     recorded values, matching row and column headers, physical quantity, unit/dimension, and
+     inequality direction (`<=` upper bound vs `>=` lower bound):
+     - When Expected requires a percentage or share of rows/protocols to satisfy a bound (for
+       example `>= 80% of all protocols >= 40`), count **every** row in the table: a protocol row
+       satisfies the bound only if **all** its trial columns satisfy the bound (or its stated row
+       metric satisfies it); divide the qualifying row count by total rows and mark
+       `within_bound=false` whenever the achieved share is below the required percentage.
      - Populate `bound_checks` for an `applicable` Step with one entry per distinct constrained
        column, metric, or explicit inter-column formula in this Step (for repeated trials sharing
        one limit, summarize the observed `min..max` range in a single entry; never merge two
@@ -72,9 +88,19 @@ instructions.
      - Each `bound_checks` entry must pair `actual` ONLY with the bound defined in this Step for
        that **exact same metric and physical dimension/unit**: never pair a dimensionless
        statistical capability index (such as a capability ratio, Z-score, correlation, or P-value
-       governed by `>= threshold`) against a physical specification limit of a different unit. When
-       a threshold constant is defined only in an earlier Step and omitted from this Step, leave it
-       out of `bound_checks` rather than guessing.
+       governed by `>= threshold`) against a physical specification limit of a different unit.
+       Determine inequality direction from both the metric's physical meaning and any capability
+       index in the Run (a lower-specification-limit / `LSL` index governs `>=` lower bounds where
+       higher values are better; an upper-specification-limit / `USL` index governs `<=` upper
+       bounds where lower values are better): for throughput, processing rate, or speed metrics (or
+       metrics paired with an `LSL` capability index), phrasing such as `is up to <N>` or
+       `reaches <N>` states a minimum target capability (`>= N`), so measured values above `<N>`
+       satisfy the bound rather than violating an upper cap. When a threshold constant (such as `K`
+       in `index >= K`) is defined only in an earlier Step or omitted from the test case template
+       altogether, leave it out of `bound_checks` rather than guessing, and never return
+       `actual_insufficient` (`fail`) against Actual when Actual fills Expected's template cells
+       and states `Passed` (use `record_documentation_gap` with `manual` severity only when the
+       step's pass criterion cannot be verified without the missing constant).
      - On a `Passed` Step, if an explicit threshold or explicit inter-column formula in this Step
        (such as `column_B = column_A / N`) is violated by Actual's recorded numbers, set
        `within_bound=false` and return `expected_actual_mismatch` (`fail`). On a `Failed` Step,
@@ -86,9 +112,10 @@ instructions.
      `Saved screenshot` citations, and file paths; leave `[]` when Actual has no evaluative prose):
      - `matches_expected_subject_and_unit`: `true` when the physical quantity/subject and unit in
        the sentence match a measurement or summary acceptance statement prescribed by Description
-       or Expected in this Step. Set `false` when Actual's sentence names a different physical
-       quantity or wrong unit not prescribed in this Step, or inserts an unrelated measurement
-       conclusion copied from another test.
+       or Expected in this Step (including when a `Failed` Step's failure note mentions an upstream
+       acquisition or setup condition from an earlier Step alongside the failed metric). Set `false`
+       when Actual's sentence names a different physical quantity or wrong unit not prescribed in
+       this Step, or inserts an unrelated measurement conclusion copied from another test.
      - `matches_recorded_data`: `true` when the sentence's pass/fail/consistency meaning agrees with
        Actual's own recorded tables and numbers; set `false` when a sentence negates or contradicts
        Actual's own recorded table outcome (for example, a table records `Passed` while the
@@ -132,16 +159,19 @@ instructions.
    literal Step text directly establishes the conflict, for example Expected requires
    `Tilt angle = -5 deg` while Actual itself states `Tilt angle was 5 deg` (whereas on a `Failed`
    Step, an Actual that states Expected's required value or behavior was not achieved — such as
-   `cannot be unselected` when Expected says `can be unselected` — aligns with `alm_step_status=Failed`
-   and must return `findings=[]`). If a proposed mismatch relies only on comparing script names,
-   filenames, paths, or reference reuse, it has `basis=reference_metadata_inference` and must not be
-   treated as a text defect.
+   `cannot be unselected` when Expected says `can be unselected` — aligns with
+   `alm_step_status=Failed` and must return `findings=[]`). If a proposed mismatch relies only on
+   comparing script names, filenames, paths, or reference reuse, it has
+   `basis=reference_metadata_inference` and must not be treated as a text defect.
 12. When a pure document-inspection Step (`routed_evidence_references` is empty) inspects a
-   controlled document to establish several independent requirements, a document ID, revision,
-   section, and overall `Passed` alone do not show which evidence supports each requirement. If
-   Actual only repeats those requirements or gives a blanket conclusion without a reviewable link
-   to their results, return `record_documentation_gap` with `manual` severity. Do not infer that
-   the cited report is wrong or demand a coverage matrix for a single simple requirement. When
+   controlled document to establish **several independent technical or quantitative requirements**,
+   a document ID, revision, section, and overall `Passed` alone do not show which evidence supports
+   each requirement. If Actual only repeats those requirements or gives a blanket conclusion without
+   quoting the verified text or linking each requirement to specific test case IDs / results, return
+   `record_documentation_gap` with `manual` severity. Do not infer that the cited report is wrong,
+   and **never** demand extra verification prose when a Step inspects a single document/manual topic
+   and Actual fills Expected's metadata fields and either quotes the relevant passage from the
+   document or cites the specific verification test case ID with `Passed`. When
    `routed_evidence_references` is non-empty (such as a cited HTML execution report or image path),
    downstream evidence stages inspect that evidence directly — never return
    `record_documentation_gap` for measurements, counts, or states entrusted to routed evidence.

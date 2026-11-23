@@ -30,6 +30,12 @@ _DATE_PATTERN = re.compile(
 )
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _HTML_SUFFIXES = {".html", ".htm"}
+_FILE_EXTENSION_RE = re.compile(r"^\.[a-z0-9]{1,8}$")
+_GLUED_SUBSTEP_PROSE_RE = re.compile(
+    r"^(?P<prefix>.*[\\/](?:(?i:step)\s*\d+[-_][a-zA-Z]|\d+[-_][a-zA-Z]))"
+    r"(?=[a-z]\.(?:\s+[A-Z]|[A-Z][^\\/]{5,})[^\\/]*$)"
+    r".*$"
+)
 _HTML_FAILURE_MARKER_RE = re.compile(
     r"(?:^|[_. -])(?P<marker>checkcontent|checkstep|fail)(?=$|[_. -])",
     re.IGNORECASE,
@@ -92,7 +98,12 @@ def validate_network_evidence_path(value: str, allowed_network_root: str) -> str
 
 
 def _clean_path(value: str) -> str:
-    return value.rstrip(".,;:)]}，。；：")
+    cleaned = value.rstrip(".,;:)]}，。；：")
+    if cleaned.startswith("\\\\") or re.match(r"^[A-Za-z]:\\", cleaned):
+        glued_match = _GLUED_SUBSTEP_PROSE_RE.match(cleaned)
+        if glued_match is not None:
+            cleaned = glued_match.group("prefix")
+    return cleaned
 
 
 def _path_kind(value: str) -> str:
@@ -103,7 +114,11 @@ def _path_kind(value: str) -> str:
         return "image"
     if suffix in _HTML_SUFFIXES:
         return "html"
-    if value.endswith(("\\", "/")) or not suffix:
+    if (
+        value.endswith(("\\", "/"))
+        or not suffix
+        or not _FILE_EXTENSION_RE.fullmatch(suffix)
+    ):
         return "folder_or_unknown"
     return "file"
 

@@ -39,6 +39,56 @@
   </div>
 </section>
 
+<section class="scheduled-location-section">
+  <header>
+    <div>
+      <p class="eyebrow">SCHEDULED CHANGES</p>
+      <h2>Queued configuration switches</h2>
+      <p>Future switches stay queued without altering the live AT Framework table until their effective time arrives. Use <strong>Schedule</strong> on any location row below to queue a switch.</p>
+    </div>
+    <span class="scheduled-count-badge">{{ scheduled_changes|length }} queued</span>
+  </header>
+  {% if scheduled_changes %}
+  <div class="table-scroll">
+    <table class="equipment-table scheduled-location-table">
+      <thead><tr><th>Effective Time</th><th>Location</th><th>Product / DMS</th><th>Couch</th><th>Computer</th><th>Reason</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody>
+      {% for change in scheduled_changes %}
+        <tr>
+          <td>
+            <strong>{{ change.effective_at.strftime('%Y-%m-%d %H:%M:%S') }}</strong>
+            <span class="equipment-status schedule-status schedule-status-{{ change.status }}">{{ change.status }}</span>
+            {% if change.error_message %}<small class="date-expired">{{ change.error_message }}</small>{% endif %}
+          </td>
+          <td>
+            <strong>{{ change.current_item }}</strong>
+            {% if change.target_item != change.current_item %}<small>&rarr; {{ change.target_item }}</small>{% endif %}
+          </td>
+          <td>
+            <span>{{ change.product or '-' }}</span>
+            <small>{{ change.version or '-' }} · {{ change.collimation or '-' }}</small>
+          </td>
+          <td>{{ change.platform or '-' }}</td>
+          <td><strong>{{ change.system_config or '-' }}</strong></td>
+          <td>
+            <span>{{ change.change_reason }}</span>
+            <small>By {{ change.created_by or 'local' }}</small>
+          </td>
+          <td class="row-actions">
+            <a href="/ops/test-locations/schedule/{{ change.id }}/edit">Edit</a>
+            <form method="post" action="/ops/test-locations/schedule/{{ change.id }}/apply-now"><button class="apply-now-button" type="submit">Apply now</button></form>
+            <form method="post" action="/ops/test-locations/schedule/{{ change.id }}/cancel"><button type="submit">Cancel</button></form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="non-site-location-empty">No upcoming configuration switches are currently scheduled.</p>
+  {% endif %}
+</section>
+
 <section class="equipment-list-section">
   <form class="equipment-filterbar test-location-filterbar" method="get">
     <label class="search-field"><span>Search</span><input name="query" value="{{ query }}" placeholder="Item, product, DMS version, DMS coverage, couch or computer"></label>
@@ -52,13 +102,13 @@
       <tbody>
       {% for location in locations %}
         <tr>
-          <td><strong>{{ location.item }}</strong><small>{{ location.version_count }} version{% if location.version_count != 1 %}s{% endif %}{% if location.valid_from %} · current since {{ location.valid_from.strftime('%Y-%m-%d %H:%M') }}{% endif %}</small></td>
+          <td><strong>{{ location.item }}</strong><small>{{ location.version_count }} version{% if location.version_count != 1 %}s{% endif %}{% if location.valid_from %} · current since {{ location.valid_from.strftime('%Y-%m-%d %H:%M') }}{% endif %}{% if pending_count_by_location and pending_count_by_location.get(location.location_id) %} · {{ pending_count_by_location.get(location.location_id) }} scheduled{% endif %}</small></td>
           <td>{{ location.product or '-' }}</td>
           <td>{{ location.version or '-' }}</td>
           <td>{{ location.collimation or '-' }}</td>
           <td>{{ location.platform or '-' }}</td>
           <td>{{ location.system_config or '-' }}</td>
-          <td class="row-actions"><a href="/ops/test-locations/history?location_id={{ location.location_id }}">History</a><a href="/ops/test-locations/edit?item={{ location.item|urlencode }}">Edit</a><a class="retire-link" href="/ops/test-locations/retire?item={{ location.item|urlencode }}">Retire</a></td>
+          <td class="row-actions"><a href="/ops/test-locations/history?location_id={{ location.location_id }}">History</a><a href="/ops/test-locations/schedule?item={{ location.item|urlencode }}">Schedule</a><a href="/ops/test-locations/edit?item={{ location.item|urlencode }}">Edit</a><a class="retire-link" href="/ops/test-locations/retire?item={{ location.item|urlencode }}">Retire</a></td>
         </tr>
       {% else %}
         <tr><td class="empty-table" colspan="7">{% if database_error %}Test locations could not be loaded.{% elif query %}No test locations match the current search.{% else %}No test locations have been added yet.{% endif %}</td></tr>

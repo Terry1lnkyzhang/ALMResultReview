@@ -22,6 +22,7 @@ _IMAGE_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+_NETWORK_UNAVAILABLE_WINERRORS = frozenset({53, 64, 67, 1222, 1231})
 _STEP_IMAGE_PATTERN = re.compile(
     r"(?:^|[\\/_.\s-])step[\s_-]*0*(\d+)[a-z]?(?=$|[\\/_.\s-])",
     re.IGNORECASE,
@@ -282,8 +283,16 @@ class NetworkImageResolver:
             return ImageEvidenceResult(status=path_status)
         try:
             source = self._approved_source(value, allowed_root)
-        except FileNotFoundError:
-            return self._resolve_fallback(value, allowed_root, fallback_root)
+        except FileNotFoundError as exc:
+            primary_unavailable = (
+                getattr(exc, "winerror", None) in _NETWORK_UNAVAILABLE_WINERRORS
+            )
+            return self._resolve_fallback(
+                value,
+                allowed_root,
+                fallback_root,
+                primary_unavailable_detail=str(exc)[:300] if primary_unavailable else None,
+            )
         except PermissionError as exc:
             return ImageEvidenceResult(status="denied", detail=str(exc)[:300])
         except OSError as exc:
@@ -300,10 +309,19 @@ class NetworkImageResolver:
         value: str,
         allowed_root: str,
         fallback_root: str,
+        *,
+        primary_unavailable_detail: str | None = None,
     ) -> ImageEvidenceResult:
         try:
             source = self._fallback_source(value, allowed_root, fallback_root)
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if primary_unavailable_detail is not None:
+                return ImageEvidenceResult(
+                    status="unavailable",
+                    detail=primary_unavailable_detail,
+                )
+            if getattr(exc, "winerror", None) in _NETWORK_UNAVAILABLE_WINERRORS:
+                return ImageEvidenceResult(status="unavailable", detail=str(exc)[:300])
             return ImageEvidenceResult(status="missing")
         except PermissionError as exc:
             return ImageEvidenceResult(status="denied", detail=str(exc)[:300])

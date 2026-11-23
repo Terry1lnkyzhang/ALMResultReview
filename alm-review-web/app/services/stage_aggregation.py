@@ -188,12 +188,17 @@ def _apply_capability_guards(
         step_result["html_evidence"] = []
         step_result["evidence_routing"] = routing
         if routing.get("manual_required"):
+            manual_summary = (
+                "无法可靠确定证据用途。"
+                if routing.get("intent") == "uncertain"
+                else "引用的外部文件类型暂不支持自动解析，需人工复核。"
+            )
             _append_step_issue(
                 parsed,
                 step_result["review_step"],
                 "manual",
                 "path",
-                "无法可靠确定证据用途。",
+                manual_summary,
             )
         attachment_evidence = {
             source: evidence

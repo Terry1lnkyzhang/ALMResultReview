@@ -511,6 +511,96 @@ def test_html_ai_citation_may_quote_an_exact_excerpt_of_a_long_line() -> None:
     _validate_html_assessment(skill_input, assessment)
 
 
+def test_html_ai_citation_normalizes_inline_ellipsis_within_single_block_line() -> None:
+    line_text = (
+        'expect: The dialog include"Cortbl Path,Cortbl Type, '
+        'Elemment;Slice;Param;Block;Heap;Load,Header"button'
+    )
+    skill_input = {
+        "steps": [
+            {
+                "review_step": 1,
+                "automation_release": {"status": "disabled"},
+                "reports": [
+                    {
+                        "report_id": "report-1",
+                        "content_truncated": False,
+                        "blocks": [{"block_id": "result-1", "text": line_text}],
+                    }
+                ],
+            }
+        ]
+    }
+    assessment = {
+        "status": "pass",
+        "description_coverage": "supported",
+        "expected_coverage": "supported",
+        "actual_coverage": "supported",
+        "result_consistency": "consistent",
+        "release_consistency": "not_checked",
+        "reviewed_report_ids": ["report-1"],
+        "evidence": [
+            {
+                "report_id": "report-1",
+                "block_id": "result-1",
+                "quote": "expect: The dialog include...button",
+            }
+        ],
+    }
+
+    _validate_html_assessment(skill_input, assessment)
+    assert assessment["evidence"][0]["quote"] == line_text
+
+
+def test_equipment_missing_downgrades_to_manual_when_routed_evidence_is_unavailable() -> None:
+    from app.services.equipment_pipeline import (
+        _downgrade_missing_equipment_for_unreadable_evidence,
+    )
+    from app.services.review_types import PreparedImageEvidence, ReviewContext
+
+    report_path = r"\\unreachable-host\approved\report_70794.html"
+    ctx = ReviewContext(
+        ai_config=None,
+        content={
+            "steps": [
+                {
+                    "review_step": 1,
+                    "reference_decisions": [
+                        {
+                            "candidate_id": "step-1-ref-1",
+                            "role": "result_evidence",
+                            "requires_check": True,
+                        }
+                    ],
+                }
+            ]
+        },
+        evidence_config=EvidenceConfig(
+            allowed_network_root=r"\\unreachable-host\approved",
+            external_evidence_review_enabled=True,
+        ),
+        equipment_enabled=True,
+        equipment_checks=[
+            {
+                "review_step": 1,
+                "status": "fail",
+                "code": "equipment_missing",
+                "summary": "AI 已确认该步骤需要受控设备，但 Actual 未记录设备标识符。",
+            }
+        ],
+        evidence=PreparedImageEvidence(
+            external_review_enabled=True,
+            results={},
+            html_results={1: {report_path: HtmlEvidenceResult(status="unavailable")}},
+        ),
+    )
+
+    _downgrade_missing_equipment_for_unreadable_evidence(ctx)
+
+    assert ctx.equipment_checks[0]["status"] == "manual"
+    assert ctx.equipment_checks[0]["code"] == "equipment_evidence_unavailable"
+
+
 def test_html_final_synthesis_reuses_verified_batch_citation_text() -> None:
     observations = [
         {

@@ -83,7 +83,7 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     definition = load_skill("alm-text-review")
     identity = skill_policy_identity("alm-text-review")
 
-    assert definition.version == "2.3.0"
+    assert definition.version == "2.5.0"
     assert len(definition.skill_hash) == 64
     assert definition.input_schema["additionalProperties"] is False
     assert definition.output_schema["additionalProperties"] is False
@@ -99,23 +99,24 @@ def test_alm_text_skill_package_has_versioned_policy_identity() -> None:
     assert identity == {
         "skill_id": "alm-text-review",
         "status": "available",
-        "version": "2.3.0",
+        "version": "2.5.0",
         "skill_hash": definition.skill_hash,
     }
 
 
 def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
     active = {
-        "evidence-routing": "1.1.0",
-        "alm-text-review": "2.3.0",
-        "equipment-role": "1.5.0",
-        "html-evidence-review": "1.9.0",
+        "evidence-routing": "1.2.0",
+        "alm-text-review": "2.5.0",
+        "equipment-role": "1.7.0",
+        "html-evidence-review": "1.10.0",
         "image-evidence-review": "1.4.2",
         "location-consistency": "1.1.1",
     }
     case_specific_tokens = (
         "MSD",
         "Z.USL",
+        "Z.LSL",
         "CTBOX",
         "IVC BOX",
         "Chess Console",
@@ -131,6 +132,14 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
         "CHESS-SCIM",
         "CHESS-CAST",
         "PCCSY-RD",
+        "PD:",
+        "ADS:",
+        "CTD0",
+        "IFU",
+        "SYSTEM PHANTOM",
+        "Male Anthropomorphic",
+        "Female Anthropomorphic",
+        "Whole Body Phantom",
     )
 
     assert set(discover_skills()) == set(active)
@@ -155,7 +164,7 @@ def test_all_review_skill_packages_are_discoverable_and_versioned() -> None:
 
     html = skill_manifest_metadata("html-evidence-review")
     assert html["status"] == "available"
-    assert html["version"] == "1.9.0"
+    assert html["version"] == "1.10.0"
     assert load_skill("html-evidence-review").max_tokens == 32768
 
 
@@ -309,7 +318,7 @@ def test_skill_runner_validates_input_output_and_separates_untrusted_data(
     )
 
     assert trace["status"] == "completed"
-    assert trace["skill_version"] == "1.1.0"
+    assert trace["skill_version"] == "1.2.0"
     assert len(trace["skill_hash"]) == 64
     assert len(trace["input_hash"]) == 64
     assert len(trace["output_hash"]) == 64

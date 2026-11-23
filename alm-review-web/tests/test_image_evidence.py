@@ -1043,3 +1043,23 @@ def test_extensionless_folder_segment_is_not_matched_against_an_image(
     resolver = NetworkImageResolver()
 
     assert resolver.resolve(str(tmp_path / "step4" / "shot"), str(tmp_path)).status == "missing"
+
+
+def test_unreachable_network_share_reports_unavailable_instead_of_missing(
+    monkeypatch,
+) -> None:
+    resolver = NetworkImageResolver()
+
+    def raise_bad_netpath(value: str, allowed_root: str):
+        err = FileNotFoundError(2, "The network path was not found", value, 53)
+        raise err
+
+    monkeypatch.setattr(resolver, "_approved_source", raise_bad_netpath)
+
+    result = resolver.resolve(
+        r"\\unreachable-host\share\case\Step1",
+        r"\\unreachable-host\share",
+        "",
+    )
+
+    assert result.status == "unavailable"

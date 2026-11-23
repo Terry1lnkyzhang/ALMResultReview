@@ -100,6 +100,17 @@ from app.services.skill_runner import (
     load_skill,
     skill_manifest_metadata,
 )
+from app.services.test_location_schedules import (
+    ACTIVE_SCHEDULE_STATUSES,
+    ScheduledLocationChangeView,
+    apply_due_scheduled_location_changes,
+    apply_scheduled_location_change_now,
+    cancel_scheduled_location_change,
+    create_scheduled_location_change,
+    get_scheduled_location_change,
+    list_scheduled_location_changes,
+    update_scheduled_location_change,
+)
 from app.services.test_locations import (
     TestLocationNotFoundError,
     TestLocationValidationError,
@@ -785,6 +796,32 @@ def _next_test_location_effective_at(valid_from: datetime | None = None) -> str:
     if valid_from is not None and effective_at <= valid_from:
         effective_at = valid_from + timedelta(seconds=1)
     return effective_at.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _default_scheduled_location_effective_at(
+    existing_schedules: tuple[ScheduledLocationChangeView, ...] = (),
+) -> str:
+    now = current_business_time()
+    next_day = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    pending_times = [
+        item.effective_at
+        for item in existing_schedules
+        if item.status in ACTIVE_SCHEDULE_STATUSES and item.effective_at >= next_day
+    ]
+    if pending_times:
+        latest = max(pending_times)
+        next_day = (latest + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    return next_day.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _test_location_return_path(return_location_id: int | None) -> str:
+    if return_location_id is not None and return_location_id > 0:
+        return f"/ops/test-locations/history?location_id={return_location_id}"
+    return "/ops/test-locations"
 
 
 def _web_actor() -> str:
@@ -2769,6 +2806,10 @@ def test_location_registry(
     database_error = ""
     non_site_database_error = ""
     try:
+        apply_due_scheduled_location_changes(db)
+    except SQLAlchemyError:
+        db.rollback()
+    try:
         locations = list_test_locations(db, query)
     except SQLAlchemyError:
         db.rollback()
@@ -2782,12 +2823,27 @@ def test_location_registry(
         non_site_database_error = (
             "Non-site execution modes are currently unavailable."
         )
+    try:
+        scheduled_changes = list_scheduled_location_changes(
+            db,
+            statuses=ACTIVE_SCHEDULE_STATUSES,
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        scheduled_changes = ()
+    pending_count_by_location = Counter(
+        change.location_id
+        for change in scheduled_changes
+        if change.status in {"pending", "applying"}
+    )
     return templates.TemplateResponse(
         request=request,
         name="test_location_registry.html",
         context={
             "locations": locations,
             "non_site_locations": non_site_locations,
+            "scheduled_changes": scheduled_changes,
+            "pending_count_by_location": pending_count_by_location,
             "query": query,
             "database_error": database_error,
             "non_site_database_error": non_site_database_error,
@@ -2969,6 +3025,10 @@ def test_location_history(
     db: Session = Depends(get_db),
 ):
     try:
+        apply_due_scheduled_location_changes(db)
+    except SQLAlchemyError:
+        db.rollback()
+    try:
         history = get_test_location_history(db, location_id=location_id)
     except SQLAlchemyError:
         db.rollback()
@@ -2979,15 +3039,266 @@ def test_location_history(
         )
     if history is None:
         raise HTTPException(status_code=404, detail="Test location not found") from None
+    try:
+        scheduled_changes = list_scheduled_location_changes(
+            db,
+            location_id=location_id,
+            statuses=ACTIVE_SCHEDULE_STATUSES,
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        scheduled_changes = ()
     return templates.TemplateResponse(
         request=request,
         name="test_location_history.html",
         context={
             "history": history,
+            "scheduled_changes": scheduled_changes,
             "to_app_timezone": _to_app_timezone,
             "message": request.query_params.get("message"),
             "message_kind": request.query_params.get("message_kind", "success"),
         },
+    )
+
+
+@router.get("/ops/test-locations/schedule")
+def new_scheduled_test_location_form(
+    request: Request,
+    item: str = Query(...),
+    return_location_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        location = get_test_location(db, item)
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            "/ops/test-locations",
+            "AT Framework test location data is currently unavailable.",
+            "error",
+        )
+    if location is None:
+        raise HTTPException(status_code=404, detail="Test location not found")
+    existing_schedules: tuple[ScheduledLocationChangeView, ...] = ()
+    if location.location_id is not None:
+        try:
+            existing_schedules = list_scheduled_location_changes(
+                db,
+                location_id=location.location_id,
+                statuses=ACTIVE_SCHEDULE_STATUSES,
+            )
+        except SQLAlchemyError:
+            db.rollback()
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_schedule_form.html",
+        context={
+            "form_title": "Schedule future configuration change",
+            "location": location,
+            "schedule": None,
+            "existing_schedules": existing_schedules,
+            "form_values": location.form_values(),
+            "effective_at": _default_scheduled_location_effective_at(
+                existing_schedules
+            ),
+            "change_reason": "",
+            "return_location_id": return_location_id,
+            "return_path": _test_location_return_path(return_location_id),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.post("/ops/test-locations/schedule")
+def create_scheduled_test_location_record(
+    original_item: str = Form(...),
+    return_location_id: int | None = Form(default=None),
+    values: dict[str, str] = Depends(_test_location_form),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    schedule_path = f"/ops/test-locations/schedule?item={quote(original_item)}"
+    if return_location_id is not None and return_location_id > 0:
+        schedule_path += f"&return_location_id={return_location_id}"
+    try:
+        scheduled = create_scheduled_location_change(
+            db,
+            values,
+            original_item=original_item,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            created_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(schedule_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(status_code=404, detail="Test location not found") from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            schedule_path,
+            "Scheduled test location change could not be saved.",
+            "error",
+        )
+    return _redirect(
+        _test_location_return_path(return_location_id),
+        f"Scheduled change for {scheduled.current_item} at "
+        f"{scheduled.effective_at.strftime('%Y-%m-%d %H:%M:%S')}.",
+    )
+
+
+@router.get("/ops/test-locations/schedule/{schedule_id}/edit")
+def edit_scheduled_test_location_form(
+    schedule_id: int,
+    request: Request,
+    return_location_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    try:
+        schedule = get_scheduled_location_change(db, schedule_id)
+        location = (
+            get_test_location(db, schedule.current_item) if schedule else None
+        )
+        existing_schedules = (
+            list_scheduled_location_changes(
+                db,
+                location_id=schedule.location_id,
+                statuses=ACTIVE_SCHEDULE_STATUSES,
+            )
+            if schedule
+            else ()
+        )
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            _test_location_return_path(return_location_id),
+            "Scheduled test location data is currently unavailable.",
+            "error",
+        )
+    if schedule is None or location is None:
+        raise HTTPException(
+            status_code=404, detail="Scheduled test location change not found"
+        )
+    return templates.TemplateResponse(
+        request=request,
+        name="test_location_schedule_form.html",
+        context={
+            "form_title": "Edit scheduled configuration change",
+            "location": location,
+            "schedule": schedule,
+            "existing_schedules": existing_schedules,
+            "form_values": schedule.form_values(),
+            "effective_at": schedule.effective_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "change_reason": schedule.change_reason,
+            "return_location_id": return_location_id,
+            "return_path": _test_location_return_path(return_location_id),
+            "message": request.query_params.get("message"),
+            "message_kind": request.query_params.get("message_kind", "success"),
+        },
+    )
+
+
+@router.post("/ops/test-locations/schedule/{schedule_id}/edit")
+def update_scheduled_test_location_record(
+    schedule_id: int,
+    return_location_id: int | None = Form(default=None),
+    values: dict[str, str] = Depends(_test_location_form),
+    change: dict[str, str] = Depends(_test_location_change_form),
+    db: Session = Depends(get_db),
+):
+    edit_path = f"/ops/test-locations/schedule/{schedule_id}/edit"
+    if return_location_id is not None and return_location_id > 0:
+        edit_path += f"?return_location_id={return_location_id}"
+    try:
+        scheduled = update_scheduled_location_change(
+            db,
+            schedule_id,
+            values,
+            effective_at=_test_location_effective_at(change["effective_at"]),
+            change_reason=change["change_reason"],
+            updated_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(edit_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="Scheduled test location change not found"
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            edit_path,
+            "Scheduled test location change could not be updated.",
+            "error",
+        )
+    return _redirect(
+        _test_location_return_path(return_location_id),
+        f"Scheduled change for {scheduled.current_item} updated.",
+    )
+
+
+@router.post("/ops/test-locations/schedule/{schedule_id}/apply-now")
+def apply_scheduled_test_location_record_now(
+    schedule_id: int,
+    return_location_id: int | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    return_path = _test_location_return_path(return_location_id)
+    try:
+        applied = apply_scheduled_location_change_now(
+            db,
+            schedule_id,
+            applied_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(return_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="Scheduled test location change not found"
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            return_path,
+            "AT Framework database operation failed.",
+            "error",
+        )
+    return _redirect(
+        return_path,
+        f"Scheduled change for {applied.current_item} applied.",
+    )
+
+
+@router.post("/ops/test-locations/schedule/{schedule_id}/cancel")
+def cancel_scheduled_test_location_record(
+    schedule_id: int,
+    return_location_id: int | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    return_path = _test_location_return_path(return_location_id)
+    try:
+        cancelled = cancel_scheduled_location_change(
+            db,
+            schedule_id,
+            cancelled_by=_web_actor(),
+        )
+    except TestLocationValidationError as exc:
+        return _redirect(return_path, str(exc), "error")
+    except TestLocationNotFoundError:
+        raise HTTPException(
+            status_code=404, detail="Scheduled test location change not found"
+        ) from None
+    except SQLAlchemyError:
+        db.rollback()
+        return _redirect(
+            return_path,
+            "Scheduled test location change could not be cancelled.",
+            "error",
+        )
+    return _redirect(
+        return_path,
+        f"Scheduled change for {cancelled.current_item} cancelled.",
     )
 
 

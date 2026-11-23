@@ -31,6 +31,11 @@ _PD_REFERENCE_RE = re.compile(
     r"\bPD(?:\s*(?:No\.?|Number))?\s*[:：#-]\s*[A-Za-z0-9.-]*\d[A-Za-z0-9.-]*\b",
     re.IGNORECASE,
 )
+_DEFECT_TICKET_RE = re.compile(
+    r"(?:\b(?:PD(?:\s*(?:No\.?|Number))?|ADS|CQ|BUG|DEF)\s*[:：#-]\s*[A-Za-z0-9.-]*\d[A-Za-z0-9.-]*"
+    r"|\bCTD\d{5,})\b",
+    re.IGNORECASE,
+)
 
 
 def _text_skill_steps(content: dict[str, Any]) -> list[dict[str, Any]]:
@@ -299,7 +304,12 @@ def _run_text_semantic_skills(
                     "summary": assessment["summary"][:200],
                 }
             )
-        evidence_routed = _routes_result_evidence(steps_by_number[review_step])
+        step_source = steps_by_number[review_step]
+        is_failed_step_with_ticket = (
+            str(step_source.get("status") or "").casefold() == "failed"
+            and bool(_DEFECT_TICKET_RE.search(normalize_text(step_source.get("actual"))))
+        )
+        evidence_routed = _routes_result_evidence(step_source)
         suppressed: list[dict[str, str]] = []
         for finding in assessment["findings"]:
             code = finding["code"]
@@ -316,6 +326,11 @@ def _run_text_semantic_skills(
             if assessment["applicability"] == "not_applicable":
                 suppressed.append(
                     _suppressed_finding(finding, "step_not_applicable")
+                )
+                continue
+            if code == "actual_insufficient" and is_failed_step_with_ticket:
+                suppressed.append(
+                    _suppressed_finding(finding, "failed_step_defect_ticket_recorded")
                 )
                 continue
             if code in _EVIDENCE_SUPERSEDED_CODES and evidence_routed:

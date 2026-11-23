@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 from app.models import (
     NonSiteExecutionLocation,
     TestLocationIdentity,
+    TestLocationScheduledChange,
     TestLocationVersion,
     WorkerLease,
 )
@@ -85,6 +86,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
         WorkerLease.__table__.create(connection, checkfirst=True)
         TestLocationIdentity.__table__.create(connection, checkfirst=True)
         TestLocationVersion.__table__.create(connection, checkfirst=True)
+        TestLocationScheduledChange.__table__.create(connection, checkfirst=True)
         NonSiteExecutionLocation.__table__.create(connection, checkfirst=True)
         if connection.scalar(select(NonSiteExecutionLocation.id).limit(1)) is None:
             connection.execute(

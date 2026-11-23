@@ -21,6 +21,11 @@ _AUTOMATION_RESULT_DIRECTORIES = {
     "systemverificationautomaionresult",
     "systemverificationautomationresult",
 }
+_NETWORK_UNAVAILABLE_WINERRORS = frozenset({53, 64, 67, 1222, 1231})
+
+
+class _AmbiguousHtmlEntryError(FileNotFoundError):
+    """Raised when multiple entries share the same relaxed whitespace key."""
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 _RESULT_DATA_PATTERN = re.compile(r"\bvar\s+resultData\s*=\s*")
 _ACTUAL_FIELD_PATTERN = re.compile(
@@ -359,11 +364,32 @@ class HtmlEvidenceResolver:
         source_kind = "approved_root"
         try:
             source = self._approved_source(value, allowed_root)
-        except FileNotFoundError:
+        except _AmbiguousHtmlEntryError:
+            return HtmlEvidenceResult(status="missing")
+        except FileNotFoundError as primary_exc:
+            primary_unavailable = (
+                getattr(primary_exc, "winerror", None)
+                in _NETWORK_UNAVAILABLE_WINERRORS
+            )
             try:
                 source = self._fallback_source(value, allowed_root, fallback_root)
                 source_kind = "local_html_fallback"
-            except FileNotFoundError:
+            except _AmbiguousHtmlEntryError:
+                return HtmlEvidenceResult(status="missing")
+            except FileNotFoundError as fallback_exc:
+                if primary_unavailable:
+                    return HtmlEvidenceResult(
+                        status="unavailable",
+                        detail=str(primary_exc)[:300],
+                    )
+                if (
+                    getattr(fallback_exc, "winerror", None)
+                    in _NETWORK_UNAVAILABLE_WINERRORS
+                ):
+                    return HtmlEvidenceResult(
+                        status="unavailable",
+                        detail=str(fallback_exc)[:300],
+                    )
                 return HtmlEvidenceResult(status="missing")
         except PermissionError as exc:
             return HtmlEvidenceResult(status="denied", detail=str(exc)[:300])
@@ -432,6 +458,8 @@ class HtmlEvidenceResolver:
         for parts in candidates:
             try:
                 return self._approved_relative_source(Path(configured_fallback), parts)
+            except _AmbiguousHtmlEntryError:
+                raise
             except FileNotFoundError:
                 continue
         raise FileNotFoundError(value)
@@ -463,6 +491,8 @@ class HtmlEvidenceResolver:
                 if _whitespace_key(item.name) == relaxed_key:
                     relaxed.append(item)
         # ALM rich text stores spaces as &nbsp; and collapses repeated spaces, so the
+        if len(relaxed) > 1:
+            raise _AmbiguousHtmlEntryError(str(current / part))
         # quoted path can differ from the share only in whitespace. Accept that single
         # deterministic case; stay missing when more than one entry could match.
         return relaxed[0] if len(relaxed) == 1 else None

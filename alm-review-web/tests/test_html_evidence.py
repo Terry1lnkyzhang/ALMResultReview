@@ -220,3 +220,23 @@ def test_html_stays_missing_when_whitespace_match_is_ambiguous(tmp_path: Path) -
     )
 
     assert result.status == "missing"
+
+
+def test_html_unreachable_share_without_matching_fallback_is_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    resolver = HtmlEvidenceResolver()
+
+    def raise_bad_netpath(value: str, allowed_root: str):
+        raise FileNotFoundError(2, "The network path was not found", value, 53)
+
+    monkeypatch.setattr(resolver, "_approved_source", raise_bad_netpath)
+
+    result = resolver.resolve(
+        r"\\unreachable-host\approved\SystemVerificationAutomaionResult\70287\report.html",
+        allowed_root=r"\\unreachable-host\approved",
+        fallback_root=str(tmp_path),
+    )
+
+    assert result.status == "unavailable"

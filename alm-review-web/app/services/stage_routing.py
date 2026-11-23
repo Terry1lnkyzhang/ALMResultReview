@@ -384,6 +384,7 @@ def _apply_reference_routing(
                 "manual_required": False,
             }
             continue
+        has_uncertain_role = False
         for decision in step.get("reference_decisions", []):
             candidate = candidates.get(decision["candidate_id"])
             if candidate is None or candidate["source_field"] == "attachment":
@@ -396,6 +397,7 @@ def _apply_reference_routing(
             reasons.append(decision["reason"])
             if decision["role"] == "uncertain":
                 actions.add("manual_review")
+                has_uncertain_role = True
                 continue
             if candidate["type"] == "html_report":
                 actions.update(("validate_path", "parse_html_report"))
@@ -413,7 +415,7 @@ def _apply_reference_routing(
             or "image_evidence" in routed_types
         )
         profile["path_validation_required"] = "validate_path" in actions
-        if "manual_review" in actions:
+        if has_uncertain_role:
             intent = "uncertain"
         elif len(routed_types) > 1:
             intent = "mixed_evidence"

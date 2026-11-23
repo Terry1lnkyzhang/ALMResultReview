@@ -2616,3 +2616,107 @@ def test_unc_folder_path_mentioning_phantom_does_not_create_false_equipment_ques
 
     assert questions == []
     assert checks[0]["status"] == "not_applicable"
+
+
+def test_prior_unrecognized_identifier_downgrades_later_ambiguous_name_to_manual() -> None:
+    registry = [
+        equipment(
+            "",
+            "HJH-20X1806-0002",
+            description="SYSTEM PHANTOM",
+            calibration_due_date=date(2027, 1, 1),
+            equipment_pk=1,
+        ),
+        equipment(
+            "",
+            "HJH-20X1806-0003",
+            description="SYSTEM PHANTOM",
+            calibration_due_date=date(2027, 6, 1),
+            equipment_pk=2,
+        ),
+    ]
+    content = {
+        "execution_date": "2026-08-04",
+        "steps": [
+            {
+                "review_step": 1,
+                "description": "Record the system phantom details.",
+                "expected": "System phantom information is:__",
+                "actual": "SYSTEM PHANTOM P/N:459801550744, SN: F53331-0046, REV: A.",
+                "execution_date": "2026-08-04",
+            },
+            {
+                "review_step": 2,
+                "description": "Scan the system phantom (Physics layer).",
+                "expected": "Record 8 times test result.",
+                "actual": "Script running completed, result passed.",
+                "execution_date": "2026-08-04",
+            },
+        ],
+    }
+    checks, _ = analyze_equipment_steps(content, registry)
+    apply_extracted_equipment(
+        content,
+        checks,
+        {
+            1: [
+                _extracted(
+                    device_name="system phantom",
+                    serial_number="F53331-0046",
+                    source_text="SN: F53331-0046",
+                )
+            ],
+            2: [
+                _extracted(
+                    device_name="system phantom",
+                    source_text="Scan the system phantom",
+                )
+            ],
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "manual"
+    assert checks[0]["code"] == "equipment_identifier_unrecognized"
+    assert checks[1]["status"] == "manual"
+    assert checks[1]["code"] == "equipment_identifier_unrecognized"
+
+
+def test_shorthand_pending_name_grounds_previously_matched_device_when_not_required() -> None:
+    registry = [
+        equipment(
+            "",
+            "HJH-20X1806-0002",
+            description="SYSTEM PHANTOM",
+            calibration_date=None,
+            calibration_due_date=None,
+            calibration_interval="No calibration required",
+            equipment_pk=1,
+        )
+    ]
+    content = review_content(
+        "SD value was 9.8.",
+        description="Measure the SD value of the phantom center area.",
+        expected="SD value <= 15.3.",
+    )
+    checks, _ = analyze_equipment_steps(content, registry)
+    checks[0]["pending_device_names"] = ["phantom"]
+    checks[0]["previously_matched_equipment_ids"] = ["SN:HJH-20X1806-0002"]
+
+    apply_equipment_disambiguation(
+        content,
+        checks,
+        {
+            1: {
+                "role": "controlled_equipment",
+                "required": False,
+                "selected_equipment_ids": ["SN:HJH-20X1806-0002"],
+                "selected_equipment_names": [],
+                "reason": "该步骤在第一步已登记系统模体的图像上测量中心区域 SD。",
+            }
+        },
+        registry,
+    )
+
+    assert checks[0]["status"] == "pass"
+    assert checks[0]["code"] == "equipment_valid"

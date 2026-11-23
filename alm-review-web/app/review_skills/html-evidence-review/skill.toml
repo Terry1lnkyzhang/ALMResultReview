@@ -1,7 +1,7 @@
 [skill]
 id = "html-evidence-review"
 name = "HTML Evidence Review"
-version = "1.9.0"
+version = "1.10.0"
 stage = "report_review"
 enabled = true
 

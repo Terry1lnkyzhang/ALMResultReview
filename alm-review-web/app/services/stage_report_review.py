@@ -1,6 +1,7 @@
 """Stage 5 (`report_review`): HTML report resolution, BM25 selection, batching, and citation verification."""
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from pathlib import PureWindowsPath
 from typing import Any
@@ -297,6 +298,31 @@ def _html_final_input(
     }
 
 
+_ELLIPSIS_SPLIT_RE = re.compile(r"(?:\.{3,}|…+)")
+
+
+def _quote_line_matches(quote_line: str, block_line: str) -> tuple[bool, bool]:
+    """Return `(matched, used_ellipsis)` for one normalized quote line vs block line."""
+    if quote_line in block_line:
+        return True, False
+    if "..." not in quote_line and "…" not in quote_line:
+        return False, False
+    segments = [
+        segment.strip()
+        for segment in _ELLIPSIS_SPLIT_RE.split(quote_line)
+        if segment.strip()
+    ]
+    if len(segments) < 2 or sum(len(segment) for segment in segments) < 10:
+        return False, False
+    cursor = 0
+    for segment in segments:
+        pos = block_line.find(segment, cursor)
+        if pos < 0:
+            return False, False
+        cursor = pos + len(segment)
+    return True, True
+
+
 def _validate_html_citations(
     reports: list[dict[str, Any]],
     assessment: dict[str, Any],
@@ -322,40 +348,62 @@ def _validate_html_citations(
         ]
         next_index = 0
         unmatched_line = ""
+        normalized_lines: list[str] = []
+        replaced_ellipsis = False
         for raw_quote_line, quote_line in zip(
             raw_quote_lines, quote_lines, strict=True
         ):
-            matching_index = next(
-                (
-                    index
-                    for index in range(next_index, len(block_lines))
-                    if quote_line in block_lines[index]
-                ),
-                None,
-            )
+            matching_index = None
+            used_ellipsis = False
+            for index in range(next_index, len(block_lines)):
+                matched, ellipsis_hit = _quote_line_matches(
+                    quote_line, block_lines[index]
+                )
+                if matched:
+                    matching_index = index
+                    used_ellipsis = ellipsis_hit
+                    break
             if matching_index is None:
                 next_index = -1
                 unmatched_line = raw_quote_line
                 break
+            if used_ellipsis:
+                replaced_ellipsis = True
+                normalized_lines.append(raw_block_lines[matching_index][:400])
+            else:
+                normalized_lines.append(raw_quote_line)
             next_index = matching_index + 1
+        if quote_lines and next_index >= 0 and replaced_ellipsis:
+            citation["quote"] = "\n".join(normalized_lines)
         if quote_lines and next_index < 0:
             source_matches: list[tuple[int, str]] = []
             used_indexes: set[int] = set()
             for raw_quote_line, quote_line in zip(
                 raw_quote_lines, quote_lines, strict=True
             ):
-                matching_index = next(
-                    (
-                        index
-                        for index, block_line in enumerate(block_lines)
-                        if index not in used_indexes and quote_line in block_line
-                    ),
-                    None,
-                )
+                matching_index = None
+                used_ellipsis = False
+                for index, block_line in enumerate(block_lines):
+                    if index in used_indexes:
+                        continue
+                    matched, ellipsis_hit = _quote_line_matches(
+                        quote_line, block_line
+                    )
+                    if matched:
+                        matching_index = index
+                        used_ellipsis = ellipsis_hit
+                        break
                 if matching_index is None:
                     break
                 used_indexes.add(matching_index)
-                source_matches.append((matching_index, raw_quote_line))
+                source_matches.append(
+                    (
+                        matching_index,
+                        raw_block_lines[matching_index][:400]
+                        if used_ellipsis
+                        else raw_quote_line,
+                    )
+                )
             if len(source_matches) == len(quote_lines):
                 citation["quote"] = "\n".join(
                     quote_line for _, quote_line in sorted(source_matches)
@@ -370,7 +418,8 @@ def _validate_html_citations(
             raise SkillFailure(
                 "HTML evidence Skill cited text outside the supplied report block: "
                 f"report_id={citation['report_id']!r}, "
-                f"block_id={citation['block_id']!r}, {detail}.",
+                f"block_id={citation['block_id']!r}, {detail} "
+                f"(actual block text: {(block_text or '')[:240]!r}).",
                 retryable=False,
             )
 

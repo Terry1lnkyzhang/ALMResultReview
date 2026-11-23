@@ -36,6 +36,13 @@
           "reference_candidates": [
             {"candidate_id": "step-4-ref-1", "type": "equipment", "value": "MOD-52105", "source_field": "actual", "detection_source": "equipment_identifier"}
           ]
+        },
+        {
+          "review_step": 5,
+          "description": "Record the pressure gauge information.",
+          "expected": "Gauge ID: ____, calibration date: ____.",
+          "actual": "Gauge ID: EQ-310, calibration date: 20260724.",
+          "reference_candidates": []
         }
       ]
     },
@@ -71,6 +78,13 @@
             {"candidate_id": "step-4-ref-1", "role": "dut_or_other", "requires_check": false, "reason": "控制器模块属于被测系统部件，而非受控测量设备。"}
           ],
           "extracted_equipment": []
+        },
+        {
+          "review_step": 5,
+          "reference_decisions": [],
+          "extracted_equipment": [
+            {"device_name": "pressure gauge", "equipment_id": "EQ-310", "serial_number": "", "reported_calibration_due_date": "", "source_text": "Gauge ID: EQ-310, calibration date: 20260724."}
+          ]
         }
       ]
     }

@@ -259,6 +259,46 @@ class TestLocationVersion(Base):
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class TestLocationScheduledChange(Base):
+    __tablename__ = "test_location_scheduled_changes"
+    __table_args__ = (
+        Index(
+            "ix_test_location_scheduled_due",
+            "status",
+            "effective_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    location_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("test_location_identities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_item: Mapped[str] = mapped_column(String(250), nullable=False)
+    product: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    version: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    collimation: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    platform: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    system_config: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    change_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime)
+    applied_version_id: Mapped[int | None] = mapped_column(Integer)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime)
+    cancelled_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
 class NonSiteExecutionLocation(Base):
     __tablename__ = "non_site_execution_locations"
 

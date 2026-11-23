@@ -959,6 +959,20 @@ def _rows_for_name(
     return [representative], False
 
 
+def _has_prior_unrecognized_equipment(
+    checks: Iterable[dict[str, Any]],
+    review_step: int,
+) -> bool:
+    return any(
+        int(prior.get("review_step", 0)) < review_step
+        and (
+            prior.get("code") == "equipment_identifier_unrecognized"
+            or bool(prior.get("unrecognized_reported_identifiers"))
+        )
+        for prior in checks
+    )
+
+
 def apply_extracted_equipment(
     content: dict[str, Any],
     checks: list[dict[str, Any]],
@@ -1195,12 +1209,22 @@ def apply_extracted_equipment(
             resolved.add(review_step)
             continue
         if ambiguous_names:
-            check.update(
-                status="fail",
-                code="equipment_ambiguous_name",
-                summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
-                "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
-            )
+            if _has_prior_unrecognized_equipment(checks, review_step):
+                check.update(
+                    status="manual",
+                    code="equipment_identifier_unrecognized",
+                    summary=(
+                        "前序步骤已记录未入账的设备标识符，本步骤沿用同名设备需人工确认："
+                        + ", ".join(dict.fromkeys(ambiguous_names))
+                    ),
+                )
+            else:
+                check.update(
+                    status="fail",
+                    code="equipment_ambiguous_name",
+                    summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
+                    "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
+                )
             resolved.add(review_step)
             continue
         if unmapped_names:
@@ -1277,16 +1301,28 @@ def apply_html_report_equipment(
                 _reported_asset_ranges(raw_actual),
                 _reported_due_date(raw_actual),
             )
+            selected_ids = set(
+                check.get("disambiguation", {}).get(
+                    "selected_equipment_ids", []
+                )
+            )
             selected_names = {
                 _name_key(_normalized(name))
                 for name in check.get("disambiguation", {}).get(
                     "selected_equipment_names", []
                 )
             }
+            matched_ids = {
+                equipment_reference(item) for item in matched.values()
+            }
             matched_names = {
                 _name_key(_normalized(item.description)) for item in matched.values()
             }
-            if selected_names and selected_names.isdisjoint(matched_names):
+            if (
+                selected_names
+                and selected_names.isdisjoint(matched_names)
+                and not (selected_ids and matched_ids <= selected_ids)
+            ):
                 check.update(
                     status="fail",
                     code="equipment_description_mismatch",
@@ -1406,7 +1442,8 @@ def apply_equipment_disambiguation(
         }
         grounded_ids = set(check.get("actual_candidate_equipment_ids", []))
         previous_ids = set(check.get("previously_matched_equipment_ids", []))
-        if not check.get("pending_device_names"):
+        pending_names = check.get("pending_device_names") or []
+        if not pending_names:
             grounded_ids.update(
                 previous_ids
                 & set(check.get("requirement_candidate_equipment_ids", []))
@@ -1419,6 +1456,18 @@ def apply_equipment_disambiguation(
                     registry,
                 )
             )
+        elif not decision.get("required"):
+            for prior_id in previous_ids:
+                prior_item = by_id.get(prior_id)
+                if prior_item is None:
+                    continue
+                prior_tokens = _latin_name_tokens(prior_item.description)
+                if prior_tokens and all(
+                    bool(tokens := _latin_name_tokens(name))
+                    and tokens <= prior_tokens
+                    for name in pending_names
+                ):
+                    grounded_ids.add(prior_id)
         grounded_ids.update(previous_ids & selected_name_equipment_ids)
         if (
             len({_name_key(_normalized(name)) for name in selected_names}) > 1
@@ -1472,12 +1521,22 @@ def apply_equipment_disambiguation(
                 _reported_due_date(raw_actual),
             )
         elif ambiguous_names:
-            check.update(
-                status="fail",
-                code="equipment_ambiguous_name",
-                summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
-                "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
-            )
+            if _has_prior_unrecognized_equipment(checks, int(check["review_step"])):
+                check.update(
+                    status="manual",
+                    code="equipment_identifier_unrecognized",
+                    summary=(
+                        "前序步骤已记录未入账的设备标识符，本步骤沿用同名设备需人工确认："
+                        + ", ".join(dict.fromkeys(ambiguous_names))
+                    ),
+                )
+            else:
+                check.update(
+                    status="fail",
+                    code="equipment_ambiguous_name",
+                    summary="设备名称对应多台校准数据不同的台账设备，且 Actual 未记录"
+                    "序列号或 Equipment ID：" + ", ".join(dict.fromkeys(ambiguous_names)),
+                )
         elif check["reported_identifiers"] or check["unknown_identifiers"]:
             identifiers = check["reported_identifiers"] + check["unknown_identifiers"]
             check.update(

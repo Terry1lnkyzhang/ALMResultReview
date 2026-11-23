@@ -10,9 +10,49 @@
   </div>
   <div class="actions">
     <a class="button secondary button-link" href="/ops/test-locations/history/backfill?location_id={{ history.location_id }}">Add earlier version</a>
+    {% if not history.retired_at %}<a class="button secondary button-link" href="/ops/test-locations/schedule?item={{ history.current_item|urlencode }}&amp;return_location_id={{ history.location_id }}">Schedule future change</a>{% endif %}
     {% if not history.retired_at %}<a class="button primary button-link" href="/ops/test-locations/edit?item={{ history.current_item|urlencode }}">Edit current version</a>{% endif %}
   </div>
 </section>
+
+{% if scheduled_changes %}
+<section class="scheduled-location-section">
+  <header>
+    <div>
+      <p class="eyebrow">UPCOMING QUEUE</p>
+      <h2>Scheduled configuration switches</h2>
+      <p>Pending switches below will take effect automatically when local time reaches each scheduled timestamp.</p>
+    </div>
+    <span class="scheduled-count-badge">{{ scheduled_changes|length }} queued</span>
+  </header>
+  <div class="table-scroll">
+    <table class="equipment-table scheduled-location-table">
+      <thead><tr><th>Effective Time</th><th>Target Item</th><th>Product / DMS</th><th>Couch</th><th>Computer</th><th>Reason</th><th><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody>
+      {% for change in scheduled_changes %}
+        <tr>
+          <td>
+            <strong>{{ change.effective_at.strftime('%Y-%m-%d %H:%M:%S') }}</strong>
+            <span class="equipment-status schedule-status schedule-status-{{ change.status }}">{{ change.status }}</span>
+            {% if change.error_message %}<small class="date-expired">{{ change.error_message }}</small>{% endif %}
+          </td>
+          <td><strong>{{ change.target_item }}</strong></td>
+          <td><span>{{ change.product or '-' }}</span><small>{{ change.version or '-' }} · {{ change.collimation or '-' }}</small></td>
+          <td>{{ change.platform or '-' }}</td>
+          <td><strong>{{ change.system_config or '-' }}</strong></td>
+          <td><span>{{ change.change_reason }}</span><small>By {{ change.created_by or 'local' }}</small></td>
+          <td class="row-actions">
+            <a href="/ops/test-locations/schedule/{{ change.id }}/edit?return_location_id={{ history.location_id }}">Edit</a>
+            <form method="post" action="/ops/test-locations/schedule/{{ change.id }}/apply-now"><input type="hidden" name="return_location_id" value="{{ history.location_id }}"><button class="apply-now-button" type="submit">Apply now</button></form>
+            <form method="post" action="/ops/test-locations/schedule/{{ change.id }}/cancel"><input type="hidden" name="return_location_id" value="{{ history.location_id }}"><button type="submit">Cancel</button></form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
 
 {% if history.retired_at %}
 <section class="retired-location-banner">

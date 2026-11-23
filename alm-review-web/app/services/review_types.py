@@ -27,7 +27,7 @@ VALID_CRITERION_STATUSES = {"pass", "fail", "manual", "not_applicable"}
 # Prompt budgets that keep a single Skill call inside the model context window.
 STEP_FIELD_CHAR_LIMIT = 6000
 TEXT_BATCH_CHAR_BUDGET = 24000
-TEXT_BATCH_MAX_STEPS = 6
+TEXT_BATCH_MAX_STEPS = 10
 HTML_SKILL_CHAR_BUDGET = 30000
 
 

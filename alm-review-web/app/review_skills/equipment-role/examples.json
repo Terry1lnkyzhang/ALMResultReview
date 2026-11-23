@@ -1,7 +1,7 @@
 [
   {
     "input": {
-      "registry_equipment_names": ["Digital meter", "数字温度计", "秒表", "信号模拟器"],
+      "registry_equipment_names": ["Digital meter", "数字温度计", "秒表", "信号模拟器", "AC Clamp Probe", "DC Clamp Probe", "Universal AC/DC Clamp Probe", "High-Voltage Differential Probe"],
       "steps": [
         {
           "review_step": 1,
@@ -46,6 +46,18 @@
             {"equipment_id": "EQ-SIM-01", "description": "信号模拟器", "model_number": "SIM-200", "serial_number": "SN-200"}
           ],
           "extracted_device_names": ["signal simulator"]
+        },
+        {
+          "review_step": 5,
+          "description": "Attach the current clamp probe and run the automated load script.",
+          "expected": "Probe ID: ____.",
+          "actual": "Automated script completed; refer to automation test report.",
+          "reported_identifiers": [],
+          "previously_matched_equipment_ids": [],
+          "candidate_equipment": [
+            {"equipment_id": "EQ-PRB-02", "description": "DC Clamp Probe", "model_number": "CP-20", "serial_number": "SN-220"}
+          ],
+          "extracted_device_names": ["current clamp probe"]
         }
       ]
     },
@@ -82,6 +94,14 @@
           "selected_equipment_ids": ["EQ-SIM-01"],
           "selected_equipment_names": ["信号模拟器"],
           "reason": "该步骤延续操作前序已登记的信号模拟器，Expected 未要求重复记录设备编号。"
+        },
+        {
+          "review_step": 5,
+          "role": "controlled_equipment",
+          "required": true,
+          "selected_equipment_ids": ["EQ-PRB-02"],
+          "selected_equipment_names": ["AC Clamp Probe", "DC Clamp Probe", "Universal AC/DC Clamp Probe"],
+          "reason": "步骤泛指电流钳探头而未限定交直流子型，候选中的直流电流钳属于兼容子型，故选中该候选及全部兼容名称。"
         }
       ]
     }

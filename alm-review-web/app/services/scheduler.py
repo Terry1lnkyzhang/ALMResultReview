@@ -19,6 +19,7 @@ from app.services.review_jobs import (
     reap_abandoned_review_jobs,
     renew_review_job_lease,
 )
+from app.services.test_location_schedules import apply_due_scheduled_location_changes
 from app.services.worker_lease import (
     fence_worker_lease,
     owns_worker_lease,
@@ -308,6 +309,23 @@ def run_worker_cycle(owner_token: str) -> None:
             update_worker_heartbeat(db, worker_id, status="idle")
 
 
+def run_scheduled_location_changes_cycle(owner_token: str) -> None:
+    with SessionLocal() as db:
+        try:
+            if not owns_worker_lease(db, owner_token):
+                return
+            applied, failed = apply_due_scheduled_location_changes(db)
+            if applied or failed:
+                logger.info(
+                    "Scheduled test-location changes applied=%s failed=%s",
+                    applied,
+                    failed,
+                )
+        except Exception:
+            db.rollback()
+            logger.exception("Scheduled test-location cycle failed")
+
+
 def configure_scheduler(
     scheduler: BackgroundScheduler,
     owner_token: str,
@@ -319,6 +337,7 @@ def configure_scheduler(
         "worker-queue-poll",
         "worker-sync-poll",
         "worker-heartbeat",
+        "scheduled-test-locations",
     }
     managed_job_ids.update(
         job.id for job in scheduler.get_jobs() if job.id.startswith("daily-alm-sync:")
@@ -377,6 +396,17 @@ def configure_scheduler(
         max_instances=1,
         coalesce=True,
     )
+    if get_settings().location_schedule_poll_seconds > 0:
+        scheduler.add_job(
+            run_scheduled_location_changes_cycle,
+            "interval",
+            seconds=max(5, get_settings().location_schedule_poll_seconds),
+            args=[owner_token],
+            id="scheduled-test-locations",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
 
 
 def create_scheduler(

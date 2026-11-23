@@ -101,11 +101,17 @@ def test_test_location_history_tables_are_created() -> None:
     assert {
         "test_location_identities",
         "test_location_versions",
+        "test_location_scheduled_changes",
     } <= set(inspector.get_table_names())
     indexes = {
         index["name"] for index in inspector.get_indexes("test_location_versions")
     }
     assert "ix_test_location_version_lookup" in indexes
+    scheduled_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("test_location_scheduled_changes")
+    }
+    assert "ix_test_location_scheduled_due" in scheduled_indexes
 
 
 def test_non_site_execution_locations_are_created_and_seeded_once() -> None:

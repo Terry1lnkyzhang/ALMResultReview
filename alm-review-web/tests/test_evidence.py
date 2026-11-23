@@ -310,6 +310,24 @@ def test_content_after_html_extension_is_an_html_report_anomaly() -> None:
     ]
 
 
+def test_strips_glued_substep_prose_and_treats_dotted_folders_as_folders() -> None:
+    actual = (
+        r"Saved screenshot: \\server\share\43135\Step1-ab. Pop-up Note information"
+        "\n"
+        r"Saved screenshot: \\server\share\43135\Step1-bc.Grid Voltage was imported"
+        "\n"
+        r"Saved screenshot: \\server\share\104437\0. Common Config"
+    )
+
+    paths = extract_paths(actual)
+
+    assert [(item["raw"], item["kind"]) for item in paths] == [
+        (r"\\server\share\43135\Step1-a", "folder_or_unknown"),
+        (r"\\server\share\43135\Step1-b", "folder_or_unknown"),
+        (r"\\server\share\104437\0. Common Config", "folder_or_unknown"),
+    ]
+
+
 def test_html_filename_testcase_ids_use_only_the_filename() -> None:
     cases = {
         "CT-NMP.SRS.UserIF.144_103253.html": ["103253"],

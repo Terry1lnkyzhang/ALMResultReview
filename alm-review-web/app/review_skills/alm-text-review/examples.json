@@ -40,6 +40,26 @@
             {"number": 2, "expected": "The primary job should transition normally(Pending->Active->Failed). The secondary batch completes successfully.", "actual": "The primary job transitioned normally(Pending->Active->Failed). The secondary batch completed successfully."}
           ],
           "routed_evidence_references": []
+        },
+        {
+          "review_step": 4,
+          "alm_step_status": "Passed",
+          "description": "Inspect the subsystem test report. Record the name, version, section and description.",
+          "expected": "The following details are recorded:\nName:__\nVersion:__\nSection:__",
+          "actual": "The following details were recorded:\nName: DOC-2048 Subsystem Test Protocol\nVersion: Rev C\nSection: Appendix C",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
+        },
+        {
+          "review_step": 5,
+          "alm_step_status": "Passed",
+          "description": "Select the highest-throughput mode and record its processing rate across 3 runs.",
+          "expected": "Pick the mode with the highest rate as max rate. max processing rate is up to 100 items/s.",
+          "actual": "| Mode | Run1 | Run2 | Run3 |\n| --- | --- | --- | --- |\n| Mode-1 | 142.5 | 139.8 | 141.2 |\n\nmax processing rate is up to 100 items/s.",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
         }
       ]
     },
@@ -76,6 +96,26 @@
           ],
           "findings": [],
           "summary": "Expected 将 Pending->Active->Failed 规定为正常状态转移，Actual 与其完全一致，因此该步骤通过。"
+        },
+        {
+          "review_step": 4,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "Actual 完整填写了 Expected 填空模板列出的全部三项字段，不得因 Description 概括性提及 description 而判缺失。"
+        },
+        {
+          "review_step": 5,
+          "applicability": "applicable",
+          "bound_checks": [
+            {"metric": "max processing rate", "bound": ">= 100 items/s", "actual": "139.8 .. 142.5 items/s", "within_bound": true}
+          ],
+          "conclusion_checks": [
+            {"claim_excerpt": "max processing rate is up to 100 items/s.", "matches_expected_subject_and_unit": true, "matches_recorded_data": true}
+          ],
+          "findings": [],
+          "summary": "吞吐率指标的 is up to 100 表示达到至少 100 的性能目标，实测 139.8..142.5 满足下限要求。"
         }
       ]
     }
@@ -357,6 +397,16 @@
           "actual_format": {"signals": []},
           "numbered_comparison": [],
           "routed_evidence_references": []
+        },
+        {
+          "review_step": 5,
+          "alm_step_status": "Failed",
+          "description": "Record the configuration serial number and baseline ID.",
+          "expected": "Configuration Serial Number:__\nBaseline ID:__",
+          "actual": "DEF-00491",
+          "actual_format": {"signals": []},
+          "numbered_comparison": [],
+          "routed_evidence_references": []
         }
       ]
     },
@@ -405,6 +455,14 @@
           ],
           "findings": [],
           "summary": "步骤状态为 Failed，Actual 清楚记录了未满足 V2.0 预期行为的缺陷现象及编号，失败记录合格。"
+        },
+        {
+          "review_step": 5,
+          "applicability": "applicable",
+          "bound_checks": [],
+          "conclusion_checks": [],
+          "findings": [],
+          "summary": "步骤状态为 Failed，Actual 已记录正式缺陷追踪单号 DEF-00491，无需补填因失败中断的空白字段，失败记录合格。"
         }
       ]
     }

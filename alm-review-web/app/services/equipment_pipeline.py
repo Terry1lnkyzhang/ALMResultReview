@@ -4,6 +4,7 @@ AI disambiguation, and final step/criterion guard application.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ import httpx
 from app.models import AiConfig, EquipmentRegistry
 from app.services.ai_transport import ai_headers, completion_url, skill_failure
 from app.services.equipment_review import (
+    Candidate,
     OpenQuestion,
     analyze_equipment_steps,
     apply_equipment_disambiguation,
@@ -404,13 +406,104 @@ def collect_html_reported_equipment(
         )
 
 
+def _enrich_questions_with_html_equipment(
+    questions: list[OpenQuestion],
+    reported_by_step: dict[int, list[dict[str, str]]],
+    equipment_registry: list[EquipmentRegistry],
+) -> list[OpenQuestion]:
+    if not reported_by_step or not questions:
+        return questions
+    by_id = {
+        item.equipment_id.casefold(): item
+        for item in equipment_registry
+        if item.equipment_id
+    }
+    enriched: list[OpenQuestion] = []
+    for question in questions:
+        entries = reported_by_step.get(question.review_step, [])
+        if not entries:
+            enriched.append(question)
+            continue
+        existing_ids = {candidate.equipment_id for candidate in question.candidates}
+        extra_candidates = list(question.candidates)
+        for entry in entries:
+            identifier = (entry.get("equipment_id") or "").strip()
+            matched = by_id.get(identifier.casefold())
+            if matched is None:
+                continue
+            candidate = Candidate.of(matched)
+            if candidate.equipment_id not in existing_ids:
+                extra_candidates.append(candidate)
+                existing_ids.add(candidate.equipment_id)
+        enriched.append(replace(question, candidates=tuple(extra_candidates)))
+    return enriched
+
+
+def _downgrade_missing_equipment_for_unreadable_evidence(
+    ctx: ReviewContext,
+) -> None:
+    """Align equipment state machine with text/report stages when routed evidence could not be read."""
+    unreadable_statuses = {
+        "denied",
+        "unavailable",
+        "too_large",
+        "invalid",
+        "no_visible_text",
+        "outside_root",
+        "transport_too_large",
+        "budget_exhausted",
+        "not_checked",
+        "invalid_image",
+    }
+    external_enabled = bool(
+        ctx.evidence_config and ctx.evidence_config.external_evidence_review_enabled
+    )
+    steps_by_number = {
+        int(step["review_step"]): step for step in ctx.content.get("steps", [])
+    }
+    for check in ctx.equipment_checks:
+        if check.get("code") != "equipment_missing" or check.get("status") != "fail":
+            continue
+        review_step = int(check["review_step"])
+        step = steps_by_number.get(review_step, {})
+        routed = [
+            decision
+            for decision in step.get("reference_decisions", [])
+            if decision.get("requires_check")
+            and decision.get("role") in {"result_evidence", "result_evidence_location"}
+        ]
+        if not routed:
+            continue
+        step_html = ctx.evidence.html_results.get(review_step, {})
+        step_imgs = ctx.evidence.results.get(review_step, {})
+        has_unreadable_evidence = (
+            not external_enabled
+            or any(res.status in unreadable_statuses for res in step_html.values())
+            or any(res.status in unreadable_statuses for res in step_imgs.values())
+        )
+        if has_unreadable_evidence:
+            check.update(
+                status="manual",
+                code="equipment_evidence_unavailable",
+                summary=(
+                    "该步骤将结果委托给外部证据，但外部证据当前无法读取或未启用，"
+                    "无法确认其中是否记录了受控设备标识符，需人工复核。"
+                ),
+            )
+
+
 def run_equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
     if ctx.equipment_enabled:
+        questions = _enrich_questions_with_html_equipment(
+            ctx.open_questions,
+            ctx.evidence.html_reported_equipment,
+            ctx.equipment_registry,
+        )
         ctx.equipment_checks, skill_trace = run_equipment_pipeline(
             ctx.ai_config,
             ctx.content,
             ctx.equipment_checks,
-            ctx.open_questions,
+            questions,
             ctx.equipment_registry,
         )
         apply_html_report_equipment(
@@ -419,6 +512,7 @@ def run_equipment_review_stage(ctx: ReviewContext) -> dict[str, Any]:
             ctx.evidence.html_reported_equipment,
             ctx.equipment_registry,
         )
+        _downgrade_missing_equipment_for_unreadable_evidence(ctx)
         status = "completed" if ctx.plan.equipment_steps else "not_applicable"
     else:
         skill_trace = {

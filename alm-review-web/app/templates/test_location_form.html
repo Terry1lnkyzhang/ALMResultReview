@@ -24,7 +24,7 @@
     </div>
   </section>
   <section>
-    <div class="section-intro"><span>03</span><div><h2>Change control</h2><p>The effective time determines which configuration applies to an ALM Run.</p></div></div>
+    <div class="section-intro"><span>03</span><div><h2>Change control</h2><p>The effective time determines which configuration applies to an ALM Run.{% if location %} Planning a future switch? <a href="/ops/test-locations/schedule?item={{ location.item|urlencode }}">Schedule a future change</a>.{% endif %}</p></div></div>
     <div class="field-grid">
       <label><span>Effective time</span><input type="datetime-local" step="1" name="effective_at" value="{{ effective_at }}" required></label>
       <label class="wide"><span>Change reason</span><textarea name="change_reason" maxlength="2000" rows="4" required placeholder="Why is this configuration being {{ 'changed' if location else 'created' }}?"></textarea></label>
