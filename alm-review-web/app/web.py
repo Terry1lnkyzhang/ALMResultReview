@@ -18,6 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, load_only
@@ -47,6 +48,13 @@ from app.services.ai_transport import (
     ai_endpoint_health_status,
     test_ai_connection,
 )
+from app.services.copilot_reports import (
+    COPILOT_LABELS,
+    MAX_COPILOT_BATCH,
+    CopilotRoundReport,
+    copilot_findings,
+)
+from app.services.copilot_review import apply_copilot_report, build_copilot_task
 from app.services.decision_reason import (
     DecisionAnswer,
     DecisionRow,
@@ -239,13 +247,17 @@ def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
     return traces
 
 
+def _web_auth_required() -> bool:
+    settings = get_settings()
+    return settings.app_role == "web" or settings.web_auth_enabled
+
+
 def require_web_access(
     credentials: Annotated[HTTPBasicCredentials | None, Depends(basic_auth)],
 ) -> None:
-    settings = get_settings()
-    auth_required = settings.app_role == "web" or settings.web_auth_enabled
-    if not auth_required:
+    if not _web_auth_required():
         return
+    settings = get_settings()
     if not settings.web_auth_username or not settings.web_auth_password:
         raise HTTPException(
             status_code=503,
@@ -328,13 +340,18 @@ def _run_view(
 ) -> dict:
     if review is None:
         review = current_review(db, run, policy_key)
+    summary = review.result.issue_summary if review.result else ""
+    first_finding = next(copilot_findings(review.copilot_reports), None)
+    if first_finding is not None:
+        label, finding = first_finding
+        summary = f"{label}: {finding.summary}"
     return {
         "run": run,
         "execution_at": alm_execution_in_app_timezone(run.execution_at),
         "actual_tester_label": _person_label(run.actual_tester, users),
         "test_owner_label": _person_label(run.test_owner, users),
         "review": review,
-        "review_summary": review.result.issue_summary if review.result else "",
+        "review_summary": summary,
         "final_status": review.final_status,
         "force_qualified": is_force_qualified(review),
         "has_warning": review.has_warning,
@@ -1091,6 +1108,7 @@ def dashboard(
             "selected_project": selected_project,
             "current_project": current_workspace.project,
             "current_workspace": current_workspace,
+            "copilot_review_available": _web_auth_required() and not current_workspace.archived,
             "total_runs": len(all_views),
             "status_counts": status_counts,
             "tester_counts": [
@@ -1822,6 +1840,71 @@ def workspace_run_detail(
     return RedirectResponse(f"/runs/{run_id}")
 
 
+def _copilot_workspace(db: Session, workspace_id: int) -> Workspace:
+    if not _web_auth_required():
+        raise HTTPException(status_code=403, detail="Copilot review requires Web authentication.")
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None or workspace.archived:
+        raise HTTPException(status_code=404, detail="Active workspace not found.")
+    return workspace
+
+
+@router.get("/workspaces/{workspace_id}/copilot-review/task")
+def download_copilot_task(
+    workspace_id: int,
+    limit: Annotated[int, Query(ge=1, le=MAX_COPILOT_BATCH)] = 5,
+    db: Session = Depends(get_db),
+):
+    workspace = _copilot_workspace(db, workspace_id)
+    try:
+        task = build_copilot_task(db, workspace, limit)
+    except ValueError as exc:
+        return _redirect(f"/?workspace={workspace_id}&status=qualified", str(exc), "error")
+    return Response(
+        json.dumps(task, ensure_ascii=False),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="copilot-task-{workspace_id}.json"',
+        },
+    )
+
+
+@router.post("/workspaces/{workspace_id}/copilot-review/results")
+def upload_copilot_reports(
+    request: Request,
+    workspace_id: int,
+    reports: Annotated[list[UploadFile], File()],
+    db: Session = Depends(get_db),
+):
+    _copilot_workspace(db, workspace_id)
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(status_code=403, detail="Cross-origin result import is not allowed.")
+    result_url = f"/?workspace={workspace_id}&status=unqualified"
+    if not 1 <= len(reports) <= len(COPILOT_LABELS):
+        return _redirect(result_url, "Select one result file per Copilot round.", "error")
+    byte_limit = 4 * 1024 * 1024
+    try:
+        validated = []
+        for report in reports:
+            raw = report.file.read(byte_limit + 1)
+            if len(raw) > byte_limit:
+                raise ValueError("A Copilot result file exceeds 4 MB.")
+            validated.append(CopilotRoundReport.model_validate_json(raw))
+        if len({report.mode for report in validated}) != len(validated):
+            raise ValueError("Select one result file per Copilot round.")
+        imported = sum(apply_copilot_report(db, workspace_id, report) for report in validated)
+        db.commit()
+    except ValidationError:
+        db.rollback()
+        return _redirect(result_url, "Invalid Copilot result file.", "error")
+    except ValueError as exc:
+        db.rollback()
+        return _redirect(result_url, str(exc), "error")
+    return _redirect(result_url, f"Imported {imported} Copilot review results.")
+
+
 @router.get("/runs/{run_id}")
 def run_detail(request: Request, run_id: int, db: Session = Depends(get_db)):
     run = db.get(AlmRun, run_id)
@@ -1847,7 +1930,11 @@ def _manual_decision_rows(
     latest_job: ReviewJob | None,
 ) -> list[DecisionRow]:
     failure_detail = _public_job_error(latest_job.error_message if latest_job else None)
-    return decision_rows(review.result, failure_detail or "")
+    copilot_rows = [
+        DecisionRow("fail", label, f"{finding.location}: {finding.summary} ({finding.evidence})")
+        for label, finding in copilot_findings(review.copilot_reports)
+    ]
+    return decision_rows(review.result, failure_detail or "", extra_blocking=copilot_rows)
 
 
 def _run_detail_response(
@@ -2042,6 +2129,11 @@ def _run_detail_response(
             "review_criteria": review_criteria,
             "review_pipeline": review_pipeline,
             "review_skill_traces": review_skill_traces,
+            "copilot_reports": [
+                (label, review.copilot_reports[mode])
+                for mode, label in COPILOT_LABELS.items()
+                if mode in review.copilot_reports
+            ],
             "review_step_results": review_step_results,
             "step_review_map": step_review_map,
             "review_warnings": review_warnings,

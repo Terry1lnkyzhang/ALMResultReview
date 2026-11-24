@@ -292,7 +292,7 @@ def test_pipeline_trace_column_is_added_to_existing_review_results() -> None:
     ensure_compatible_schema(engine)
 
     columns = {column["name"] for column in inspect(engine).get_columns("review_results")}
-    assert {"pipeline_json", "temporary_evidence_used"} <= columns
+    assert {"pipeline_json", "temporary_evidence_used", "copilot_reviews_json"} <= columns
 
 
 def test_manual_decision_review_result_becomes_optional() -> None:

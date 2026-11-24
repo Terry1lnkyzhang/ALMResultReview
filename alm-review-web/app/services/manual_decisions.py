@@ -5,12 +5,13 @@ persistence or lookup queries never alter `_review_implementation_hash()`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import case, desc, select
 from sqlalchemy.orm import Session
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
+from app.services.copilot_reports import CopilotMode, CopilotOutcome, load_copilot_reports
 from app.services.review_policy import current_review_policy_key
 
 VALID_MANUAL_DECISIONS = {
@@ -30,6 +31,7 @@ class CurrentReview:
     final_status: str
     has_warning: bool = False
     temporary_evidence_used: bool = False
+    copilot_reports: dict[CopilotMode, CopilotOutcome] = field(default_factory=dict)
 
 
 def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
@@ -39,6 +41,8 @@ def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
         if review.final_status == "review_failed":
             return frozenset({"override_qualified"})
         return frozenset()
+    if review.final_status == "unqualified":
+        return frozenset(VALID_MANUAL_DECISIONS["unqualified"])
     allowed = set(VALID_MANUAL_DECISIONS.get(review.result.verdict, set()))
     if review.result.verdict == "qualified" and review.has_warning:
         allowed.add(WARNING_QUALIFIED_DECISION)
@@ -57,6 +61,33 @@ def has_unresolved_review_warning(
     return has_warning and not (
         manual_decision
         and manual_decision.decision in FORCE_QUALIFIED_DECISIONS
+    )
+
+
+def review_from_result(
+    result: ReviewResult,
+    manual: ManualDecision | None,
+    has_warning: bool,
+) -> CurrentReview:
+    reports = load_copilot_reports(result.copilot_reviews_json)
+    copilot_rejected = result.verdict == "qualified" and any(
+        report.verdict == "unqualified" for report in reports.values()
+    )
+    if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
+        final_status = "qualified"
+    elif copilot_rejected or (manual and manual.decision == "confirmed_unqualified"):
+        final_status = "unqualified"
+    elif result.verdict in {"qualified", "unqualified"}:
+        final_status = result.verdict
+    else:
+        final_status = "needs_manual_review"
+    return CurrentReview(
+        result,
+        manual,
+        final_status,
+        has_unresolved_review_warning(has_warning, manual),
+        bool(result.temporary_evidence_used),
+        reports,
     )
 
 
@@ -114,28 +145,7 @@ def current_review(
             manual,
             "review_failed" if failed_job else "pending_review",
         )
-    temporary_evidence_used = bool(result.temporary_evidence_used)
-    force_qualified = manual and manual.decision in FORCE_QUALIFIED_DECISIONS
-    if force_qualified:
-        final_status = "qualified"
-    elif manual and manual.decision == "confirmed_unqualified":
-        final_status = "unqualified"
-    elif result.verdict == "qualified":
-        final_status = "qualified"
-    elif result.verdict == "unqualified":
-        final_status = "unqualified"
-    else:
-        final_status = "needs_manual_review"
-    return CurrentReview(
-        result,
-        manual,
-        final_status,
-        has_unresolved_review_warning(
-            has_review_warning(result.warnings_json),
-            manual,
-        ),
-        temporary_evidence_used,
-    )
+    return review_from_result(result, manual, has_review_warning(result.warnings_json))
 
 
 def revoke_manual_decision(db: Session, run: AlmRun) -> int:

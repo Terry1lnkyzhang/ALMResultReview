@@ -369,6 +369,19 @@
       <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export CSV</a>
       <a class="button secondary" href="/exports/test-case-results.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export Test Case results</a>
     </form>
+    {% if copilot_review_available and selected_status in ('qualified', 'unqualified') %}
+    <details class="routing-step">
+      <summary><span>Copilot</span><strong>Follow-up review</strong></summary>
+      <form class="filterbar" method="get" action="/workspaces/{{ current_workspace.id }}/copilot-review/task">
+        <label><span>Qualified runs per batch</span><input type="number" name="limit" min="1" max="25" value="5" required></label>
+        <button class="button secondary" type="submit">Download Copilot task</button>
+      </form>
+      <form class="filterbar" method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/results" enctype="multipart/form-data">
+        <label><span>Copilot result files</span><input type="file" name="reports" accept=".json,application/json" multiple required></label>
+        <button class="button secondary" type="submit">Import results</button>
+      </form>
+    </details>
+    {% endif %}
     {% if document_counts %}
     <div class="table-heading" id="documents-list"><h2>Documents</h2><span>{{ document_counts|length }} documents &middot; click one to filter its Runs</span></div>
     <div class="table-scroll document-summary">

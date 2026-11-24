@@ -348,10 +348,18 @@ current source when the short overview below is outdated.
 - Isolated extra spaces, normal paragraph blank lines, trailing spaces, and minor indentation
 	are ignored. Whitespace formatting is reported only when repeated or extensive enough to
 	clearly disrupt reading, sentence continuity, list structure, or understanding.
-- AI `qualified` is final without manual confirmation.
+- AI `qualified` is final without manual confirmation unless an imported Copilot review rejects it.
 - AI `needs_manual_review` accepts qualified or unqualified confirmation.
 - AI `unqualified` remains unqualified unless an operator records a force-qualified override.
 - Manual decisions are bound to the current revision and source hash; a source change invalidates them.
+
+### Copilot follow-up review
+
+1. In an authenticated Web session, open the workspace's **Qualified** list and use **Download Copilot task** under **Follow-up review**. Only current, first-pass AI `qualified` results on the active policy are eligible.
+2. On the operator's Windows desktop, run `start-copilot-review.ps1` with `-TaskFile` pointing to the download. It opens separate VS Code Chat sessions for the pinned Skill review and the open-ended check. Use a signed-in GitHub Copilot model in both sessions.
+3. Use **Import results** in the same workspace to upload one or both result JSON files. An evidence-backed rejection from either round goes straight to **Unqualified**. The Run detail shows the two reviews and the original AI verdict. An operator can use the existing qualified override; no new Run status is added.
+
+The task includes normalized ALM steps, evidence references, and the current Skill instructions, not raw attachments or all external records. Only send data approved for Copilot and attach any authorized original evidence needed for the review. An incomplete round records its limitation without changing the Run status. Imports are bound to the current first-pass result and source hash and do not initiate an ALM sync or primary review.
 
 ### Staged review pipeline
 
