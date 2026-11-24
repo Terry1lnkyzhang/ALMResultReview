@@ -8,9 +8,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.config import PROJECT_DIR
+from app.config import PROJECT_DIR, get_settings
 from app.database import Base, get_db
-from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult, RunRevision
+from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult, RunRevision, Workspace
 from app.services.decision_reason import (
     DecisionAnswer,
     DecisionRow,
@@ -206,13 +206,18 @@ def client_and_engine():
         yield client, engine
 
 
-def _prepare_run(engine, verdict: str = "unqualified") -> int:
+def _prepare_run(
+    engine, verdict: str = "unqualified", workspace_id: int | None = None, run_id: int = 42,
+) -> int:
     with Session(engine) as db:
-        run = AlmRun(run_id=42, source_hash="a" * 64, review_hash="b" * 64, raw_json="{}")
+        run = AlmRun(
+            run_id=run_id, workspace_id=workspace_id,
+            source_hash="a" * 64, review_hash="b" * 64, raw_json="{}",
+        )
         db.add(run)
         db.flush()
         revision = RunRevision(
-            run_id=42,
+            run_id=run_id,
             revision_number=1,
             source_hash=run.source_hash,
             review_hash=run.review_hash,
@@ -221,16 +226,17 @@ def _prepare_run(engine, verdict: str = "unqualified") -> int:
         db.add(revision)
         db.flush()
         run.current_revision_id = revision.id
-        job = ReviewJob(run_id=42, revision_id=revision.id, status="completed")
+        job = ReviewJob(run_id=run_id, revision_id=revision.id, status="completed")
         db.add(job)
         db.flush()
         result = ReviewResult(
             job_id=job.id,
-            run_id=42,
+            workspace_id=workspace_id,
+            run_id=run_id,
             revision_id=revision.id,
             prompt_version_id=1,
             source_hash=run.source_hash,
-            review_policy_key=current_review_policy_key(db),
+            review_policy_key=current_review_policy_key(db, workspace_id),
             model_name="test-model",
             **_findings_result(verdict),
         )
@@ -254,6 +260,94 @@ def test_run_detail_lists_each_finding_for_the_operator(client_and_engine) -> No
     assert "选填" in response.text
     assert 'data-manual-decision-confirm' in response.text
     assert '<dialog class="sync-confirm-dialog" data-manual-decision-feedback' not in response.text
+
+
+def test_copilot_finding_is_shown_and_can_be_overridden(client_and_engine) -> None:
+    client, engine = client_and_engine
+    result_id = _prepare_run(engine, "qualified")
+    with Session(engine) as db:
+        primary = db.get(ReviewResult, result_id)
+        assert primary is not None
+        primary.criteria_json = primary.step_results_json = primary.warnings_json = None
+        primary.copilot_reviews_json = json.dumps({
+            "skill": {"verdict": "unqualified", "findings": [{
+                "location": "Locator", "summary": "Finding", "evidence": "Evidence", "rule": "Rule",
+            }]},
+        })
+        db.commit()
+
+    detail = client.get("/runs/42")
+    assert detail.status_code == 200
+    assert "AI 原始结论（非最终裁决）：合格" in detail.text
+    assert "Copilot Skill: 不合格" in detail.text
+    assert 'value="override_qualified"' in detail.text
+    assert detail.text.count('name="explanation"') == 1
+    assert "Locator: Finding (Evidence)" in detail.text
+
+    response = client.post("/runs/42/manual-decision", data={
+        "decision": "override_qualified",
+        "review_result_id": str(result_id),
+        "explanation": "Verified against source",
+    })
+    assert response.status_code == 303
+    with Session(engine) as db:
+        manual = db.scalar(select(ManualDecision))
+        assert manual is not None
+        assert manual.original_ai_verdict == "qualified"
+        assert "Copilot Skill" in manual.reason
+
+
+def test_copilot_web_import_moves_only_current_qualified_runs(client_and_engine, monkeypatch) -> None:
+    client, engine = client_and_engine
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_role", "combined")
+    monkeypatch.setattr(settings, "web_auth_enabled", False)
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+    qualified_id = _prepare_run(engine, "qualified", workspace_id=workspace_id)
+    _prepare_run(engine, "unqualified", workspace_id=workspace_id, run_id=43)
+    task_url = f"/workspaces/{workspace_id}/copilot-review/task"
+    import_url = f"/workspaces/{workspace_id}/copilot-review/results"
+    assert client.get(task_url).status_code == 403
+
+    monkeypatch.setattr(settings, "web_auth_enabled", True)
+    monkeypatch.setattr(settings, "web_auth_username", "test-user")
+    monkeypatch.setattr(settings, "web_auth_password", "test-password")
+    auth = ("test-user", "test-password")
+    assert client.get(task_url).status_code == 401
+    task = client.get(task_url, auth=auth)
+    assert task.status_code == 200
+    payload = task.json()
+    assert [(item["review_result_id"], item["modes"]) for item in payload["runs"]] == [
+        (qualified_id, ["skill", "open"]),
+    ]
+    assert payload["skills"] and all(skill["hash"] for skill in payload["skills"])
+    assert payload["external_evidence_review_enabled"] is False
+
+    outcome_files = [("reports", ("open.json", json.dumps({
+        "mode": "open",
+        "results": [{
+            "review_result_id": qualified_id,
+            "source_hash": payload["runs"][0]["source_hash"],
+            "outcome": {"verdict": "unqualified", "findings": [{
+                "location": "Locator", "summary": "Finding", "evidence": "Evidence",
+            }]},
+        }],
+    }), "application/json"))]
+    assert client.post(import_url, files=outcome_files).status_code == 401
+    assert client.post(
+        import_url, files=outcome_files, auth=auth, headers={"origin": "https://invalid.example"},
+    ).status_code == 403
+    imported = client.post(import_url, files=outcome_files, auth=auth)
+    assert imported.status_code == 303
+    assert "status=unqualified" in imported.headers["location"]
+    dashboard = client.get(imported.headers["location"], auth=auth)
+    assert dashboard.status_code == 200
+    assert "Copilot Open: Finding" in dashboard.text
+    assert '<a href="/runs/42">Copilot Open: Finding</a>' in dashboard.text
 
 
 def test_generic_answers_are_sent_back_with_the_draft(client_and_engine) -> None:

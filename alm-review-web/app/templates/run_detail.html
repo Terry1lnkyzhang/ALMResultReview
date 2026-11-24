@@ -161,9 +161,27 @@
 
 {% if review.result %}
 <section class="review-band">
-  <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{% if review.manual_decision %}AI 原始结论（非最终裁决）：{% endif %}{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
+  <div><p class="eyebrow">AI 评审 / Endpoint {{ review.result.ai_config_id or 1 }} / {{ review.result.model_name }}</p><h2>{% if review.manual_decision or copilot_reports %}AI 原始结论（非最终裁决）：{% endif %}{{ review_status_labels.get(review.result.verdict, review.result.verdict) }}</h2><p>{{ review.result.issue_summary or '未返回问题摘要。' }}</p><small>完成于 {{ review_completed_at.strftime('%Y-%m-%d %H:%M:%S') if review_completed_at else '-' }} &middot; {{ review.result.duration_ms }} ms{% if review.result.ai_endpoint %} &middot; {{ review.result.ai_endpoint }}{% endif %}</small><form class="rerun-form" method="post" action="/runs/{{ run.run_id }}/review-now"><input type="hidden" name="force_new" value="true"><button class="button secondary" type="submit"{% if active_review_job %} disabled{% endif %}>{{ '已加入评审队列' if active_review_job else '加入重新评审队列' }}</button></form></div>
   {% if review.manual_decision %}<div class="manual-record"><div class="manual-record-header"><span>人工裁决</span><form method="post" action="/runs/{{ run.run_id }}/manual-decision/revoke" onsubmit="return confirm('确定要撤销此人工裁决吗？撤销后将恢复显示 AI 评审判定结果。');"><button class="button-link-danger" type="submit">撤销裁决</button></form></div><strong>{{ decision_labels.get(review.manual_decision.decision, review.manual_decision.decision) }}</strong><small>{{ review.manual_decision.operator }} / {{ manual_decision_at.strftime('%Y-%m-%d %H:%M') if manual_decision_at else '-' }}</small>{{ manual_reason(review.manual_decision, manual_decision_items) }}</div>{% endif %}
 </section>
+{% if copilot_reports %}
+<section class="pipeline-section" aria-labelledby="copilot-review-title">
+  <div class="table-heading"><h2 id="copilot-review-title">Copilot 复核</h2></div>
+  {% for label, report in copilot_reports %}
+  <details{% if report.findings %} open{% endif %}>
+    <summary>{{ label }}: {{ review_status_labels.get(report.verdict, '未形成结论') }}</summary>
+    {% for finding in report.findings %}
+    <div>
+      <p><strong>{{ finding.location }}</strong>: {{ finding.summary }}</p>
+      {% if finding.rule %}<p>{{ finding.rule }}</p>{% endif %}
+      <blockquote>{{ finding.evidence }}</blockquote>
+    </div>
+    {% endfor %}
+    {% if report.limitations %}<p>{{ report.limitations }}</p>{% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endif %}
 {% if review_pipeline %}
 <section class="pipeline-section">
   <div class="table-heading"><h2>评审流程</h2><span>{{ review_pipeline.get('total_ai_calls', 0) }} 次 AI 调用</span></div>

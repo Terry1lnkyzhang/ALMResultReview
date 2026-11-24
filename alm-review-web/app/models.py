@@ -413,6 +413,7 @@ class ReviewResult(Base):
     step_results_json: Mapped[str | None] = mapped_column(LongText)
     warnings_json: Mapped[str | None] = mapped_column(LongText)
     pipeline_json: Mapped[str | None] = mapped_column(LongText)
+    copilot_reviews_json: Mapped[str | None] = mapped_column(LongText)
     temporary_evidence_used: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )

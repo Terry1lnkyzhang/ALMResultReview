@@ -517,6 +517,7 @@ def ensure_compatible_schema(engine: Engine) -> None:
                 "step_results_json",
                 "warnings_json",
                 "pipeline_json",
+                "copilot_reviews_json",
             )
             for column in required_columns:
                 if column not in columns:

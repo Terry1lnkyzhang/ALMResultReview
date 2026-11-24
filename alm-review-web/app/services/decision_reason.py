@@ -140,6 +140,8 @@ class DecisionAnswer:
 def decision_rows(
     result: ReviewResult | None,
     failure_detail: str = "",
+    *,
+    extra_blocking: Sequence[DecisionRow] = (),
 ) -> list[DecisionRow]:
     """Rows the operator must answer; identical AI findings share one row."""
     if result is None:
@@ -152,18 +154,21 @@ def decision_rows(
         ]
     blocking = _merged(_blocking_findings(result))
     warnings = _merged(_warning_findings(result))
-    if not blocking and not warnings:
+    if not blocking and not warnings and not extra_blocking:
         return [
             DecisionRow("manual", "summary", result.issue_summary or "AI 未给出具体问题。")
         ]
     return [
+        *extra_blocking,
         *(
             DecisionRow(kind, finding_type, summary, steps)
             for (kind, finding_type, summary), steps in blocking.items()
         ),
         # Warnings only gate the decision when they are all that is left to resolve.
         *(
-            DecisionRow("warning", finding_type, summary, steps, required=not blocking)
+            DecisionRow(
+                "warning", finding_type, summary, steps, required=not (blocking or extra_blocking),
+            )
             for (_, finding_type, summary), steps in warnings.items()
         ),
     ]

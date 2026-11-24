@@ -21,6 +21,8 @@ from app.models import (
 )
 from app.models import TestLocationIdentity as LocationIdentity
 from app.models import TestLocationVersion as LocationVersion
+from app.services.copilot_reports import CopilotRoundReport
+from app.services.copilot_review import apply_copilot_report
 from app.services.review_operations import active_run_review_job
 from app.services.review_policy import (
     adopt_legacy_workspace_policies,
@@ -119,6 +121,71 @@ def test_manual_rules_allow_review_confirmation_and_unqualified_override() -> No
             save_manual_decision(db, run, decision, "operator", "Evidence checked")
             expected = "unqualified" if decision == "confirmed_unqualified" else "qualified"
             assert current_review(db, run).final_status == expected
+
+
+@pytest.mark.parametrize("mode", ["skill", "open"])
+def test_copilot_rejection_is_unqualified_and_can_be_overridden(mode: str) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified")
+        primary = current_review(db, run).result
+        assert primary is not None
+        primary.copilot_reviews_json = json.dumps({
+            mode: {
+                "verdict": "unqualified",
+                "findings": [{"location": "Locator", "summary": "Finding", "evidence": "Evidence"}],
+            },
+        })
+        db.commit()
+        policy_key = primary.review_policy_key
+
+        detail = current_review(db, run)
+        listed = current_reviews(db, [run], policy_key)[run.run_id]
+        for review in (detail, listed):
+            assert review.final_status == "unqualified"
+            assert review.result is not None and review.result.verdict == "qualified"
+            assert allowed_manual_decisions(review) == {"override_qualified"}
+
+        manual = save_manual_decision(db, run, "override_qualified", "operator", "Checked")
+        assert manual.original_ai_verdict == "qualified"
+        assert current_review(db, run).final_status == "qualified"
+        assert current_reviews(db, [run], policy_key)[run.run_id].final_status == "qualified"
+
+
+def test_copilot_import_keeps_both_rounds_and_rejects_stale_results() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, "qualified")
+        primary = current_review(db, run).result
+        assert primary is not None
+        entry = {"review_result_id": primary.id, "source_hash": primary.source_hash}
+        open_report = CopilotRoundReport.model_validate({
+            "mode": "open",
+            "results": [{**entry, "outcome": {
+                "verdict": "unqualified",
+                "findings": [{"location": "Locator", "summary": "Finding", "evidence": "Evidence"}],
+            }}],
+        })
+        skill_report = CopilotRoundReport.model_validate({
+            "mode": "skill",
+            "results": [{**entry, "outcome": {"verdict": None, "limitations": "Unavailable"}}],
+        })
+        assert apply_copilot_report(db, run.workspace_id, open_report) == 1
+        assert apply_copilot_report(db, run.workspace_id, skill_report) == 1
+        assert apply_copilot_report(db, run.workspace_id, open_report) == 0
+        db.commit()
+        review = current_review(db, run)
+        assert review.final_status == "unqualified"
+        assert review.copilot_reports["open"].verdict == "unqualified"
+        assert review.copilot_reports["skill"].verdict is None
+
+        run.source_hash = "c" * 64
+        db.commit()
+        assert current_review(db, run).final_status == "pending_review"
+        with pytest.raises(ValueError, match="stale"):
+            apply_copilot_report(db, run.workspace_id, open_report)
 
 
 def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision() -> None:

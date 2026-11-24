@@ -9,7 +9,7 @@ from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
 from app.services.manual_decisions import (
     FORCE_QUALIFIED_DECISIONS,
     CurrentReview,
-    has_unresolved_review_warning,
+    review_from_result,
 )
 
 # The dashboard must not load `warnings_json`, so ask the database whether it holds
@@ -20,35 +20,6 @@ _HAS_WARNING = func.length(func.coalesce(ReviewResult.warnings_json, "")) > 2
 def is_force_qualified(review: CurrentReview) -> bool:
     manual = review.manual_decision
     return manual is not None and manual.decision in FORCE_QUALIFIED_DECISIONS
-
-
-def _review_from_result(
-    result: ReviewResult,
-    manual: ManualDecision | None,
-    has_warning: bool,
-) -> CurrentReview:
-    temporary_evidence_used = bool(result.temporary_evidence_used)
-    force_qualified = manual and manual.decision in FORCE_QUALIFIED_DECISIONS
-    if force_qualified:
-        final_status = "qualified"
-    elif manual and manual.decision == "confirmed_unqualified":
-        final_status = "unqualified"
-    elif result.verdict == "qualified":
-        final_status = "qualified"
-    elif result.verdict == "unqualified":
-        final_status = "unqualified"
-    else:
-        final_status = "needs_manual_review"
-    return CurrentReview(
-        result,
-        manual,
-        final_status,
-        has_unresolved_review_warning(
-            has_warning,
-            manual,
-        ),
-        temporary_evidence_used,
-    )
 
 
 def review_update_reasons(
@@ -94,6 +65,7 @@ def current_reviews(
                 ReviewResult.verdict,
                 ReviewResult.issue_summary,
                 ReviewResult.temporary_evidence_used,
+                ReviewResult.copilot_reviews_json,
                 ReviewResult.completed_at,
             )
         )
@@ -176,7 +148,7 @@ def current_reviews(
         result = results_by_run.get(run.run_id)
         manual = manuals_by_run.get(run.run_id)
         if result is not None:
-            reviews[run.run_id] = _review_from_result(
+            reviews[run.run_id] = review_from_result(
                 result,
                 manual,
                 warning_by_result_id.get(result.id, False),
