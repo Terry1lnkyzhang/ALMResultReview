@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     web_auth_enabled: bool = False
     web_auth_username: str = ""
     web_auth_password: str = ""
+    copilot_chat_mode: str = "alm-copilot-review"
+    copilot_chat_model: str = "Gemini 4 Carbon (copilot)"
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_DIR / ".env",

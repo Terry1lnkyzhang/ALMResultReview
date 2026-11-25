@@ -18,7 +18,7 @@
   <div class="detail-status">
     <span class="status status-large status-{{ review.final_status }}">{{ status_label }}</span>
     {% if is_force_qualified %}<span class="queue-tag">人工确认合格</span>{% endif %}
-    {% if review.copilot_disputed_manual %}<span class="queue-tag">Copilot 复核质疑（原人工确认合格）</span>{% endif %}
+    {% if review.copilot_disputed_manual %}<span class="queue-tag">Copilot 复核质疑（原人工确认合格）</span>{% elif copilot_status in ('pending', 'partial') %}<span class="queue-tag queue-tag-copilot-pending">{{ copilot_status_label }}</span>{% elif copilot_status == 'passed' %}<span class="queue-tag queue-tag-copilot-passed">{{ copilot_status_label }}</span>{% elif copilot_status == 'rejected' %}<span class="queue-tag queue-tag-failed">{{ copilot_status_label }}</span>{% elif copilot_status == 'incomplete' %}<span class="queue-tag">{{ copilot_status_label }}</span>{% endif %}
     {% if active_sync_job %}<span class="queue-tag">ALM 刷新：{{ queue_status_labels.get(active_sync_job.status, active_sync_job.status) }}</span>{% endif %}
     {% if active_review_job %}<span class="queue-tag">AI 评审：{{ queue_status_labels.get(active_review_job.status, active_review_job.status) }}</span>{% endif %}
     {% if latest_review_job and latest_review_job.status == 'failed' and not active_review_job and (not review.result or review.result.job_id != latest_review_job.id) %}<span class="queue-tag queue-tag-failed">AI 评审：失败</span>{% endif %}
@@ -182,6 +182,11 @@
     {% if report.limitations %}<p>{{ report.limitations }}</p>{% endif %}
   </details>
   {% endfor %}
+</section>
+{% elif copilot_status in ('pending', 'partial') %}
+<section class="pipeline-section copilot-pending-section" aria-labelledby="copilot-review-title">
+  <div class="table-heading"><h2 id="copilot-review-title">Copilot 二审</h2><span>{{ copilot_status_label }}</span></div>
+  <p class="copilot-pending-note">当前{% if is_force_qualified %}人工确认合格{% else %}合格{% endif %}结论尚未完成 Copilot 二审（Skill + Open 两轮复核），可在仪表板「Copilot 二审」栏发起复核。</p>
 </section>
 {% endif %}
 {% if review_pipeline %}

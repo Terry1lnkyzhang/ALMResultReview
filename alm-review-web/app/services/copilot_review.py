@@ -11,14 +11,14 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, load_only
 
-from app.config import PROJECT_DIR
+from app.config import PROJECT_DIR, get_settings
 from app.hashing import review_payload
 from app.models import (
     AlmRun,
@@ -42,7 +42,7 @@ from app.services.equipment_review import analyze_equipment_steps
 from app.services.location_review import load_location_assessment
 from app.services.manual_decisions import FORCE_QUALIFIED_DECISIONS
 from app.services.review_policy import current_review_policy_key
-from app.services.review_status import current_reviews
+from app.services.review_status import current_reviews, is_force_qualified
 from app.services.skill_runner import discover_skills, load_skill
 from app.services.workspaces import workspace_evidence_config
 
@@ -52,7 +52,18 @@ logger = logging.getLogger(__name__)
 class _NoEligibleCopilotRunsError(ValueError):
     """Raised when a workspace has no eligible Qualified runs left for Copilot review."""
 
+
+CopilotTarget = Literal["all", "ai_qualified", "manual_qualified"]
+COPILOT_TARGET_LABELS: dict[CopilotTarget, str] = {
+    "all": "全部待审（AI 合格 + 人工确认合格）",
+    "manual_qualified": "仅人工确认合格",
+    "ai_qualified": "仅 AI 合格",
+}
+
 COPILOT_RUNS_DIR = PROJECT_DIR / "logs" / "copilot_runs"
+COPILOT_AGENT_DIR = Path.home() / ".copilot" / "agents"
+_BUILTIN_CHAT_MODES = frozenset({"agent", "ask", "edit"})
+_AGENT_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 _SYNC_LOCK = threading.Lock()
 _MANIFEST_LOCK = threading.Lock()
 _ACTIVE_MODE_STATUSES = frozenset({"launching", "pending"})
@@ -65,6 +76,72 @@ _BATCH_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 
 def find_vscode_cli() -> str | None:
     return shutil.which("code.cmd") or shutil.which("code")
+
+
+def copilot_chat_mode() -> str:
+    mode = (get_settings().copilot_chat_mode or "").strip()
+    return mode or "alm-copilot-review"
+
+
+def copilot_chat_model() -> str:
+    return (get_settings().copilot_chat_model or "").strip()
+
+
+def copilot_chat_model_label() -> str:
+    model = copilot_chat_model()
+    if model.endswith(" (copilot)"):
+        return model[: -len(" (copilot)")]
+    return model or "VS Code 默认模型"
+
+
+def _render_copilot_agent_markdown(mode: str, model: str) -> str:
+    display_model = (
+        model[: -len(" (copilot)")] if model.endswith(" (copilot)") else model
+    )
+    lines = [
+        "---",
+        f"name: {json.dumps(mode, ensure_ascii=False)}",
+        f"description: {json.dumps(f'ALM Result Review follow-up review agent pinned to {display_model or mode}.', ensure_ascii=False)}",
+    ]
+    if model:
+        lines.append(f"model: {json.dumps(model, ensure_ascii=False)}")
+    lines.extend([
+        "disable-model-invocation: true",
+        "---",
+        "You are the ALM Result Review follow-up reviewer.",
+        "Follow the attached instruction file (`skill-instructions.md` or `open-instructions.md`) strictly, review only the attached `task.json`, and write only the requested UTF-8 JSON result file using the file creation tool.",
+        "Do not modify any other file or run terminal commands.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def ensure_copilot_chat_agent(
+    *,
+    mode: str | None = None,
+    model: str | None = None,
+) -> tuple[Path | None, bool]:
+    """Ensure the VS Code custom agent file exists so `code chat --mode` uses the pinned model."""
+    target_mode = (mode if mode is not None else copilot_chat_mode()).strip()
+    if (
+        not target_mode
+        or target_mode in _BUILTIN_CHAT_MODES
+        or any(ch not in _AGENT_NAME_CHARS for ch in target_mode)
+    ):
+        return None, False
+    target_model = (model if model is not None else copilot_chat_model()).strip()
+    agent_path = COPILOT_AGENT_DIR / f"{target_mode}.agent.md"
+    content = _render_copilot_agent_markdown(target_mode, target_model)
+    try:
+        if agent_path.is_file() and agent_path.read_text(encoding="utf-8") == content:
+            return agent_path, False
+    except OSError:
+        pass
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = agent_path.with_suffix(".agent.md.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(agent_path)
+    return agent_path, True
 
 
 def _clean_vscode_env() -> dict[str, str]:
@@ -115,6 +192,13 @@ def _normalize_modes(
     return requested_modes
 
 
+def _normalize_target(target: str | None) -> CopilotTarget:
+    normalized = (target or "all").strip()
+    if normalized in COPILOT_TARGET_LABELS:
+        return normalized  # type: ignore[return-value]
+    raise ValueError("无效的 Copilot 复核对象。")
+
+
 def _is_copilot_eligible_review(review: Any, policy_key: str) -> bool:
     primary = review.result
     return (
@@ -124,11 +208,49 @@ def _is_copilot_eligible_review(review: Any, policy_key: str) -> bool:
     )
 
 
+def copilot_run_state(review: Any, policy_key: str) -> tuple[str, str]:
+    """Return (code, display_label) describing a Run's Copilot 二审 status."""
+    if review.copilot_disputed_manual:
+        return "disputed_manual", "Copilot 质疑"
+    if review.copilot_rejected:
+        return "rejected", "Copilot 复核不合格"
+    reports = review.copilot_reports or {}
+    if _is_copilot_eligible_review(review, policy_key):
+        missing_skill = "skill" not in reports
+        missing_open = "open" not in reports
+        if missing_skill and missing_open:
+            return "pending", "待 Copilot 二审"
+        if missing_skill:
+            return "partial", "待二审（缺 Skill）"
+        if missing_open:
+            return "partial", "待二审（缺 Open）"
+        if any(
+            reports[mode].verdict is None
+            for mode in COPILOT_LABELS
+            if mode in reports
+        ):
+            return "incomplete", "二审未完成"
+        return "passed", "二审通过"
+    if reports:
+        if any(report.verdict == "unqualified" for report in reports.values()):
+            return "rejected", "Copilot 复核不合格"
+        if any(report.verdict is None for report in reports.values()):
+            return "incomplete", "二审未完成"
+        return "passed", "二审通过"
+    return "none", ""
+
+
 def copilot_eligible_counts(
     reviews_by_run: Mapping[Any, Any],
     policy_key: str,
 ) -> dict[str, int]:
-    counts = {"both": 0, "skill": 0, "open": 0}
+    counts = {
+        "both": 0,
+        "skill": 0,
+        "open": 0,
+        "ai_qualified": 0,
+        "manual_qualified": 0,
+    }
     for review in reviews_by_run.values():
         if not _is_copilot_eligible_review(review, policy_key):
             continue
@@ -140,6 +262,10 @@ def copilot_eligible_counts(
             counts["open"] += 1
         if missing_skill or missing_open:
             counts["both"] += 1
+            if is_force_qualified(review):
+                counts["manual_qualified"] += 1
+            else:
+                counts["ai_qualified"] += 1
     return counts
 
 
@@ -147,7 +273,10 @@ def _eligible_copilot_entries(
     db: Session,
     workspace_id: int,
     requested_modes: tuple[CopilotMode, ...],
+    *,
+    target: CopilotTarget = "all",
 ) -> tuple[str, list[tuple[AlmRun, ReviewResult, int | None, list[CopilotMode]]]]:
+    normalized_target = _normalize_target(target)
     policy_key = current_review_policy_key(db, workspace_id)
     runs = list(db.scalars(
         select(AlmRun)
@@ -165,6 +294,11 @@ def _eligible_copilot_entries(
     for run in runs:
         review = reviews[run.run_id]
         if not _is_copilot_eligible_review(review, policy_key):
+            continue
+        force_q = is_force_qualified(review)
+        if normalized_target == "manual_qualified" and not force_q:
+            continue
+        if normalized_target == "ai_qualified" and force_q:
             continue
         primary = review.result
         assert primary is not None
@@ -258,9 +392,16 @@ def _build_copilot_task_with_total(
     limit: int,
     *,
     modes: tuple[CopilotMode, ...] | None = None,
+    target: CopilotTarget = "all",
 ) -> tuple[dict[str, Any], int]:
     requested_modes = _normalize_modes(modes)
-    policy_key, eligible = _eligible_copilot_entries(db, workspace.id, requested_modes)
+    normalized_target = _normalize_target(target)
+    policy_key, eligible = _eligible_copilot_entries(
+        db,
+        workspace.id,
+        requested_modes,
+        target=normalized_target,
+    )
     equipment_registry: list[EquipmentRegistry] = []
     if workspace.equipment_review_enabled and eligible:
         equipment_statement = select(EquipmentRegistry).order_by(
@@ -351,8 +492,15 @@ def build_copilot_task(
     limit: int,
     *,
     modes: tuple[CopilotMode, ...] | None = None,
+    target: CopilotTarget = "all",
 ) -> dict[str, Any]:
-    task, _ = _build_copilot_task_with_total(db, workspace, limit, modes=modes)
+    task, _ = _build_copilot_task_with_total(
+        db,
+        workspace,
+        limit,
+        modes=modes,
+        target=target,
+    )
     return task
 
 
@@ -635,7 +783,10 @@ def _invoke_vscode_chat(
     instruction_path: Path,
     task_path: Path,
     mode: CopilotMode,
+    *,
+    chat_mode: str | None = None,
 ) -> None:
+    resolved_chat_mode = (chat_mode or copilot_chat_mode()).strip() or "alm-copilot-review"
     prompt = (
         f"Follow the attached instruction file to complete the {mode} Copilot "
         "review of the attached task file and write the JSON result file."
@@ -645,7 +796,7 @@ def _invoke_vscode_chat(
             code_bin,
             "chat",
             "--mode",
-            "agent",
+            resolved_chat_mode,
             "--add-file",
             str(instruction_path),
             "--add-file",
@@ -850,6 +1001,7 @@ def launch_local_copilot_batch(
     limit: int,
     *,
     modes: tuple[CopilotMode, ...] = ("skill", "open"),
+    target: CopilotTarget = "all",
     auto_continue: bool = False,
     launcher: Callable[[str, Path, Path, CopilotMode], None] | None = None,
     run_async: bool = True,
@@ -862,6 +1014,7 @@ def launch_local_copilot_batch(
     _prior_manual_review_runs: int = 0,
 ) -> dict[str, Any]:
     requested_modes = _normalize_modes(modes)
+    normalized_target = _normalize_target(target)
     if _series_id is None:
         existing = latest_copilot_batch(workspace.id)
         if existing is not None and existing["active"]:
@@ -871,11 +1024,18 @@ def launch_local_copilot_batch(
     code_bin = find_vscode_cli()
     if code_bin is None and launcher is None:
         raise ValueError("VS Code CLI (`code`) was not found on this machine.")
+    chat_mode = copilot_chat_mode()
+    chat_model = copilot_chat_model()
+    if launcher is None:
+        _, agent_updated = ensure_copilot_chat_agent(mode=chat_mode, model=chat_model)
+        if agent_updated and delay_seconds > 0:
+            time.sleep(min(delay_seconds, 1.0))
     task, total_eligible = _build_copilot_task_with_total(
         db,
         workspace,
         limit,
         modes=requested_modes,
+        target=normalized_target,
     )
     active_modes: list[CopilotMode] = [
         mode
@@ -940,6 +1100,9 @@ def launch_local_copilot_batch(
         "auto_continue": bool(auto_continue),
         "batch_limit": max(1, min(MAX_COPILOT_BATCH, int(limit))),
         "requested_modes": list(requested_modes),
+        "target": normalized_target,
+        "chat_mode": chat_mode,
+        "chat_model": chat_model,
         "series_id": series_id,
         "batch_index": max(1, int(_batch_index)),
         "initial_total_runs": initial_total_runs,
@@ -1077,7 +1240,16 @@ def _continue_batch_if_ready(
     requested_modes = tuple(
         mode for mode in COPILOT_LABELS if mode in raw_modes
     ) or tuple(COPILOT_LABELS)
-    _, remaining_entries = _eligible_copilot_entries(db, workspace.id, requested_modes)
+    try:
+        batch_target = _normalize_target(str(manifest.get("target") or "all"))
+    except ValueError:
+        batch_target = "all"
+    _, remaining_entries = _eligible_copilot_entries(
+        db,
+        workspace.id,
+        requested_modes,
+        target=batch_target,
+    )
     if not remaining_entries:
         _update_manifest_fields(
             manifest_path,
@@ -1124,6 +1296,7 @@ def _continue_batch_if_ready(
             workspace,
             batch_limit,
             modes=requested_modes,
+            target=batch_target,
             auto_continue=True,
             launcher=launcher,
             run_async=run_async,
@@ -1379,6 +1552,9 @@ def latest_copilot_batch(workspace_id: int) -> dict[str, Any] | None:
         "run_count": run_count,
         "active": active,
         "auto_continue": auto_continue,
+        "target": str(manifest.get("target") or "all"),
+        "chat_mode": str(manifest.get("chat_mode") or ""),
+        "chat_model": str(manifest.get("chat_model") or ""),
         "batch_limit": int(manifest.get("batch_limit") or run_count),
         "series_id": str(manifest.get("series_id") or manifest["batch_id"]),
         "batch_index": int(manifest.get("batch_index") or 1),

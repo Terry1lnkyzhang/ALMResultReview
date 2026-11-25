@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$TaskFile,
     [ValidateSet("both", "skill", "open")]
-    [string]$Mode = "both"
+    [string]$Mode = "both",
+    [string]$ChatMode = "alm-copilot-review",
+    [string]$Model = "Gemini 4 Carbon (copilot)"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +14,26 @@ if (-not $task.runs -or -not $task.report_schema) {
     throw "Choose a Copilot task file downloaded from the ALM Review dashboard."
 }
 $code = (Get-Command code -CommandType Application | Select-Object -First 1).Source
+if ($ChatMode -and ($ChatMode -notin @("agent", "ask", "edit"))) {
+    $agentDir = Join-Path $HOME ".copilot\agents"
+    New-Item -ItemType Directory -Force -Path $agentDir | Out-Null
+    $agentPath = Join-Path $agentDir "$ChatMode.agent.md"
+    $displayModel = $Model -replace ' \(copilot\)$', ''
+    $agentContent = @"
+---
+name: "$ChatMode"
+description: "ALM Result Review follow-up review agent pinned to $displayModel."
+model: "$Model"
+disable-model-invocation: true
+---
+You are the ALM Result Review follow-up reviewer.
+Follow the attached instruction file (skill-instructions.md or open-instructions.md) strictly, review only the attached task.json, and write only the requested UTF-8 JSON result file using the file creation tool.
+Do not modify any other file or run terminal commands.
+"@
+    if (-not (Test-Path -LiteralPath $agentPath) -or ((Get-Content -LiteralPath $agentPath -Raw -Encoding UTF8) -ne $agentContent)) {
+        [IO.File]::WriteAllText($agentPath, $agentContent, [Text.UTF8Encoding]::new($false))
+    }
+}
 $rounds = if ($Mode -eq "both") { "skill", "open" } else { $Mode }
 $stamp = Get-Date -Format "yyyyMMdd-HHmmssfff"
 $stem = [IO.Path]::GetFileNameWithoutExtension($taskPath)
@@ -35,7 +57,7 @@ Return a JSON object conforming to report_schema, not to the original Skill outp
 With operator approval, write only the UTF-8 JSON result file at [$resultPath]. Otherwise return the result as one JSON code block. Do not change any Run or contact the application directly.
 "@
     Write-Output "Copilot $round result: $resultPath"
-    & $code chat --new-window --mode agent --add-file $taskPath ($prompt -replace '\r?\n', ' ')
+    & $code chat --new-window --mode $ChatMode --add-file $taskPath ($prompt -replace '\r?\n', ' ')
     if ($LASTEXITCODE -ne 0) {
         throw "VS Code could not open the Copilot $round session (exit $LASTEXITCODE)."
     }

@@ -56,10 +56,14 @@ from app.services.copilot_reports import (
     copilot_findings,
 )
 from app.services.copilot_review import (
+    COPILOT_TARGET_LABELS,
     apply_copilot_report,
     build_copilot_task,
     cancel_copilot_batch,
+    copilot_chat_mode,
+    copilot_chat_model_label,
     copilot_eligible_counts,
+    copilot_run_state,
     find_vscode_cli,
     latest_copilot_batch,
     launch_local_copilot_batch,
@@ -309,6 +313,8 @@ STATUS_LABELS = {
     "unqualified_manual": "不合格 + 需人工复核",
     "qualified": "合格",
     "force_qualified": "人工确认合格",
+    "copilot_pending": "待 Copilot 二审",
+    "force_qualified_copilot_pending": "人工确认合格（待二审）",
     "unqualified": "不合格",
     "needs_manual_review": "需人工复核",
     "pending_review": "待评审",
@@ -372,6 +378,7 @@ def _run_view(
     if first_finding is not None:
         label, finding = first_finding
         summary = f"{label}: {finding.summary}"
+    copilot_status, copilot_status_label = copilot_run_state(review, policy_key)
     return {
         "run": run,
         "execution_at": alm_execution_in_app_timezone(run.execution_at),
@@ -382,6 +389,9 @@ def _run_view(
         "final_status": review.final_status,
         "force_qualified": is_force_qualified(review),
         "copilot_disputed_manual": review.copilot_disputed_manual,
+        "copilot_status": copilot_status,
+        "copilot_status_label": copilot_status_label,
+        "copilot_pending": copilot_status in {"pending", "partial"},
         "has_warning": review.has_warning,
         "temporary_evidence_used": review.temporary_evidence_used,
         "status_label": STATUS_LABELS[review.final_status],
@@ -404,6 +414,10 @@ def _matches_status(item: dict, status: str) -> bool:
         return item["final_status"] in {"unqualified", "needs_manual_review"}
     if status == "force_qualified":
         return item["force_qualified"]
+    if status == "copilot_pending":
+        return item.get("copilot_pending", False)
+    if status == "force_qualified_copilot_pending":
+        return item["force_qualified"] and item.get("copilot_pending", False)
     if status == "warning":
         return item["has_warning"]
     if status == "temporary_evidence":
@@ -1147,11 +1161,12 @@ def dashboard(
             "copilot_batch": (
                 latest_copilot_batch(current_workspace.id) if copilot_access else None
             ),
-            "copilot_eligible_counts": (
-                copilot_eligible_counts(reviews_by_run, policy_key)
-                if copilot_access
-                else None
+            "copilot_eligible_counts": copilot_eligible_counts(
+                reviews_by_run, policy_key
             ),
+            "copilot_chat_mode": copilot_chat_mode(),
+            "copilot_chat_model_label": copilot_chat_model_label(),
+            "copilot_target_labels": COPILOT_TARGET_LABELS,
             "total_runs": len(all_views),
             "status_counts": status_counts,
             "tester_counts": [
@@ -1914,6 +1929,7 @@ def launch_copilot_review(
     limit: Annotated[int, Form(ge=1, le=MAX_COPILOT_BATCH)] = 10,
     mode: Annotated[str, Form()] = "both",
     scope: Annotated[str, Form()] = "single",
+    target: Annotated[str, Form()] = "all",
     return_status: Annotated[str, Form()] = "all",
     db: Session = Depends(get_db),
 ):
@@ -1933,6 +1949,8 @@ def launch_copilot_review(
         return _redirect(back_url, "无效的 Copilot 复核轮次。", "error")
     if scope not in {"single", "all"}:
         return _redirect(back_url, "无效的 Copilot 复核范围。", "error")
+    if target not in COPILOT_TARGET_LABELS:
+        return _redirect(back_url, "无效的 Copilot 复核对象。", "error")
     auto_continue = scope == "all"
     sync_pending_copilot_batches(db, workspace.id)
     try:
@@ -1941,25 +1959,32 @@ def launch_copilot_review(
             workspace,
             limit,
             modes=selected_modes,
+            target=target,
             auto_continue=auto_continue,
         )
     except ValueError as exc:
         return _redirect(back_url, str(exc), "error")
     round_count = len(manifest.get("modes", {}))
+    model_label = copilot_chat_model_label()
+    target_desc = (
+        "人工确认合格 Run"
+        if target == "manual_qualified"
+        else ("AI 合格 Run" if target == "ai_qualified" else "待二审 Run（含人工确认合格）")
+    )
     if auto_continue:
         remaining = int(manifest.get("remaining_runs") or 0)
         if remaining > 0:
             return _redirect(
                 back_url,
-                f"已启动 Copilot 自动连续复核（第 1 批 {manifest['run_count']} 条，共 {round_count} 轮；后续约 {remaining} 条将在每批导入后自动拉起）。",
+                f"已启动 Copilot 自动连续复核（模型：{model_label}；第 1 批 {manifest['run_count']} 条{target_desc}，共 {round_count} 轮；后续约 {remaining} 条将在每批导入后自动拉起）。",
             )
         return _redirect(
             back_url,
-            f"已启动 Copilot 复核（本次已涵盖全部 {manifest['run_count']} 条待审 Qualified Run，共 {round_count} 轮），结果生成后将自动导入。",
+            f"已启动 Copilot 复核（模型：{model_label}；本次已涵盖全部 {manifest['run_count']} 条{target_desc}，共 {round_count} 轮），结果生成后将自动导入。",
         )
     return _redirect(
         back_url,
-        f"已唤起本机 VS Code Copilot 复核（{manifest['run_count']} 条 Qualified Run，共 {round_count} 轮），结果生成后将自动导入。",
+        f"已唤起本机 VS Code Copilot 复核（模型：{model_label}；{manifest['run_count']} 条{target_desc}，共 {round_count} 轮），结果生成后将自动导入。",
     )
 
 
@@ -2255,6 +2280,7 @@ def _run_detail_response(
     )
     active_review_job = active_run_review_job(db, run)
     latest_review_job = _latest_review_job(db, run)
+    copilot_status, copilot_status_label = copilot_run_state(review, policy_key)
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
@@ -2267,6 +2293,8 @@ def _run_detail_response(
             "assigned_tester_label": _person_label(run.assigned_tester, users),
             "actual_tester_label": _person_label(run.actual_tester, users),
             "review": review,
+            "copilot_status": copilot_status,
+            "copilot_status_label": copilot_status_label,
             "review_update_reasons": update_reasons,
             "active_review_job": active_review_job,
             "latest_review_job": latest_review_job,

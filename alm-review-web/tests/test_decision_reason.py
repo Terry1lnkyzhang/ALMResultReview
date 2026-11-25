@@ -1460,6 +1460,153 @@ def test_existing_structured_decision_still_displays_legacy_fields(client_and_en
     assert "证据：Step1 Actual 中的 Location" in detail.text
 
 
+def test_copilot_custom_agent_pins_gemini_4_carbon_model(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from app.services import copilot_review
+
+    monkeypatch.setattr(copilot_review, "COPILOT_AGENT_DIR", tmp_path / "agents")
+    agent_path, created = copilot_review.ensure_copilot_chat_agent()
+    assert created is True
+    assert agent_path == tmp_path / "agents" / "alm-copilot-review.agent.md"
+    content = agent_path.read_text(encoding="utf-8")
+    assert 'name: "alm-copilot-review"' in content
+    assert 'model: "Gemini 4 Carbon (copilot)"' in content
+    assert "disable-model-invocation: true" in content
+    assert copilot_review.copilot_chat_model_label() == "Gemini 4 Carbon"
+
+    # Second call with identical config is a no-op.
+    _, created_again = copilot_review.ensure_copilot_chat_agent()
+    assert created_again is False
+
+    # Built-in modes do not generate an .agent.md file.
+    builtin_path, builtin_created = copilot_review.ensure_copilot_chat_agent(mode="agent")
+    assert builtin_path is None
+    assert builtin_created is False
+
+    # _invoke_vscode_chat passes `--mode alm-copilot-review` instead of hardcoded `agent`.
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(copilot_review.subprocess, "run", fake_run)
+    instr = tmp_path / "skill-instructions.md"
+    task = tmp_path / "task.json"
+    copilot_review._invoke_vscode_chat("code.cmd", instr, task, "skill")
+    assert len(captured) == 1
+    assert captured[0][:4] == ["code.cmd", "chat", "--mode", "alm-copilot-review"]
+
+
+def test_copilot_manual_qualified_pending_visibility_and_target_launch(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    from app.services import copilot_review
+    from app.services.manual_decisions import save_manual_decision
+
+    client, engine = client_and_engine
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_role", "combined")
+    monkeypatch.setattr(settings, "web_auth_enabled", False)
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+    monkeypatch.setattr("app.web.find_vscode_cli", lambda: "code.cmd")
+
+    launched: list[tuple[str, Path, Path, str]] = []
+    real_launch = copilot_review.launch_local_copilot_batch
+
+    def fake_launch(db, workspace, limit, *, modes=("skill", "open"), **kwargs):
+        return real_launch(
+            db,
+            workspace,
+            limit,
+            modes=modes,
+            target=kwargs.get("target", "all"),
+            auto_continue=kwargs.get("auto_continue", False),
+            launcher=lambda c, i, t, m: launched.append((c, i, t, m)),
+            run_async=False,
+            delay_seconds=0.0,
+        )
+
+    monkeypatch.setattr("app.web.launch_local_copilot_batch", fake_launch)
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-mq-visibility")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    r_ai = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=601)
+    r_manual = _prepare_run(engine, "needs_manual_review", workspace_id=workspace_id, run_id=602)
+    with Session(engine) as db:
+        save_manual_decision(
+            db,
+            db.get(AlmRun, 602),
+            "confirmed_qualified",
+            "op1",
+            "截图证据完整，人工复核确认合格",
+        )
+        db.commit()
+
+    with TestClient(
+        client.app, follow_redirects=False, client=("127.0.0.1", 50000)
+    ) as local_client:
+        dash = local_client.get(f"/?workspace={workspace_id}")
+        assert dash.status_code == 200
+        assert "模型：Gemini 4 Carbon" in dash.text
+        assert "待 Copilot 二审" in dash.text
+        assert "当前待审：2 条" in dash.text
+        assert "AI 合格 1 · 人工确认合格 1" in dash.text
+        assert "查看人工确认合格待二审" in dash.text
+
+        # Manually confirmed qualified view clearly shows pending 二审 badge on Run 602.
+        fq_view = local_client.get(f"/?workspace={workspace_id}&status=force_qualified")
+        assert fq_view.status_code == 200
+        assert "#602" in fq_view.text
+        assert "#601" not in fq_view.text
+        assert "人工确认合格" in fq_view.text
+        assert "待 Copilot 二审" in fq_view.text
+
+        # Dedicated filter `force_qualified_copilot_pending` returns only Run 602.
+        fq_pending = local_client.get(
+            f"/?workspace={workspace_id}&status=force_qualified_copilot_pending"
+        )
+        assert fq_pending.status_code == 200
+        assert "#602" in fq_pending.text
+        assert "#601" not in fq_pending.text
+
+        # Run detail page for Run 602 clearly indicates pending Copilot 二审.
+        detail_602 = local_client.get("/runs/602")
+        assert detail_602.status_code == 200
+        assert "人工确认合格" in detail_602.text
+        assert "待 Copilot 二审" in detail_602.text
+
+        # Launching with target=manual_qualified only queues Run 602 (not AI-qualified 601).
+        started = local_client.post(
+            f"/workspaces/{workspace_id}/copilot-review/launch",
+            data={
+                "limit": "10",
+                "mode": "both",
+                "scope": "single",
+                "target": "manual_qualified",
+                "return_status": "force_qualified",
+            },
+        )
+        assert started.status_code == 303
+        assert len(launched) == 2
+        task_data = json.loads(launched[0][2].read_text(encoding="utf-8"))
+        assert [item["review_result_id"] for item in task_data["runs"]] == [r_manual]
+        assert r_ai not in [item["review_result_id"] for item in task_data["runs"]]
+        manifest = json.loads((launched[0][2].parent / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["target"] == "manual_qualified"
+        assert manifest["chat_mode"] == "alm-copilot-review"
+        assert manifest["chat_model"] == "Gemini 4 Carbon (copilot)"
+
+
+
 def test_stale_review_result_requires_refilling(client_and_engine) -> None:
     client, engine = client_and_engine
     result_id = _prepare_run(engine)

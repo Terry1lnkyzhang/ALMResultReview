@@ -12,6 +12,8 @@ from app.config import PROJECT_DIR, get_settings
 from app.database import Base, SessionLocal, engine
 from app.migrations import ensure_compatible_schema
 from app.services.copilot_review import (
+    ensure_copilot_chat_agent,
+    find_vscode_cli,
     has_pending_copilot_batches,
     sync_pending_copilot_batches,
 )
@@ -112,6 +114,11 @@ async def lifespan(application: FastAPI):
     application.state.worker_owner_token = owner_token if owns_lease else None
     if scheduler is not None:
         scheduler.start()
+    if find_vscode_cli() is not None:
+        try:
+            ensure_copilot_chat_agent()
+        except Exception as exc:
+            logger.warning("Could not initialize Copilot review agent file: %s", exc)
     schedule_task = (
         asyncio.create_task(
             _poll_scheduled_location_changes(

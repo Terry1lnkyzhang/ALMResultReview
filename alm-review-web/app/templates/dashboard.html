@@ -337,14 +337,15 @@
 
 <section class="metric-grid" aria-label="Review totals">
   <a class="metric metric-total" href="/?workspace={{ current_workspace.id }}&amp;status=all"><span>All runs</span><strong>{{ total_runs }}</strong></a>
-  <a class="metric metric-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong></a>
-  <a class="metric metric-force-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified"><span>Manually confirmed qualified</span><strong>{{ status_counts.get('force_qualified', 0) }}</strong></a>
+  <a class="metric metric-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=qualified"><span>Qualified</span><strong>{{ status_counts.get('qualified', 0) }}</strong>{% if copilot_eligible_counts and copilot_eligible_counts.both %}<small class="metric-sub">待二审 {{ copilot_eligible_counts.both }}</small>{% endif %}</a>
+  <a class="metric metric-force-qualified" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified"><span>Manually confirmed qualified</span><strong>{{ status_counts.get('force_qualified', 0) }}</strong>{% if copilot_eligible_counts and copilot_eligible_counts.manual_qualified %}<small class="metric-sub">待二审 {{ copilot_eligible_counts.manual_qualified }}</small>{% endif %}</a>
   <a class="metric metric-unqualified" href="/?workspace={{ current_workspace.id }}&amp;status=unqualified"><span>Unqualified</span><strong>{{ status_counts.get('unqualified', 0) }}</strong></a>
   <a class="metric metric-manual" href="/?workspace={{ current_workspace.id }}&amp;status=needs_manual_review"><span>Manual review</span><strong>{{ status_counts.get('needs_manual_review', 0) }}</strong></a>
   <a class="metric metric-pending" href="/?workspace={{ current_workspace.id }}&amp;status=pending_review"><span>Pending</span><strong>{{ status_counts.get('pending_review', 0) }}</strong></a>
   <a class="metric metric-failed" href="/?workspace={{ current_workspace.id }}&amp;status=review_failed"><span>Review failed</span><strong>{{ status_counts.get('review_failed', 0) }}</strong></a>
   <a class="metric metric-warning" href="/?workspace={{ current_workspace.id }}&amp;status=warning"><span>Has warning</span><strong>{{ status_counts.get('warning', 0) }}</strong></a>
   <a class="metric metric-temporary" href="/?workspace={{ current_workspace.id }}&amp;status=temporary_evidence"><span>Temporary evidence</span><strong>{{ status_counts.get('temporary_evidence', 0) }}</strong></a>
+  <a class="metric metric-copilot-pending" href="/?workspace={{ current_workspace.id }}&amp;status=copilot_pending"><span>待 Copilot 二审</span><strong>{{ copilot_eligible_counts.both if copilot_eligible_counts else 0 }}</strong>{% if copilot_eligible_counts and copilot_eligible_counts.both %}<small class="metric-sub">AI 合格 {{ copilot_eligible_counts.ai_qualified }} &middot; 人工确认 {{ copilot_eligible_counts.manual_qualified }}</small>{% endif %}</a>
 </section>
 
 <section class="workspace-grid">
@@ -375,10 +376,14 @@
       <form class="copilot-launch-form" method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/launch" onsubmit="const btn = this.querySelector('button[type=submit]'); if (btn) { btn.disabled = true; btn.textContent = '正在启动 VS Code Copilot...'; }">
         <input type="hidden" name="return_status" value="{{ selected_status }}">
         <div class="copilot-launch-title">
-          <strong>Copilot 二审</strong>
-          <small>针对当前 Qualified（不通过转 Unqualified）与 Manually confirmed qualified（不通过先转 Manual review）{% if copilot_eligible_counts is not none %} &middot; 当前待审：{% if copilot_eligible_counts.both == copilot_eligible_counts.skill and copilot_eligible_counts.both == copilot_eligible_counts.open %}{{ copilot_eligible_counts.both }} 条{% else %}两轮共 {{ copilot_eligible_counts.both }} 条（Skill {{ copilot_eligible_counts.skill }} / Open {{ copilot_eligible_counts.open }}）{% endif %}{% endif %}</small>
+          <div class="copilot-launch-heading">
+            <strong>Copilot 二审</strong>
+            <span class="copilot-model-tag" title="VS Code 自定义 Agent：{{ copilot_chat_mode }}">模型：{{ copilot_chat_model_label }}</span>
+          </div>
+          <small>针对当前 Qualified（不通过转 Unqualified）与 Manually confirmed qualified（不通过先转 Manual review）{% if copilot_eligible_counts is not none %} &middot; 当前待审：{% if copilot_eligible_counts.both == copilot_eligible_counts.skill and copilot_eligible_counts.both == copilot_eligible_counts.open %}{{ copilot_eligible_counts.both }} 条{% else %}两轮共 {{ copilot_eligible_counts.both }} 条（Skill {{ copilot_eligible_counts.skill }} / Open {{ copilot_eligible_counts.open }}）{% endif %}（AI 合格 {{ copilot_eligible_counts.ai_qualified }} · 人工确认合格 {{ copilot_eligible_counts.manual_qualified }}）{% if copilot_eligible_counts.manual_qualified %} &middot; <a class="copilot-inline-link" href="/?workspace={{ current_workspace.id }}&amp;status=force_qualified_copilot_pending">查看人工确认合格待二审</a>{% endif %}{% endif %}</small>
         </div>
         <label><span>每批数量</span><input type="number" name="limit" min="1" max="25" value="10" required></label>
+        <label><span>复核对象</span><select name="target">{% for value, label in copilot_target_labels.items() %}<option value="{{ value }}"{% if value == 'all' %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
         <label><span>复核轮次</span><select name="mode"><option value="both" selected>Skill + Open 两轮</option><option value="skill">仅 Skill 轮</option><option value="open">仅 Open 轮</option></select></label>
         <label><span>复核范围</span><select name="scope"><option value="all" selected>全部待审（自动分批）</option><option value="single">仅本批</option></select></label>
         <button class="button primary" type="submit">一键启动 Copilot 复核</button>
@@ -517,7 +522,7 @@
             <td>{{ item.actual_tester_label }}</td>
             <td>{{ item.test_owner_label }}</td>
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
-            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.copilot_disputed_manual %}<span class="copilot-dispute-badge">Copilot 质疑</span>{% endif %}{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
+            <td class="final-review-cell"><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.force_qualified %}<span class="manual-qualified-badge">人工确认合格</span>{% endif %}{% if item.copilot_disputed_manual %}<span class="copilot-dispute-badge">Copilot 质疑</span>{% elif item.copilot_status in ('pending', 'partial') %}<span class="copilot-state-badge copilot-state-pending">{{ item.copilot_status_label }}</span>{% elif item.copilot_status == 'passed' %}<span class="copilot-state-badge copilot-state-passed">{{ item.copilot_status_label }}</span>{% elif item.copilot_status == 'rejected' %}<span class="copilot-state-badge copilot-state-rejected">{{ item.copilot_status_label }}</span>{% elif item.copilot_status == 'incomplete' %}<span class="copilot-state-badge copilot-state-incomplete">{{ item.copilot_status_label }}</span>{% endif %}{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
             <td>{{ item.execution_at.strftime('%Y-%m-%d %H:%M') if item.execution_at else '-' }}</td>
           </tr>
