@@ -32,7 +32,7 @@ AI credentials out of source control and logs.
 External automation is disabled by default. Open the non-navigated operations page
 at `/ops/configuration` to configure the ALM folder, schedule, local AI endpoint, and
 prompt. Enable ALM synchronization and AI review only after their credentials and
-endpoints are ready.
+endpoints are ready....
 
 ## Web and Worker deployment
 
