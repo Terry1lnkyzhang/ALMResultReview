@@ -51,10 +51,20 @@ from app.services.ai_transport import (
 from app.services.copilot_reports import (
     COPILOT_LABELS,
     MAX_COPILOT_BATCH,
+    CopilotMode,
     CopilotRoundReport,
     copilot_findings,
 )
-from app.services.copilot_review import apply_copilot_report, build_copilot_task
+from app.services.copilot_review import (
+    apply_copilot_report,
+    build_copilot_task,
+    cancel_copilot_batch,
+    copilot_eligible_counts,
+    find_vscode_cli,
+    latest_copilot_batch,
+    launch_local_copilot_batch,
+    sync_pending_copilot_batches,
+)
 from app.services.decision_reason import (
     DecisionAnswer,
     DecisionRow,
@@ -250,6 +260,19 @@ def _pipeline_skill_traces(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
 def _web_auth_required() -> bool:
     settings = get_settings()
     return settings.app_role == "web" or settings.web_auth_enabled
+
+
+def _is_local_request(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+
+
+def _copilot_access_allowed(request: Request) -> bool:
+    return _web_auth_required() or _is_local_request(request)
+
+
+def _local_copilot_launch_available(request: Request) -> bool:
+    return _is_local_request(request) and find_vscode_cli() is not None
 
 
 def require_web_access(
@@ -923,6 +946,9 @@ def dashboard(
         if config.enabled
     )
     users = {user.code1_id: user for user in db.scalars(select(AlmUser)).all()}
+    copilot_access = _copilot_access_allowed(request) and not current_workspace.archived
+    if copilot_access:
+        sync_pending_copilot_batches(db, current_workspace.id)
     reviews_by_run = current_reviews(db, runs, policy_key)
     all_views = [
         _run_view(
@@ -1108,7 +1134,19 @@ def dashboard(
             "selected_project": selected_project,
             "current_project": current_workspace.project,
             "current_workspace": current_workspace,
-            "copilot_review_available": _web_auth_required() and not current_workspace.archived,
+            "copilot_review_available": copilot_access,
+            "copilot_launch_available": (
+                _local_copilot_launch_available(request)
+                and not current_workspace.archived
+            ),
+            "copilot_batch": (
+                latest_copilot_batch(current_workspace.id) if copilot_access else None
+            ),
+            "copilot_eligible_counts": (
+                copilot_eligible_counts(reviews_by_run, policy_key)
+                if copilot_access
+                else None
+            ),
             "total_runs": len(all_views),
             "status_counts": status_counts,
             "tester_counts": [
@@ -1840,22 +1878,124 @@ def workspace_run_detail(
     return RedirectResponse(f"/runs/{run_id}")
 
 
-def _copilot_workspace(db: Session, workspace_id: int) -> Workspace:
-    if not _web_auth_required():
-        raise HTTPException(status_code=403, detail="Copilot review requires Web authentication.")
+def _copilot_workspace(request: Request, db: Session, workspace_id: int) -> Workspace:
+    if not _copilot_access_allowed(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Copilot review requires Web authentication or local access.",
+        )
     workspace = db.get(Workspace, workspace_id)
     if workspace is None or workspace.archived:
         raise HTTPException(status_code=404, detail="Active workspace not found.")
     return workspace
 
 
+def _local_copilot_workspace(request: Request, db: Session, workspace_id: int) -> Workspace:
+    if not _is_local_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="One-click Copilot launch is only available from this computer.",
+        )
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None or workspace.archived:
+        raise HTTPException(status_code=404, detail="Active workspace not found.")
+    return workspace
+
+
+@router.post("/workspaces/{workspace_id}/copilot-review/launch")
+def launch_copilot_review(
+    request: Request,
+    workspace_id: int,
+    limit: Annotated[int, Form(ge=1, le=MAX_COPILOT_BATCH)] = 10,
+    mode: Annotated[str, Form()] = "both",
+    scope: Annotated[str, Form()] = "single",
+    return_status: Annotated[str, Form()] = "all",
+    db: Session = Depends(get_db),
+):
+    workspace = _local_copilot_workspace(request, db, workspace_id)
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/"):
+        raise HTTPException(status_code=403, detail="Cross-origin Copilot launch is not allowed.")
+    target_status = return_status if return_status in STATUS_LABELS or return_status == "all" else "all"
+    back_url = f"/?workspace={workspace_id}&status={quote(target_status)}"
+    mode_map: dict[str, tuple[CopilotMode, ...]] = {
+        "both": ("skill", "open"),
+        "skill": ("skill",),
+        "open": ("open",),
+    }
+    selected_modes = mode_map.get(mode)
+    if selected_modes is None:
+        return _redirect(back_url, "无效的 Copilot 复核轮次。", "error")
+    if scope not in {"single", "all"}:
+        return _redirect(back_url, "无效的 Copilot 复核范围。", "error")
+    auto_continue = scope == "all"
+    sync_pending_copilot_batches(db, workspace.id)
+    try:
+        manifest = launch_local_copilot_batch(
+            db,
+            workspace,
+            limit,
+            modes=selected_modes,
+            auto_continue=auto_continue,
+        )
+    except ValueError as exc:
+        return _redirect(back_url, str(exc), "error")
+    round_count = len(manifest.get("modes", {}))
+    if auto_continue:
+        remaining = int(manifest.get("remaining_runs") or 0)
+        if remaining > 0:
+            return _redirect(
+                back_url,
+                f"已启动 Copilot 自动连续复核（第 1 批 {manifest['run_count']} 条，共 {round_count} 轮；后续约 {remaining} 条将在每批导入后自动拉起）。",
+            )
+        return _redirect(
+            back_url,
+            f"已启动 Copilot 复核（本次已涵盖全部 {manifest['run_count']} 条待审 Qualified Run，共 {round_count} 轮），结果生成后将自动导入。",
+        )
+    return _redirect(
+        back_url,
+        f"已唤起本机 VS Code Copilot 复核（{manifest['run_count']} 条 Qualified Run，共 {round_count} 轮），结果生成后将自动导入。",
+    )
+
+
+@router.post("/workspaces/{workspace_id}/copilot-review/batches/{batch_id}/cancel")
+def cancel_copilot_review_batch(
+    request: Request,
+    workspace_id: int,
+    batch_id: str,
+    return_status: Annotated[str, Form()] = "all",
+    db: Session = Depends(get_db),
+):
+    _local_copilot_workspace(request, db, workspace_id)
+    target_status = return_status if return_status in STATUS_LABELS or return_status == "all" else "all"
+    back_url = f"/?workspace={workspace_id}&status={quote(target_status)}"
+    if cancel_copilot_batch(workspace_id, batch_id):
+        return _redirect(back_url, "已停止等待当前 Copilot 复核批次。")
+    return _redirect(back_url, "未找到对应的 Copilot 复核批次。", "error")
+
+
+@router.get("/api/copilot-review-status")
+def copilot_review_status(
+    request: Request,
+    workspace: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    _copilot_workspace(request, db, workspace)
+    sync_summary = sync_pending_copilot_batches(db, workspace)
+    return {
+        "batch": latest_copilot_batch(workspace),
+        "sync": sync_summary,
+    }
+
+
 @router.get("/workspaces/{workspace_id}/copilot-review/task")
 def download_copilot_task(
+    request: Request,
     workspace_id: int,
     limit: Annotated[int, Query(ge=1, le=MAX_COPILOT_BATCH)] = 5,
     db: Session = Depends(get_db),
 ):
-    workspace = _copilot_workspace(db, workspace_id)
+    workspace = _copilot_workspace(request, db, workspace_id)
     try:
         task = build_copilot_task(db, workspace, limit)
     except ValueError as exc:
@@ -1877,7 +2017,7 @@ def upload_copilot_reports(
     reports: Annotated[list[UploadFile], File()],
     db: Session = Depends(get_db),
 ):
-    _copilot_workspace(db, workspace_id)
+    _copilot_workspace(request, db, workspace_id)
     origin = request.headers.get("origin")
     if origin and origin != str(request.base_url).rstrip("/"):
         raise HTTPException(status_code=403, detail="Cross-origin result import is not allowed.")

@@ -355,11 +355,12 @@ current source when the short overview below is outdated.
 
 ### Copilot follow-up review
 
-1. In an authenticated Web session, open the workspace's **Qualified** list and use **Download Copilot task** under **Follow-up review**. Only current, first-pass AI `qualified` results on the active policy are eligible.
-2. On the operator's Windows desktop, run `start-copilot-review.ps1` with `-TaskFile` pointing to the download. It opens separate VS Code Chat sessions for the pinned Skill review and the open-ended check. Use a signed-in GitHub Copilot model in both sessions.
-3. Use **Import results** in the same workspace to upload one or both result JSON files. An evidence-backed rejection from either round goes straight to **Unqualified**. The Run detail shows the two reviews and the original AI verdict. An operator can use the existing qualified override; no new Run status is added.
+1. On the host machine where VS Code and GitHub Copilot are signed in, open `http://127.0.0.1:8090`, select the workspace, and click **一键启动 Copilot 复核** (`Start Copilot review`). Only current, first-pass AI `qualified` results on the active policy are eligible.
+2. The server writes the batch task (including normalized ALM steps, current Skill instructions, `location_assessment`, and deterministic `equipment_context`) under `logs/copilot_runs/<batch_id>/` and opens separate VS Code Chat sessions for the selected rounds (`skill` and `open`).
+3. Once Copilot writes each round's result JSON file in that batch directory, the server validates and imports it automatically within a few seconds. An evidence-backed rejection from either round moves the Run straight to **Unqualified**, while preserving the original AI verdict and allowing the existing manual qualified override.
+4. For remote or manual operation (authenticated Web sessions), expand **高级：手动下载任务 / 导入结果** to download the task JSON, run `start-copilot-review.ps1`, and upload the result JSON files.
 
-The task includes normalized ALM steps, evidence references, and the current Skill instructions, not raw attachments or all external records. Only send data approved for Copilot and attach any authorized original evidence needed for the review. An incomplete round records its limitation without changing the Run status. Imports are bound to the current first-pass result and source hash and do not initiate an ALM sync or primary review.
+The task does not include raw attachments or external image/HTML file contents. Only send data approved for Copilot and attach any authorized original evidence needed for the review. An incomplete round records its limitation without changing the Run status. Imports are bound to the current first-pass result and source hash and do not initiate an ALM sync or primary review.
 
 ### Staged review pipeline
 

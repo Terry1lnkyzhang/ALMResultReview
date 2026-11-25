@@ -369,18 +369,101 @@
       <a class="button secondary" href="/exports/reviews.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export CSV</a>
       <a class="button secondary" href="/exports/test-case-results.csv?workspace={{ current_workspace.id }}&amp;status={{ selected_status|urlencode }}&amp;tester={{ selected_tester|urlencode }}&amp;owner={{ selected_owner|urlencode }}&amp;query={{ query|urlencode }}&amp;search_steps={{ 1 if search_steps else 0 }}">Export Test Case results</a>
     </form>
-    {% if copilot_review_available and selected_status in ('qualified', 'unqualified') %}
-    <details class="routing-step">
-      <summary><span>Copilot</span><strong>Follow-up review</strong></summary>
-      <form class="filterbar" method="get" action="/workspaces/{{ current_workspace.id }}/copilot-review/task">
-        <label><span>Qualified runs per batch</span><input type="number" name="limit" min="1" max="25" value="5" required></label>
-        <button class="button secondary" type="submit">Download Copilot task</button>
+    {% if copilot_review_available %}
+    <section class="copilot-bar" aria-label="Copilot follow-up review">
+      {% if copilot_launch_available %}
+      <form class="copilot-launch-form" method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/launch" onsubmit="const btn = this.querySelector('button[type=submit]'); if (btn) { btn.disabled = true; btn.textContent = '正在启动 VS Code Copilot...'; }">
+        <input type="hidden" name="return_status" value="{{ selected_status }}">
+        <div class="copilot-launch-title">
+          <strong>Copilot 二审</strong>
+          <small>仅针对当前一审 Qualified 的 Run；发现问题直接转入 Unqualified{% if copilot_eligible_counts is not none %} &middot; 当前待审：{% if copilot_eligible_counts.both == copilot_eligible_counts.skill and copilot_eligible_counts.both == copilot_eligible_counts.open %}{{ copilot_eligible_counts.both }} 条{% else %}两轮共 {{ copilot_eligible_counts.both }} 条（Skill {{ copilot_eligible_counts.skill }} / Open {{ copilot_eligible_counts.open }}）{% endif %}{% endif %}</small>
+        </div>
+        <label><span>每批数量</span><input type="number" name="limit" min="1" max="25" value="10" required></label>
+        <label><span>复核轮次</span><select name="mode"><option value="both" selected>Skill + Open 两轮</option><option value="skill">仅 Skill 轮</option><option value="open">仅 Open 轮</option></select></label>
+        <label><span>复核范围</span><select name="scope"><option value="all" selected>全部待审（自动分批）</option><option value="single">仅本批</option></select></label>
+        <button class="button primary" type="submit">一键启动 Copilot 复核</button>
       </form>
-      <form class="filterbar" method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/results" enctype="multipart/form-data">
-        <label><span>Copilot result files</span><input type="file" name="reports" accept=".json,application/json" multiple required></label>
-        <button class="button secondary" type="submit">Import results</button>
-      </form>
-    </details>
+      {% endif %}
+      {% if copilot_batch %}
+      <div class="copilot-batch-status" data-copilot-batch data-workspace-id="{{ current_workspace.id }}" data-batch-active="{{ '1' if copilot_batch.active else '0' }}" data-batch-signature="{{ copilot_batch.batch_id }}|{{ copilot_batch.continuation_state }}|{{ '1' if copilot_batch.active else '0' }}|{% for mode_key, state in copilot_batch.modes.items()|sort %}{% if not loop.first %},{% endif %}{{ mode_key }}:{{ state.status }}:{{ state.imported }}:{{ state.rejected }}{% endfor %}">
+        <div class="copilot-batch-summary">
+          {% if copilot_batch.auto_continue %}
+            {% if copilot_batch.continuation_state == 'completed' %}
+            <strong>自动连续复核已完成（共 {{ copilot_batch.batch_index }} 批，累计 {{ copilot_batch.completed_runs_total }} 条 Run{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}）</strong>
+            {% elif copilot_batch.continuation_state == 'stopped' %}
+            <strong>自动连续复核已暂停（第 {{ copilot_batch.batch_index }} 批，本批 {{ copilot_batch.run_count }} 条）</strong>
+            {% else %}
+            <strong>自动连续复核 &middot; 第 {{ copilot_batch.batch_index }} 批（本批 {{ copilot_batch.run_count }} 条{% if copilot_batch.remaining_runs > 0 %}，后续约 {{ copilot_batch.remaining_runs }} 条{% endif %}{% if copilot_batch.completed_runs_total > 0 %}；已累计完成 {{ copilot_batch.completed_runs_total }} 条{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}{% endif %}）</strong>
+            {% endif %}
+          {% else %}
+          <strong>最近批次（{{ copilot_batch.run_count }} 条 Run）</strong>
+          {% endif %}
+          <div class="copilot-round-badges" data-copilot-rounds>
+            {% for mode_key, state in copilot_batch.modes.items() %}
+            <span class="copilot-badge copilot-badge-{{ state.status }}">
+              {{ state.label }}：{% if state.status == 'launching' %}正在打开 VS Code...{% elif state.status == 'pending' %}复核中（写完自动导入）{% elif state.status == 'imported' %}已导入 {{ state.imported }} 条{% if state.rejected %}（{{ state.rejected }} 条转不合格）{% endif %}{% elif state.status == 'launch_failed' %}启动失败：{{ state.error }}{% else %}导入异常：{{ state.error }}{% endif %}
+            </span>
+            {% endfor %}
+            {% if copilot_batch.continuation_error %}
+            <span class="copilot-badge copilot-badge-error">续跑已停：{{ copilot_batch.continuation_error }}</span>
+            {% endif %}
+          </div>
+        </div>
+        {% if copilot_batch.active and copilot_launch_available %}
+        <form method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/batches/{{ copilot_batch.batch_id }}/cancel">
+          <input type="hidden" name="return_status" value="{{ selected_status }}">
+          <button class="button secondary" type="submit">{% if copilot_batch.auto_continue %}停止自动续跑{% else %}停止等待{% endif %}</button>
+        </form>
+        {% endif %}
+      </div>
+      {% if copilot_batch.active %}
+      <script>
+        (() => {
+          const box = document.querySelector("[data-copilot-batch]");
+          if (!box || box.dataset.batchActive !== "1") return;
+          const wsId = box.dataset.workspaceId;
+          const initialSignature = box.dataset.batchSignature || "";
+          function buildSignature(batch) {
+            if (!batch) return "";
+            const modeSig = Object.entries(batch.modes || {})
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([k, v]) => `${k}:${v.status}:${v.imported}:${v.rejected}`)
+              .join(",");
+            return `${batch.batch_id}|${batch.continuation_state || ""}|${batch.active ? "1" : "0"}|${modeSig}`;
+          }
+          async function pollCopilotStatus() {
+            try {
+              const resp = await fetch(`/api/copilot-review-status?workspace=${encodeURIComponent(wsId)}`, { cache: "no-store" });
+              if (!resp.ok) return;
+              const data = await resp.json();
+              if (data.sync && (data.sync.imported_rounds > 0 || data.sync.continued_batches > 0)) {
+                window.location.reload();
+                return;
+              }
+              if (!data.batch || !data.batch.active || buildSignature(data.batch) !== initialSignature) {
+                window.location.reload();
+              }
+            } catch (_) {
+              return;
+            }
+          }
+          window.setInterval(pollCopilotStatus, 3000);
+        })();
+      </script>
+      {% endif %}
+      {% endif %}
+      <details class="routing-step copilot-manual-details">
+        <summary><span>高级</span><strong>手动下载任务 / 导入结果</strong></summary>
+        <form class="filterbar" method="get" action="/workspaces/{{ current_workspace.id }}/copilot-review/task">
+          <label><span>Qualified runs per batch</span><input type="number" name="limit" min="1" max="25" value="5" required></label>
+          <button class="button secondary" type="submit">Download Copilot task</button>
+        </form>
+        <form class="filterbar" method="post" action="/workspaces/{{ current_workspace.id }}/copilot-review/results" enctype="multipart/form-data">
+          <label><span>Copilot result files</span><input type="file" name="reports" accept=".json,application/json" multiple required></label>
+          <button class="button secondary" type="submit">Import results</button>
+        </form>
+      </details>
+    </section>
     {% endif %}
     {% if document_counts %}
     <div class="table-heading" id="documents-list"><h2>Documents</h2><span>{{ document_counts|length }} documents &middot; click one to filter its Runs</span></div>

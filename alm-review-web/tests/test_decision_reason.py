@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -312,6 +313,15 @@ def test_copilot_web_import_moves_only_current_qualified_runs(client_and_engine,
     task_url = f"/workspaces/{workspace_id}/copilot-review/task"
     import_url = f"/workspaces/{workspace_id}/copilot-review/results"
     assert client.get(task_url).status_code == 403
+    remote_dash = client.get(f"/?workspace={workspace_id}&status=qualified")
+    assert remote_dash.status_code == 200
+    assert "Download Copilot task" not in remote_dash.text
+
+    with TestClient(client.app, follow_redirects=False, client=("127.0.0.1", 50000)) as local_client:
+        local_dash = local_client.get(f"/?workspace={workspace_id}&status=qualified")
+        assert local_dash.status_code == 200
+        assert "Download Copilot task" in local_dash.text
+        assert local_client.get(task_url).status_code == 200
 
     monkeypatch.setattr(settings, "web_auth_enabled", True)
     monkeypatch.setattr(settings, "web_auth_username", "test-user")
@@ -348,6 +358,422 @@ def test_copilot_web_import_moves_only_current_qualified_runs(client_and_engine,
     assert dashboard.status_code == 200
     assert "Copilot Open: Finding" in dashboard.text
     assert '<a href="/runs/42">Copilot Open: Finding</a>' in dashboard.text
+
+
+def test_copilot_one_click_launch_and_auto_import(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    from app.services import copilot_review
+
+    client, engine = client_and_engine
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_role", "combined")
+    monkeypatch.setattr(settings, "web_auth_enabled", False)
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+    monkeypatch.setattr("app.web.find_vscode_cli", lambda: "code.cmd")
+
+    launched: list[tuple[str, Path, Path, str]] = []
+
+    def fake_launch(
+        db, workspace, limit, *, modes=("skill", "open"), **kwargs
+    ):
+        return copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            limit,
+            modes=modes,
+            launcher=lambda code_bin, instr, task, mode: launched.append(
+                (code_bin, instr, task, mode)
+            ),
+            run_async=False,
+            delay_seconds=0.0,
+        )
+
+    monkeypatch.setattr("app.web.launch_local_copilot_batch", fake_launch)
+    monkeypatch.setenv("NO_PROXY", "*")
+    assert "NO_PROXY" not in copilot_review._clean_vscode_env()
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+    qualified_id = _prepare_run(engine, "qualified", workspace_id=workspace_id)
+    launch_url = f"/workspaces/{workspace_id}/copilot-review/launch"
+
+    assert client.post(launch_url, data={"limit": "5", "mode": "both"}).status_code == 403
+
+    with TestClient(
+        client.app, follow_redirects=False, client=("127.0.0.1", 50000)
+    ) as local_client:
+        dash = local_client.get(f"/?workspace={workspace_id}")
+        assert dash.status_code == 200
+        assert "一键启动 Copilot 复核" in dash.text
+
+        started = local_client.post(
+            launch_url, data={"limit": "5", "mode": "both", "return_status": "all"}
+        )
+        assert started.status_code == 303
+        assert len(launched) == 2
+        assert [mode for _, _, _, mode in launched] == ["skill", "open"]
+
+        task_data = json.loads(launched[0][2].read_text(encoding="utf-8"))
+        assert "location_assessment" in task_data["runs"][0]
+        assert "equipment_context" in task_data["runs"][0]
+        source_hash = task_data["runs"][0]["source_hash"]
+
+        status_before = local_client.get(
+            f"/api/copilot-review-status?workspace={workspace_id}"
+        ).json()
+        assert status_before["batch"]["active"] is True
+        batch_dir = launched[0][2].parent
+
+        # Simulate Copilot writing UTF-8 BOM open rejection and skill pass files
+        (batch_dir / "open-results.json").write_bytes(
+            ("\ufeff" + json.dumps({
+                "mode": "open",
+                "results": [{
+                    "review_result_id": qualified_id,
+                    "source_hash": source_hash,
+                    "outcome": {
+                        "verdict": "unqualified",
+                        "findings": [{
+                            "location": "Step 1",
+                            "summary": "Auto imported finding",
+                            "evidence": "Cited evidence",
+                        }],
+                    },
+                }],
+            })).encode("utf-8")
+        )
+        (batch_dir / "skill-results.json").write_text(
+            json.dumps({
+                "mode": "skill",
+                "results": [{
+                    "review_result_id": qualified_id,
+                    "source_hash": source_hash,
+                    "outcome": {"verdict": "qualified", "findings": []},
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        status_after = local_client.get(
+            f"/api/copilot-review-status?workspace={workspace_id}"
+        ).json()
+        assert status_after["sync"]["imported_rounds"] == 2
+        assert status_after["sync"]["rejected_runs"] == 1
+        assert status_after["batch"]["active"] is False
+        assert status_after["batch"]["modes"]["open"]["status"] == "imported"
+        assert status_after["batch"]["modes"]["skill"]["status"] == "imported"
+
+        unq = local_client.get(f"/?workspace={workspace_id}&status=unqualified")
+        assert unq.status_code == 200
+        assert "Copilot Open: Auto imported finding" in unq.text
+
+        batch_id = status_after["batch"]["batch_id"]
+        cancelled = local_client.post(
+            f"/workspaces/{workspace_id}/copilot-review/batches/{batch_id}/cancel"
+        )
+        assert cancelled.status_code == 303
+        assert copilot_review.latest_copilot_batch(workspace_id) is None
+
+
+def test_copilot_auto_continue_reviews_all_qualified_runs_in_batches(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    from app.services import copilot_review
+
+    client, engine = client_and_engine
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_role", "combined")
+    monkeypatch.setattr(settings, "web_auth_enabled", False)
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+    monkeypatch.setattr("app.web.find_vscode_cli", lambda: "code.cmd")
+
+    launched: list[tuple[str, Path, Path, str]] = []
+    real_launch = copilot_review.launch_local_copilot_batch
+    real_sync = copilot_review.sync_pending_copilot_batches
+
+    def sync_launcher(code_bin, instr, task, mode):
+        launched.append((code_bin, instr, task, mode))
+
+    def fake_launch(db, workspace, limit, *, modes=("skill", "open"), **kwargs):
+        return real_launch(
+            db,
+            workspace,
+            limit,
+            modes=modes,
+            auto_continue=kwargs.get("auto_continue", False),
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+
+    def fake_sync(db, workspace_id=None, **kwargs):
+        return real_sync(
+            db,
+            workspace_id,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("app.web.launch_local_copilot_batch", fake_launch)
+    monkeypatch.setattr("app.web.sync_pending_copilot_batches", fake_sync)
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-all")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    q1 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=101)
+    q2 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=102)
+    q3 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=103)
+    _prepare_run(engine, "unqualified", workspace_id=workspace_id, run_id=104)
+
+    launch_url = f"/workspaces/{workspace_id}/copilot-review/launch"
+    with TestClient(
+        client.app, follow_redirects=False, client=("127.0.0.1", 50000)
+    ) as local_client:
+        dash = local_client.get(f"/?workspace={workspace_id}")
+        assert dash.status_code == 200
+        assert "全部待审（自动分批）" in dash.text
+        assert "当前待审：3 条" in dash.text
+
+        started = local_client.post(
+            launch_url,
+            data={"limit": "2", "mode": "both", "scope": "all", "return_status": "all"},
+        )
+        assert started.status_code == 303
+        assert len(launched) == 2
+
+        # Attempting to start another batch while active should be blocked.
+        dup = local_client.post(
+            launch_url,
+            data={"limit": "2", "mode": "both", "scope": "all", "return_status": "all"},
+        )
+        assert dup.status_code == 303
+        assert "message_kind=error" in dup.headers["location"]
+        assert len(launched) == 2
+
+        batch1_task = json.loads(launched[0][2].read_text(encoding="utf-8"))
+        batch1_dir = launched[0][2].parent
+        assert [item["review_result_id"] for item in batch1_task["runs"]] == [q1, q2]
+        source_hash = batch1_task["runs"][0]["source_hash"]
+
+        # Only writing Open results must NOT launch batch 2 yet (Skill is still pending).
+        (batch1_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [
+                    {
+                        "review_result_id": q1,
+                        "source_hash": source_hash,
+                        "outcome": {
+                            "verdict": "unqualified",
+                            "findings": [{
+                                "location": "Step 1",
+                                "summary": "Batch 1 rejection",
+                                "evidence": "Mismatch",
+                            }],
+                        },
+                    },
+                    {
+                        "review_result_id": q2,
+                        "source_hash": source_hash,
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        mid = local_client.get(f"/api/copilot-review-status?workspace={workspace_id}").json()
+        assert mid["sync"]["imported_rounds"] == 1
+        assert mid["sync"]["continued_batches"] == 0
+        assert len(launched) == 2
+        assert mid["batch"]["batch_index"] == 1
+        assert mid["batch"]["active"] is True
+
+        # Once Skill finishes too, batch 2 for the remaining run q3 launches automatically.
+        (batch1_dir / "skill-results.json").write_text(
+            json.dumps({
+                "mode": "skill",
+                "results": [
+                    {
+                        "review_result_id": q1,
+                        "source_hash": source_hash,
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                    {
+                        "review_result_id": q2,
+                        "source_hash": source_hash,
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        step2 = local_client.get(f"/api/copilot-review-status?workspace={workspace_id}").json()
+        assert step2["sync"]["imported_rounds"] == 1
+        assert step2["sync"]["continued_batches"] == 1
+        assert len(launched) == 4
+        assert step2["batch"]["batch_index"] == 2
+        assert step2["batch"]["run_count"] == 1
+        assert step2["batch"]["remaining_runs"] == 0
+        assert step2["batch"]["completed_runs_total"] == 2
+        assert step2["batch"]["rejected_runs_total"] == 1
+        assert step2["batch"]["active"] is True
+
+        batch2_task = json.loads(launched[2][2].read_text(encoding="utf-8"))
+        batch2_dir = launched[2][2].parent
+        assert [item["review_result_id"] for item in batch2_task["runs"]] == [q3]
+
+        for mode_name in ("open", "skill"):
+            (batch2_dir / f"{mode_name}-results.json").write_text(
+                json.dumps({
+                    "mode": mode_name,
+                    "results": [{
+                        "review_result_id": q3,
+                        "source_hash": source_hash,
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    }],
+                }),
+                encoding="utf-8",
+            )
+        done = local_client.get(f"/api/copilot-review-status?workspace={workspace_id}").json()
+        assert done["sync"]["imported_rounds"] == 2
+        assert done["sync"]["continued_batches"] == 0
+        assert len(launched) == 4
+        assert done["batch"]["active"] is False
+        assert done["batch"]["continuation_state"] == "completed"
+        assert done["batch"]["completed_runs_total"] == 3
+        assert done["batch"]["rejected_runs_total"] == 1
+        assert copilot_review.has_pending_copilot_batches() is False
+
+        final_dash = local_client.get(f"/?workspace={workspace_id}")
+        assert final_dash.status_code == 200
+        assert "自动连续复核已完成（共 2 批，累计 3 条 Run，1 条转不合格）" in final_dash.text
+        assert "当前待审：0 条" in final_dash.text
+
+
+def test_copilot_auto_continue_stops_on_launch_failure_or_cancel(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from app.services import copilot_review
+
+    _, engine = client_and_engine
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-stop")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    q1 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=201)
+    _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=202)
+
+    launched_modes: list[str] = []
+
+    def flaky_launcher(code_bin, instr, task, mode):
+        launched_modes.append(mode)
+        if mode == "skill":
+            raise RuntimeError("VS Code window closed")
+
+    with Session(engine) as db:
+        workspace = db.get(Workspace, workspace_id)
+        assert workspace is not None
+        manifest = copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            1,
+            modes=("skill", "open"),
+            auto_continue=True,
+            launcher=flaky_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        batch_dir = Path(manifest["task_path"]).parent
+        task_data = json.loads(Path(manifest["task_path"]).read_text(encoding="utf-8"))
+        source_hash = task_data["runs"][0]["source_hash"]
+        assert task_data["runs"][0]["review_result_id"] == q1
+
+        # Open finishes, but Skill failed to launch -> must stop auto-continuation.
+        (batch_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [{
+                    "review_result_id": q1,
+                    "source_hash": source_hash,
+                    "outcome": {"verdict": "qualified", "findings": []},
+                }],
+            }),
+            encoding="utf-8",
+        )
+        summary = copilot_review.sync_pending_copilot_batches(
+            db,
+            workspace_id,
+            launcher=flaky_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        assert summary["imported_rounds"] == 1
+        assert summary["continued_batches"] == 0
+        assert launched_modes == ["skill", "open"]
+
+        batch_state = copilot_review.latest_copilot_batch(workspace_id)
+        assert batch_state is not None
+        assert batch_state["active"] is False
+        assert batch_state["continuation_state"] == "stopped"
+        assert "未成功导入" in batch_state["continuation_error"]
+        assert copilot_review.has_pending_copilot_batches() is False
+
+        # Start a new auto-continue batch for Open only, then cancel before writing results.
+        launched_modes.clear()
+        manifest2 = copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            1,
+            modes=("open",),
+            auto_continue=True,
+            launcher=lambda c, i, t, m: launched_modes.append(m),
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        assert copilot_review.cancel_copilot_batch(workspace_id, manifest2["batch_id"]) is True
+        batch2_dir = Path(manifest2["task_path"]).parent
+        task2_data = json.loads(Path(manifest2["task_path"]).read_text(encoding="utf-8"))
+        (batch2_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [{
+                    "review_result_id": task2_data["runs"][0]["review_result_id"],
+                    "source_hash": task2_data["runs"][0]["source_hash"],
+                    "outcome": {"verdict": "qualified", "findings": []},
+                }],
+            }),
+            encoding="utf-8",
+        )
+        summary2 = copilot_review.sync_pending_copilot_batches(
+            db,
+            workspace_id,
+            launcher=lambda c, i, t, m: launched_modes.append(m),
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        assert summary2["imported_rounds"] == 0
+        assert summary2["continued_batches"] == 0
+        assert launched_modes == ["open"]
 
 
 def test_generic_answers_are_sent_back_with_the_draft(client_and_engine) -> None:

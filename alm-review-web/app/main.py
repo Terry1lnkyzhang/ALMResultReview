@@ -11,6 +11,10 @@ from fastapi.staticfiles import StaticFiles
 from app.config import PROJECT_DIR, get_settings
 from app.database import Base, SessionLocal, engine
 from app.migrations import ensure_compatible_schema
+from app.services.copilot_review import (
+    has_pending_copilot_batches,
+    sync_pending_copilot_batches,
+)
 from app.services.defaults import ensure_defaults
 from app.services.review_policy import (
     adopt_legacy_workspace_policies,
@@ -48,6 +52,34 @@ async def _poll_scheduled_location_changes(interval_seconds: int) -> None:
             await asyncio.to_thread(_apply_due_location_schedules)
         except Exception as exc:
             logger.warning("Scheduled test-location poll failed: %s", exc)
+
+
+def _sync_copilot_batches() -> None:
+    if not has_pending_copilot_batches():
+        return
+    with SessionLocal() as db:
+        try:
+            summary = sync_pending_copilot_batches(db)
+            if summary["imported_rounds"] or summary.get("continued_batches"):
+                logger.info(
+                    "Auto-imported Copilot rounds=%s runs=%s rejected=%s continued_batches=%s",
+                    summary["imported_rounds"],
+                    summary["imported_runs"],
+                    summary["rejected_runs"],
+                    summary.get("continued_batches", 0),
+                )
+        except Exception:
+            db.rollback()
+            raise
+
+
+async def _poll_copilot_review_batches(interval_seconds: int = 3) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await asyncio.to_thread(_sync_copilot_batches)
+        except Exception as exc:
+            logger.warning("Copilot result auto-import poll failed: %s", exc)
 
 
 @asynccontextmanager
@@ -88,9 +120,13 @@ async def lifespan(application: FastAPI):
         if scheduler is None and settings.location_schedule_poll_seconds > 0
         else None
     )
+    copilot_poll_task = asyncio.create_task(_poll_copilot_review_batches(3))
     try:
         yield
     finally:
+        copilot_poll_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await copilot_poll_task
         if schedule_task is not None:
             schedule_task.cancel()
             with suppress(asyncio.CancelledError):
