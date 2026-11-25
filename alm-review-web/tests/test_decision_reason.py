@@ -776,6 +776,326 @@ def test_copilot_auto_continue_stops_on_launch_failure_or_cancel(
         assert launched_modes == ["open"]
 
 
+def test_copilot_includes_all_manually_confirmed_qualified_and_supports_reoverride(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from app.services import copilot_review
+    from app.services.manual_decisions import current_review, save_manual_decision
+    from app.services.review_status import is_force_qualified
+
+    client, engine = client_and_engine
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_role", "combined")
+    monkeypatch.setattr(settings, "web_auth_enabled", False)
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+    monkeypatch.setattr("app.web.find_vscode_cli", lambda: "code.cmd")
+
+    launched: list[tuple[str, Path, Path, str]] = []
+    real_launch = copilot_review.launch_local_copilot_batch
+    real_sync = copilot_review.sync_pending_copilot_batches
+
+    def sync_launcher(code_bin, instr, task, mode):
+        launched.append((code_bin, instr, task, mode))
+
+    def fake_launch(db, workspace, limit, *, modes=("skill", "open"), **kwargs):
+        return real_launch(
+            db,
+            workspace,
+            limit,
+            modes=modes,
+            auto_continue=kwargs.get("auto_continue", False),
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+
+    def fake_sync(db, workspace_id=None, **kwargs):
+        return real_sync(
+            db,
+            workspace_id,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("app.web.launch_local_copilot_batch", fake_launch)
+    monkeypatch.setattr("app.web.sync_pending_copilot_batches", fake_sync)
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-manual-copilot")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    # 1. override_qualified (from unqualified)
+    r_override = _prepare_run(engine, "unqualified", workspace_id=workspace_id, run_id=301)
+    # 2. confirmed_qualified (from needs_manual_review)
+    r_confirmed = _prepare_run(
+        engine, "needs_manual_review", workspace_id=workspace_id, run_id=302
+    )
+    # 3. confirmed_warning_qualified (from qualified with warning)
+    r_warning = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=303)
+    # 4. confirmed_unqualified (must stay excluded)
+    _prepare_run(engine, "needs_manual_review", workspace_id=workspace_id, run_id=304)
+
+    with Session(engine) as db:
+        m1 = save_manual_decision(
+            db,
+            db.get(AlmRun, 301),
+            "override_qualified",
+            "op1",
+            "[步骤 1, 3 · 设备追溯] CHESS-CAST-20006 是 Bay 编号，不是设备",
+        )
+        m1.items_json = json.dumps(
+            [{
+                "kind": "manual",
+                "type": "equipment",
+                "label": "设备追溯",
+                "steps": [1, 3],
+                "step_label": "步骤 1, 3",
+                "ai_summary": EQUIPMENT_SUMMARY,
+                "explanation": "CHESS-CAST-20006 是 Bay 编号，不是设备",
+            }],
+            ensure_ascii=False,
+        )
+        save_manual_decision(
+            db,
+            db.get(AlmRun, 302),
+            "confirmed_qualified",
+            "op2",
+            "图片证据已核对与步骤一致",
+        )
+        save_manual_decision(
+            db,
+            db.get(AlmRun, 303),
+            "confirmed_warning_qualified",
+            "op3",
+            "已在 ALM 修正拼写错误",
+        )
+        save_manual_decision(
+            db,
+            db.get(AlmRun, 304),
+            "confirmed_unqualified",
+            "op4",
+            "确认存在真实缺陷",
+        )
+        db.commit()
+
+    with TestClient(
+        client.app, follow_redirects=False, client=("127.0.0.1", 50000)
+    ) as local_client:
+        dash = local_client.get(f"/?workspace={workspace_id}")
+        assert dash.status_code == 200
+        assert "当前待审：3 条" in dash.text
+
+        started = local_client.post(
+            f"/workspaces/{workspace_id}/copilot-review/launch",
+            data={"limit": "10", "mode": "both", "scope": "all", "return_status": "all"},
+        )
+        assert started.status_code == 303
+        assert len(launched) == 2
+
+        task_data = json.loads(launched[0][2].read_text(encoding="utf-8"))
+        assert [item["review_result_id"] for item in task_data["runs"]] == [
+            r_override,
+            r_confirmed,
+            r_warning,
+        ]
+        # Verify manual_qualification payload and instructions are attached.
+        mq_override = task_data["runs"][0]["manual_qualification"]
+        assert mq_override is not None
+        assert mq_override["decision"] == "override_qualified"
+        assert mq_override["original_ai_verdict"] == "unqualified"
+        assert "Bay 编号" in mq_override["reason"]
+        assert len(mq_override["resolved_items"]) == 1
+        assert task_data["runs"][1]["manual_qualification"]["decision"] == "confirmed_qualified"
+        assert (
+            task_data["runs"][2]["manual_qualification"]["decision"]
+            == "confirmed_warning_qualified"
+        )
+        for _, instr_path, _, _ in launched:
+            assert "manual_qualification" in instr_path.read_text(encoding="utf-8")
+
+        batch_dir = launched[0][2].parent
+        hashes = {item["review_result_id"]: item["source_hash"] for item in task_data["runs"]}
+
+        # Open rejects run 301 (override_qualified) and 302 (confirmed_qualified),
+        # and passes 303 (confirmed_warning_qualified).
+        (batch_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [
+                    {
+                        "review_result_id": r_override,
+                        "source_hash": hashes[r_override],
+                        "outcome": {
+                            "verdict": "unqualified",
+                            "findings": [{
+                                "location": "Step 2",
+                                "summary": "算术差值错误",
+                                "evidence": "3.4 - 3.3 != 0.5",
+                            }],
+                        },
+                    },
+                    {
+                        "review_result_id": r_confirmed,
+                        "source_hash": hashes[r_confirmed],
+                        "outcome": {
+                            "verdict": "unqualified",
+                            "findings": [{
+                                "location": "Step 1",
+                                "summary": "缺少关键读数记录",
+                                "evidence": "Actual omitted temperature reading",
+                            }],
+                        },
+                    },
+                    {
+                        "review_result_id": r_warning,
+                        "source_hash": hashes[r_warning],
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        # Skill also imports cleanly on the same batch even though Open disputed 301/302.
+        (batch_dir / "skill-results.json").write_text(
+            json.dumps({
+                "mode": "skill",
+                "results": [
+                    {
+                        "review_result_id": r_override,
+                        "source_hash": hashes[r_override],
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                    {
+                        "review_result_id": r_confirmed,
+                        "source_hash": hashes[r_confirmed],
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                    {
+                        "review_result_id": r_warning,
+                        "source_hash": hashes[r_warning],
+                        "outcome": {"verdict": "qualified", "findings": []},
+                    },
+                ],
+            }),
+            encoding="utf-8",
+        )
+        sync_resp = local_client.get(
+            f"/api/copilot-review-status?workspace={workspace_id}"
+        ).json()
+        assert sync_resp["sync"]["imported_rounds"] == 2
+        assert sync_resp["sync"]["rejected_runs"] == 0
+        assert sync_resp["sync"]["manual_review_runs"] == 2
+        assert sync_resp["batch"]["continuation_state"] == "completed"
+        assert sync_resp["batch"]["manual_review_runs_total"] == 2
+
+        with Session(engine) as db:
+            rev301 = current_review(db, db.get(AlmRun, 301))
+            rev302 = current_review(db, db.get(AlmRun, 302))
+            rev303 = current_review(db, db.get(AlmRun, 303))
+            # Manually confirmed qualified runs disputed by Copilot move to Manual review first.
+            assert rev301.final_status == "needs_manual_review"
+            assert rev301.copilot_rejected is True
+            assert rev301.copilot_disputed_manual is True
+            assert is_force_qualified(rev301) is False
+            assert rev302.final_status == "needs_manual_review"
+            assert rev302.copilot_disputed_manual is True
+            assert is_force_qualified(rev302) is False
+            assert rev303.final_status == "qualified" and is_force_qualified(rev303)
+
+        # Dashboard Manual review view shows disputed runs with the Copilot badge;
+        # Unqualified view does NOT include them yet.
+        mr_dash = local_client.get(
+            f"/?workspace={workspace_id}&status=needs_manual_review"
+        )
+        assert mr_dash.status_code == 200
+        assert "#301" in mr_dash.text
+        assert "#302" in mr_dash.text
+        assert "Copilot 质疑" in mr_dash.text
+        assert "查看需人工复核" in mr_dash.text
+        assert "2 条转人工复核" in mr_dash.text
+
+        unq_before = local_client.get(
+            f"/?workspace={workspace_id}&status=unqualified"
+        )
+        assert unq_before.status_code == 200
+        assert "#301" not in unq_before.text
+        assert "#302" not in unq_before.text
+
+        # Detail page for disputed 301 offers both confirmed_qualified and confirmed_unqualified,
+        # and asks only for the new Copilot finding (not the old first-pass AI findings).
+        detail_disputed = local_client.get("/runs/301")
+        assert detail_disputed.status_code == 200
+        assert "原人工确认合格记录（待复核）" in detail_disputed.text
+        assert "复核 Copilot 异议" in detail_disputed.text
+        assert 'value="confirmed_qualified"' in detail_disputed.text
+        assert 'value="confirmed_unqualified"' in detail_disputed.text
+        assert detail_disputed.text.count('name="explanation"') == 1
+        assert "Step 2: 算术差值错误" in detail_disputed.text
+
+        # Branch A (run 301): operator rejects Copilot finding -> restores to
+        # Qualified AND Manually confirmed qualified (force_qualified).
+        reconfirm = local_client.post(
+            "/runs/301/manual-decision",
+            data={
+                "decision": "confirmed_qualified",
+                "review_result_id": str(r_override),
+                "explanation": ["经复核 Step 2 差值为四舍五入单位换算导致，实测值满足容差"],
+            },
+        )
+        assert reconfirm.status_code == 303
+        with Session(engine) as db:
+            rev301_after = current_review(db, db.get(AlmRun, 301))
+            assert rev301_after.final_status == "qualified"
+            assert rev301_after.copilot_rejected is False
+            assert rev301_after.copilot_disputed_manual is False
+            assert is_force_qualified(rev301_after) is True
+
+        # Branch B (run 302): operator agrees with Copilot finding -> moves into Unqualified.
+        agree_unq = local_client.post(
+            "/runs/302/manual-decision",
+            data={
+                "decision": "confirmed_unqualified",
+                "review_result_id": str(r_confirmed),
+                "reason": "同意 Copilot 复核意见，Step 1 确实漏记温度读数",
+            },
+        )
+        assert agree_unq.status_code == 303
+        with Session(engine) as db:
+            rev302_after = current_review(db, db.get(AlmRun, 302))
+            assert rev302_after.final_status == "unqualified"
+            assert rev302_after.copilot_rejected is False
+            assert rev302_after.copilot_disputed_manual is False
+            assert is_force_qualified(rev302_after) is False
+
+        # Dashboard Manually confirmed qualified includes 301 and 303, not 302.
+        fq_dash = local_client.get(
+            f"/?workspace={workspace_id}&status=force_qualified"
+        )
+        assert fq_dash.status_code == 200
+        assert "#301" in fq_dash.text
+        assert "#302" not in fq_dash.text
+        assert "#303" in fq_dash.text
+
+        # Dashboard Unqualified now includes 302 (agreed by operator).
+        unq_after = local_client.get(
+            f"/?workspace={workspace_id}&status=unqualified"
+        )
+        assert unq_after.status_code == 200
+        assert "#302" in unq_after.text
+
+        # Detail page for 301 shows latest manual decision and preserves the earlier one.
+        detail_restored = local_client.get("/runs/301")
+        assert detail_restored.status_code == 200
+        assert "更早的人工裁决（1 条）" in detail_restored.text
+        assert "四舍五入单位换算" in detail_restored.text
+        assert "Bay 编号" in detail_restored.text
+
+
 def test_generic_answers_are_sent_back_with_the_draft(client_and_engine) -> None:
     client, engine = client_and_engine
     result_id = _prepare_run(engine)

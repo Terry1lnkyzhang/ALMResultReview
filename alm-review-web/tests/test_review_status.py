@@ -188,6 +188,89 @@ def test_copilot_import_keeps_both_rounds_and_rejects_stale_results() -> None:
             apply_copilot_report(db, run.workspace_id, open_report)
 
 
+@pytest.mark.parametrize(
+    ("first_verdict", "manual_decision_kind", "followup_decision", "expected_final", "expected_force"),
+    [
+        ("unqualified", "override_qualified", "confirmed_qualified", "qualified", True),
+        ("needs_manual_review", "confirmed_qualified", "confirmed_qualified", "qualified", True),
+        ("qualified", "confirmed_warning_qualified", "confirmed_qualified", "qualified", True),
+        ("unqualified", "override_qualified", "confirmed_unqualified", "unqualified", False),
+        ("needs_manual_review", "confirmed_qualified", "confirmed_unqualified", "unqualified", False),
+    ],
+)
+def test_copilot_dispute_moves_manual_qualified_to_manual_review_until_operator_decides(
+    first_verdict: str,
+    manual_decision_kind: str,
+    followup_decision: str,
+    expected_final: str,
+    expected_force: bool,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        run = prepare_run(db, first_verdict)
+        primary = current_review(db, run).result
+        assert primary is not None
+        if manual_decision_kind == "confirmed_warning_qualified":
+            primary.warnings_json = json.dumps([{"step": 1, "summary": "Typo"}])
+            db.commit()
+
+        save_manual_decision(
+            db, run, manual_decision_kind, "op1", "Reviewed first-pass issue"
+        )
+        before = current_review(db, run)
+        assert before.final_status == "qualified"
+        assert is_force_qualified(before) is True
+
+        report = CopilotRoundReport.model_validate({
+            "mode": "open",
+            "results": [{
+                "review_result_id": primary.id,
+                "source_hash": primary.source_hash,
+                "outcome": {
+                    "verdict": "unqualified",
+                    "findings": [{
+                        "location": "Step 1",
+                        "summary": "New defect found by Copilot",
+                        "evidence": "Recorded mismatch",
+                    }],
+                },
+            }],
+        })
+        assert apply_copilot_report(db, run.workspace_id, report) == 1
+        db.commit()
+
+        policy_key = primary.review_policy_key
+        disputed_detail = current_review(db, run)
+        disputed_list = current_reviews(db, [run], policy_key)[run.run_id]
+        for rev in (disputed_detail, disputed_list):
+            assert rev.final_status == "needs_manual_review"
+            assert rev.copilot_rejected is True
+            assert rev.copilot_disputed_manual is True
+            assert is_force_qualified(rev) is False
+            assert allowed_manual_decisions(rev) == {
+                "confirmed_qualified",
+                "confirmed_unqualified",
+            }
+
+        # Follow-up decision settles the dispute (either back to force_qualified or into unqualified).
+        save_manual_decision(
+            db, run, followup_decision, "op2", "Reviewed Copilot finding"
+        )
+        # Idempotent re-import must not re-open the dispute after operator decision.
+        assert apply_copilot_report(db, run.workspace_id, report) == 0
+        db.commit()
+
+        final_detail = current_review(db, run)
+        final_list = current_reviews(db, [run], policy_key)[run.run_id]
+        for rev in (final_detail, final_list):
+            assert rev.final_status == expected_final
+            assert rev.copilot_rejected is False
+            assert rev.copilot_disputed_manual is False
+            assert is_force_qualified(rev) is expected_force
+            assert allowed_manual_decisions(rev) == frozenset()
+
+
 def test_old_manual_qualification_is_explained_but_not_applied_to_new_revision() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

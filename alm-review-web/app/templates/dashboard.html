@@ -376,7 +376,7 @@
         <input type="hidden" name="return_status" value="{{ selected_status }}">
         <div class="copilot-launch-title">
           <strong>Copilot 二审</strong>
-          <small>仅针对当前一审 Qualified 的 Run；发现问题直接转入 Unqualified{% if copilot_eligible_counts is not none %} &middot; 当前待审：{% if copilot_eligible_counts.both == copilot_eligible_counts.skill and copilot_eligible_counts.both == copilot_eligible_counts.open %}{{ copilot_eligible_counts.both }} 条{% else %}两轮共 {{ copilot_eligible_counts.both }} 条（Skill {{ copilot_eligible_counts.skill }} / Open {{ copilot_eligible_counts.open }}）{% endif %}{% endif %}</small>
+          <small>针对当前 Qualified（不通过转 Unqualified）与 Manually confirmed qualified（不通过先转 Manual review）{% if copilot_eligible_counts is not none %} &middot; 当前待审：{% if copilot_eligible_counts.both == copilot_eligible_counts.skill and copilot_eligible_counts.both == copilot_eligible_counts.open %}{{ copilot_eligible_counts.both }} 条{% else %}两轮共 {{ copilot_eligible_counts.both }} 条（Skill {{ copilot_eligible_counts.skill }} / Open {{ copilot_eligible_counts.open }}）{% endif %}{% endif %}</small>
         </div>
         <label><span>每批数量</span><input type="number" name="limit" min="1" max="25" value="10" required></label>
         <label><span>复核轮次</span><select name="mode"><option value="both" selected>Skill + Open 两轮</option><option value="skill">仅 Skill 轮</option><option value="open">仅 Open 轮</option></select></label>
@@ -385,15 +385,15 @@
       </form>
       {% endif %}
       {% if copilot_batch %}
-      <div class="copilot-batch-status" data-copilot-batch data-workspace-id="{{ current_workspace.id }}" data-batch-active="{{ '1' if copilot_batch.active else '0' }}" data-batch-signature="{{ copilot_batch.batch_id }}|{{ copilot_batch.continuation_state }}|{{ '1' if copilot_batch.active else '0' }}|{% for mode_key, state in copilot_batch.modes.items()|sort %}{% if not loop.first %},{% endif %}{{ mode_key }}:{{ state.status }}:{{ state.imported }}:{{ state.rejected }}{% endfor %}">
+      <div class="copilot-batch-status" data-copilot-batch data-workspace-id="{{ current_workspace.id }}" data-batch-active="{{ '1' if copilot_batch.active else '0' }}" data-batch-signature="{{ copilot_batch.batch_id }}|{{ copilot_batch.continuation_state }}|{{ '1' if copilot_batch.active else '0' }}|{% for mode_key, state in copilot_batch.modes.items()|sort %}{% if not loop.first %},{% endif %}{{ mode_key }}:{{ state.status }}:{{ state.imported }}:{{ state.rejected }}:{{ state.manual_review }}{% endfor %}">
         <div class="copilot-batch-summary">
           {% if copilot_batch.auto_continue %}
             {% if copilot_batch.continuation_state == 'completed' %}
-            <strong>自动连续复核已完成（共 {{ copilot_batch.batch_index }} 批，累计 {{ copilot_batch.completed_runs_total }} 条 Run{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}）</strong>
+            <strong>自动连续复核已完成（共 {{ copilot_batch.batch_index }} 批，累计 {{ copilot_batch.completed_runs_total }} 条 Run{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}{% if copilot_batch.manual_review_runs_total %}，{{ copilot_batch.manual_review_runs_total }} 条转人工复核{% endif %}）</strong>
             {% elif copilot_batch.continuation_state == 'stopped' %}
             <strong>自动连续复核已暂停（第 {{ copilot_batch.batch_index }} 批，本批 {{ copilot_batch.run_count }} 条）</strong>
             {% else %}
-            <strong>自动连续复核 &middot; 第 {{ copilot_batch.batch_index }} 批（本批 {{ copilot_batch.run_count }} 条{% if copilot_batch.remaining_runs > 0 %}，后续约 {{ copilot_batch.remaining_runs }} 条{% endif %}{% if copilot_batch.completed_runs_total > 0 %}；已累计完成 {{ copilot_batch.completed_runs_total }} 条{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}{% endif %}）</strong>
+            <strong>自动连续复核 &middot; 第 {{ copilot_batch.batch_index }} 批（本批 {{ copilot_batch.run_count }} 条{% if copilot_batch.remaining_runs > 0 %}，后续约 {{ copilot_batch.remaining_runs }} 条{% endif %}{% if copilot_batch.completed_runs_total > 0 %}；已累计完成 {{ copilot_batch.completed_runs_total }} 条{% if copilot_batch.rejected_runs_total %}，{{ copilot_batch.rejected_runs_total }} 条转不合格{% endif %}{% if copilot_batch.manual_review_runs_total %}，{{ copilot_batch.manual_review_runs_total }} 条转人工复核{% endif %}{% endif %}）</strong>
             {% endif %}
           {% else %}
           <strong>最近批次（{{ copilot_batch.run_count }} 条 Run）</strong>
@@ -401,9 +401,12 @@
           <div class="copilot-round-badges" data-copilot-rounds>
             {% for mode_key, state in copilot_batch.modes.items() %}
             <span class="copilot-badge copilot-badge-{{ state.status }}">
-              {{ state.label }}：{% if state.status == 'launching' %}正在打开 VS Code...{% elif state.status == 'pending' %}复核中（写完自动导入）{% elif state.status == 'imported' %}已导入 {{ state.imported }} 条{% if state.rejected %}（{{ state.rejected }} 条转不合格）{% endif %}{% elif state.status == 'launch_failed' %}启动失败：{{ state.error }}{% else %}导入异常：{{ state.error }}{% endif %}
+              {{ state.label }}：{% if state.status == 'launching' %}正在打开 VS Code...{% elif state.status == 'pending' %}复核中（写完自动导入）{% elif state.status == 'imported' %}已导入 {{ state.imported }} 条{% if state.rejected or state.manual_review %}（{% if state.rejected %}{{ state.rejected }} 条转不合格{% endif %}{% if state.rejected and state.manual_review %} · {% endif %}{% if state.manual_review %}{{ state.manual_review }} 条转人工复核{% endif %}）{% endif %}{% elif state.status == 'launch_failed' %}启动失败：{{ state.error }}{% else %}导入异常：{{ state.error }}{% endif %}
             </span>
             {% endfor %}
+            {% if copilot_batch.manual_review_runs_total or (copilot_batch.modes.values()|selectattr('manual_review', 'gt', 0)|list) %}
+            <a class="copilot-badge copilot-badge-review-link" href="/?workspace={{ current_workspace.id }}&amp;status=needs_manual_review">查看需人工复核</a>
+            {% endif %}
             {% if copilot_batch.continuation_error %}
             <span class="copilot-badge copilot-badge-error">续跑已停：{{ copilot_batch.continuation_error }}</span>
             {% endif %}
@@ -427,7 +430,7 @@
             if (!batch) return "";
             const modeSig = Object.entries(batch.modes || {})
               .sort(([a], [b]) => a.localeCompare(b))
-              .map(([k, v]) => `${k}:${v.status}:${v.imported}:${v.rejected}`)
+              .map(([k, v]) => `${k}:${v.status}:${v.imported}:${v.rejected}:${v.manual_review || 0}`)
               .join(",");
             return `${batch.batch_id}|${batch.continuation_state || ""}|${batch.active ? "1" : "0"}|${modeSig}`;
           }
@@ -514,7 +517,7 @@
             <td>{{ item.actual_tester_label }}</td>
             <td>{{ item.test_owner_label }}</td>
             <td><span class="alm-status">{{ item.run.run_status }}</span></td>
-            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
+            <td><span class="status status-{{ item.final_status }}">{{ item.status_label }}</span>{% if item.copilot_disputed_manual %}<span class="copilot-dispute-badge">Copilot 质疑</span>{% endif %}{% if item.temporary_evidence_used %}<span class="temporary-evidence-badge">Temporary evidence</span>{% endif %}</td>
             <td class="review-summary-cell">{% if item.review_summary %}<a href="/runs/{{ item.run.run_id }}">{{ item.review_summary }}</a>{% elif item.review.result %}<a href="/runs/{{ item.run.run_id }}">No issue summary</a>{% else %}<span>Awaiting review</span>{% endif %}</td>
             <td>{{ item.execution_at.strftime('%Y-%m-%d %H:%M') if item.execution_at else '-' }}</td>
           </tr>

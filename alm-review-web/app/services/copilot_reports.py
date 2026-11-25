@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveInt,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 CopilotMode = Literal["skill", "open"]
 COPILOT_LABELS: dict[CopilotMode, str] = {"skill": "Copilot Skill", "open": "Copilot Open"}
 MAX_COPILOT_BATCH = 25
+
+
+def normalize_utc_naive(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
 
 
 class CopilotFinding(BaseModel):
@@ -33,6 +50,25 @@ class CopilotOutcome(BaseModel):
         if self.verdict is None and not self.limitations:
             raise ValueError("An incomplete review must state its limitation.")
         return self
+
+
+class StoredCopilotOutcome(CopilotOutcome):
+    """Persisted Copilot outcome with import provenance for manual-override ordering."""
+
+    recorded_at: datetime | None = None
+    baseline_manual_decision_id: int | None = None
+
+    @field_validator("recorded_at", mode="after")
+    @classmethod
+    def _normalize_recorded_at(cls, value: datetime | None) -> datetime | None:
+        return normalize_utc_naive(value)
+
+    def same_outcome(self, other: CopilotOutcome) -> bool:
+        return (
+            self.verdict == other.verdict
+            and self.findings == other.findings
+            and self.limitations == other.limitations
+        )
 
 
 class CopilotRunReport(BaseModel):
@@ -61,15 +97,58 @@ class CopilotRoundReport(BaseModel):
         return self
 
 
-_REPORTS = TypeAdapter(dict[CopilotMode, CopilotOutcome])
+_REPORTS = TypeAdapter(dict[CopilotMode, StoredCopilotOutcome])
 
 
-def load_copilot_reports(raw: str | None) -> dict[CopilotMode, CopilotOutcome]:
+def load_copilot_reports(raw: str | None) -> dict[CopilotMode, StoredCopilotOutcome]:
     return _REPORTS.validate_json(raw) if raw else {}
 
 
-def dump_copilot_reports(reports: dict[CopilotMode, CopilotOutcome]) -> str:
-    return _REPORTS.dump_json(reports).decode("utf-8")
+def dump_copilot_reports(reports: Mapping[CopilotMode, CopilotOutcome]) -> str:
+    stored = {
+        mode: (
+            outcome
+            if isinstance(outcome, StoredCopilotOutcome)
+            else StoredCopilotOutcome(
+                verdict=outcome.verdict,
+                findings=outcome.findings,
+                limitations=outcome.limitations,
+            )
+        )
+        for mode, outcome in reports.items()
+    }
+    return _REPORTS.dump_json(stored).decode("utf-8")
+
+
+def copilot_rejection_active(
+    report: CopilotOutcome,
+    *,
+    manual_decision_id: int | None = None,
+    manual_decision_at: datetime | None = None,
+    has_manual_decision: bool = False,
+) -> bool:
+    if report.verdict != "unqualified":
+        return False
+    if not has_manual_decision:
+        return True
+    baseline_id = (
+        report.baseline_manual_decision_id
+        if isinstance(report, StoredCopilotOutcome)
+        else None
+    )
+    if baseline_id is not None:
+        if manual_decision_id is not None:
+            return manual_decision_id <= baseline_id
+        return True
+    recorded_at = (
+        normalize_utc_naive(report.recorded_at)
+        if isinstance(report, StoredCopilotOutcome)
+        else None
+    )
+    manual_at = normalize_utc_naive(manual_decision_at)
+    if recorded_at is not None and manual_at is not None:
+        return manual_at < recorded_at
+    return False
 
 
 def copilot_findings(

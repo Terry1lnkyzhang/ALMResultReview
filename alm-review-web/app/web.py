@@ -106,6 +106,7 @@ from app.services.review_status import (
 from app.services.manual_decisions import (
     FORCE_QUALIFIED_DECISIONS,
     CurrentReview,
+    active_copilot_findings,
     allowed_manual_decisions,
     current_review,
     revoke_manual_decision,
@@ -364,7 +365,10 @@ def _run_view(
     if review is None:
         review = current_review(db, run, policy_key)
     summary = review.result.issue_summary if review.result else ""
-    first_finding = next(copilot_findings(review.copilot_reports), None)
+    first_finding = (
+        next(active_copilot_findings(review.copilot_reports, review.manual_decision), None)
+        or next(copilot_findings(review.copilot_reports), None)
+    )
     if first_finding is not None:
         label, finding = first_finding
         summary = f"{label}: {finding.summary}"
@@ -377,6 +381,7 @@ def _run_view(
         "review_summary": summary,
         "final_status": review.final_status,
         "force_qualified": is_force_qualified(review),
+        "copilot_disputed_manual": review.copilot_disputed_manual,
         "has_warning": review.has_warning,
         "temporary_evidence_used": review.temporary_evidence_used,
         "status_label": STATUS_LABELS[review.final_status],
@@ -2072,8 +2077,12 @@ def _manual_decision_rows(
     failure_detail = _public_job_error(latest_job.error_message if latest_job else None)
     copilot_rows = [
         DecisionRow("fail", label, f"{finding.location}: {finding.summary} ({finding.evidence})")
-        for label, finding in copilot_findings(review.copilot_reports)
+        for label, finding in active_copilot_findings(
+            review.copilot_reports, review.manual_decision
+        )
     ]
+    if review.copilot_disputed_manual and copilot_rows:
+        return copilot_rows
     return decision_rows(review.result, failure_detail or "", extra_blocking=copilot_rows)
 
 
@@ -2163,6 +2172,26 @@ def _run_detail_response(
     manual_decision_at = _to_app_timezone(
         review.manual_decision.created_at if review.manual_decision else None
     )
+    prior_manual_decisions = []
+    if review.manual_decision is not None and run.current_revision_id is not None:
+        all_current_manuals = db.scalars(
+            select(ManualDecision)
+            .where(
+                ManualDecision.run_id == run.run_id,
+                ManualDecision.revision_id == run.current_revision_id,
+                ManualDecision.source_hash == run.source_hash,
+            )
+            .order_by(desc(ManualDecision.created_at), desc(ManualDecision.id))
+        ).all()
+        prior_manual_decisions = [
+            {
+                "decision": item,
+                "decision_at": _to_app_timezone(item.created_at),
+                "reason_items": load_decision_items(item.items_json),
+            }
+            for item in all_current_manuals
+            if item.id != review.manual_decision.id
+        ]
     revision_created_at = {
         revision.id: _to_app_timezone(revision.created_at)
         for revision in revisions
@@ -2246,6 +2275,8 @@ def _run_detail_response(
             ),
             "active_sync_job": active_sync_job,
             "steps": steps,
+            "prior_manual_decisions": prior_manual_decisions,
+            "is_force_qualified": is_force_qualified(review),
             "revisions": revisions,
             "results": results,
             "allowed_decisions": allowed_decisions,

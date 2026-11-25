@@ -5,13 +5,22 @@ persistence or lookup queries never alter `_review_implementation_hash()`.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 from sqlalchemy import case, desc, select
 from sqlalchemy.orm import Session
 
 from app.models import AlmRun, ManualDecision, ReviewJob, ReviewResult
-from app.services.copilot_reports import CopilotMode, CopilotOutcome, load_copilot_reports
+from app.services.copilot_reports import (
+    COPILOT_LABELS,
+    CopilotFinding,
+    CopilotMode,
+    CopilotOutcome,
+    StoredCopilotOutcome,
+    copilot_rejection_active,
+    load_copilot_reports,
+)
 from app.services.review_policy import current_review_policy_key
 
 VALID_MANUAL_DECISIONS = {
@@ -31,10 +40,39 @@ class CurrentReview:
     final_status: str
     has_warning: bool = False
     temporary_evidence_used: bool = False
-    copilot_reports: dict[CopilotMode, CopilotOutcome] = field(default_factory=dict)
+    copilot_reports: dict[CopilotMode, StoredCopilotOutcome] = field(default_factory=dict)
+    copilot_rejected: bool = False
+    copilot_disputed_manual: bool = False
+
+
+def is_copilot_rejection_active(
+    report: CopilotOutcome,
+    manual: ManualDecision | None,
+) -> bool:
+    return copilot_rejection_active(
+        report,
+        manual_decision_id=manual.id if manual is not None else None,
+        manual_decision_at=manual.created_at if manual is not None else None,
+        has_manual_decision=manual is not None,
+    )
+
+
+def active_copilot_findings(
+    reports: Mapping[CopilotMode, CopilotOutcome],
+    manual: ManualDecision | None,
+) -> Iterator[tuple[str, CopilotFinding]]:
+    for mode, label in COPILOT_LABELS.items():
+        report = reports.get(mode)
+        if report is not None and is_copilot_rejection_active(report, manual):
+            for finding in report.findings:
+                yield label, finding
 
 
 def allowed_manual_decisions(review: CurrentReview) -> frozenset[str]:
+    if review.copilot_disputed_manual:
+        return frozenset(VALID_MANUAL_DECISIONS["needs_manual_review"])
+    if review.copilot_rejected:
+        return frozenset(VALID_MANUAL_DECISIONS["unqualified"])
     if review.manual_decision is not None:
         return frozenset()
     if review.result is None:
@@ -70,12 +108,22 @@ def review_from_result(
     has_warning: bool,
 ) -> CurrentReview:
     reports = load_copilot_reports(result.copilot_reviews_json)
-    copilot_rejected = result.verdict == "qualified" and any(
-        report.verdict == "unqualified" for report in reports.values()
+    manual_confirmed_unqualified = (
+        manual is not None and manual.decision == "confirmed_unqualified"
     )
-    if manual and manual.decision in FORCE_QUALIFIED_DECISIONS:
+    copilot_rejected = (
+        not manual_confirmed_unqualified
+        and any(is_copilot_rejection_active(report, manual) for report in reports.values())
+    )
+    manual_is_force_qualified = (
+        manual is not None and manual.decision in FORCE_QUALIFIED_DECISIONS
+    )
+    copilot_disputed_manual = copilot_rejected and manual_is_force_qualified
+    if copilot_disputed_manual:
+        final_status = "needs_manual_review"
+    elif manual_is_force_qualified:
         final_status = "qualified"
-    elif copilot_rejected or (manual and manual.decision == "confirmed_unqualified"):
+    elif copilot_rejected or manual_confirmed_unqualified:
         final_status = "unqualified"
     elif result.verdict in {"qualified", "unqualified"}:
         final_status = result.verdict
@@ -88,6 +136,8 @@ def review_from_result(
         has_unresolved_review_warning(has_warning, manual),
         bool(result.temporary_evidence_used),
         reports,
+        copilot_rejected,
+        copilot_disputed_manual,
     )
 
 

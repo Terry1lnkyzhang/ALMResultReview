@@ -19,22 +19,37 @@ from sqlalchemy.orm import Session, load_only
 
 from app.config import PROJECT_DIR
 from app.hashing import review_payload
-from app.models import AlmRun, EquipmentRegistry, ReviewResult, RunRevision, Workspace
+from app.models import (
+    AlmRun,
+    EquipmentRegistry,
+    ManualDecision,
+    ReviewResult,
+    RunRevision,
+    Workspace,
+    utcnow,
+)
 from app.services.copilot_reports import (
     COPILOT_LABELS,
     MAX_COPILOT_BATCH,
     CopilotMode,
     CopilotRoundReport,
+    StoredCopilotOutcome,
     dump_copilot_reports,
 )
+from app.services.decision_reason import load_decision_items
 from app.services.equipment_review import analyze_equipment_steps
 from app.services.location_review import load_location_assessment
+from app.services.manual_decisions import FORCE_QUALIFIED_DECISIONS
 from app.services.review_policy import current_review_policy_key
 from app.services.review_status import current_reviews
 from app.services.skill_runner import discover_skills, load_skill
 from app.services.workspaces import workspace_evidence_config
 
 logger = logging.getLogger(__name__)
+
+
+class _NoEligibleCopilotRunsError(ValueError):
+    """Raised when a workspace has no eligible Qualified runs left for Copilot review."""
 
 COPILOT_RUNS_DIR = PROJECT_DIR / "logs" / "copilot_runs"
 _SYNC_LOCK = threading.Lock()
@@ -99,20 +114,22 @@ def _normalize_modes(
     return requested_modes
 
 
+def _is_copilot_eligible_review(review: Any, policy_key: str) -> bool:
+    primary = review.result
+    return (
+        primary is not None
+        and primary.review_policy_key == policy_key
+        and review.final_status == "qualified"
+    )
+
+
 def copilot_eligible_counts(
     reviews_by_run: Mapping[Any, Any],
     policy_key: str,
 ) -> dict[str, int]:
     counts = {"both": 0, "skill": 0, "open": 0}
     for review in reviews_by_run.values():
-        primary = review.result
-        if (
-            primary is None
-            or primary.verdict != "qualified"
-            or primary.review_policy_key != policy_key
-            or review.final_status != "qualified"
-            or review.manual_decision is not None
-        ):
+        if not _is_copilot_eligible_review(review, policy_key):
             continue
         missing_skill = "skill" not in review.copilot_reports
         missing_open = "open" not in review.copilot_reports
@@ -129,7 +146,7 @@ def _eligible_copilot_entries(
     db: Session,
     workspace_id: int,
     requested_modes: tuple[CopilotMode, ...],
-) -> tuple[str, list[tuple[AlmRun, ReviewResult, list[CopilotMode]]]]:
+) -> tuple[str, list[tuple[AlmRun, ReviewResult, int | None, list[CopilotMode]]]]:
     policy_key = current_review_policy_key(db, workspace_id)
     runs = list(db.scalars(
         select(AlmRun)
@@ -143,25 +160,48 @@ def _eligible_copilot_entries(
         .order_by(AlmRun.run_id)
     ))
     reviews = current_reviews(db, runs, policy_key)
-    eligible: list[tuple[AlmRun, ReviewResult, list[CopilotMode]]] = []
+    eligible: list[tuple[AlmRun, ReviewResult, int | None, list[CopilotMode]]] = []
     for run in runs:
         review = reviews[run.run_id]
-        primary = review.result
-        if (
-            primary is None
-            or primary.verdict != "qualified"
-            or primary.review_policy_key != policy_key
-            or review.final_status != "qualified"
-            or review.manual_decision is not None
-        ):
+        if not _is_copilot_eligible_review(review, policy_key):
             continue
+        primary = review.result
+        assert primary is not None
         pending_modes = [
             mode for mode in requested_modes if mode not in review.copilot_reports
         ]
         if not pending_modes:
             continue
-        eligible.append((run, primary, pending_modes))
+        manual_id = (
+            review.manual_decision.id
+            if review.manual_decision is not None
+            and review.manual_decision.decision in FORCE_QUALIFIED_DECISIONS
+            else None
+        )
+        eligible.append((run, primary, manual_id, pending_modes))
     return policy_key, eligible
+
+
+def _manual_qualification_context(
+    db: Session,
+    primary: ReviewResult,
+    manual_id: int | None,
+) -> dict[str, Any] | None:
+    if manual_id is None:
+        return None
+    manual = db.get(ManualDecision, manual_id)
+    if manual is None or manual.decision not in FORCE_QUALIFIED_DECISIONS:
+        return None
+    return {
+        "decision": manual.decision,
+        "original_ai_verdict": manual.original_ai_verdict,
+        "first_pass_verdict": primary.verdict,
+        "first_pass_issue_summary": primary.issue_summary or "",
+        "operator": manual.operator,
+        "created_at": manual.created_at.isoformat() if manual.created_at else "",
+        "reason": manual.reason,
+        "resolved_items": load_decision_items(manual.items_json),
+    }
 
 
 def _build_copilot_task_with_total(
@@ -187,7 +227,7 @@ def _build_copilot_task_with_total(
 
     items = []
     skipped_missing_revision = 0
-    for run, primary, pending_modes in eligible:
+    for run, primary, manual_id, pending_modes in eligible:
         revision = db.get(RunRevision, primary.revision_id)
         if revision is None:
             skipped_missing_revision += 1
@@ -220,12 +260,17 @@ def _build_copilot_task_with_total(
             "content": content,
             "location_assessment": location_assessment,
             "equipment_context": equipment_context,
+            "manual_qualification": _manual_qualification_context(
+                db, primary, manual_id
+            ),
         })
         if len(items) >= limit:
             break
 
     if not items:
-        raise ValueError("No eligible first-pass Qualified runs for Copilot review.")
+        raise _NoEligibleCopilotRunsError(
+            "No eligible Qualified runs for Copilot review."
+        )
     evidence = workspace_evidence_config(db, workspace.id)
     skills = [load_skill(skill_id) for skill_id in discover_skills()]
     task = {
@@ -280,13 +325,13 @@ def apply_copilot_report(
         if review.result is not None
     }
     applied = 0
+    recorded_at = utcnow()
     for item in report.results:
         review = active.get(item.review_result_id)
         primary = review.result if review else None
         if (
             review is None
             or primary is None
-            or primary.verdict != "qualified"
             or primary.review_policy_key != policy_key
             or primary.source_hash != item.source_hash
         ):
@@ -294,11 +339,34 @@ def apply_copilot_report(
                 f"Review result {item.review_result_id} is stale or not an eligible Qualified result."
             )
         previous = review.copilot_reports.get(report.mode)
-        if previous == item.outcome:
+        if previous is not None and previous.same_outcome(item.outcome):
             continue
+        eligible_for_import = (
+            primary.verdict == "qualified"
+            or (
+                review.manual_decision is not None
+                and review.manual_decision.decision in FORCE_QUALIFIED_DECISIONS
+            )
+            or bool(review.copilot_reports)
+        )
+        if not eligible_for_import:
+            raise ValueError(
+                f"Review result {item.review_result_id} is stale or not an eligible Qualified result."
+            )
         if previous is not None and previous.verdict is not None:
             raise ValueError(f"Review result {primary.id} already has a {report.mode} verdict.")
-        new_reports = {**review.copilot_reports, report.mode: item.outcome}
+        stored_outcome = StoredCopilotOutcome(
+            verdict=item.outcome.verdict,
+            findings=item.outcome.findings,
+            limitations=item.outcome.limitations,
+            recorded_at=recorded_at,
+            baseline_manual_decision_id=(
+                review.manual_decision.id
+                if review.manual_decision is not None
+                else 0
+            ),
+        )
+        new_reports = {**review.copilot_reports, report.mode: stored_outcome}
         updated = db.execute(
             update(ReviewResult)
             .where(
@@ -347,7 +415,15 @@ def _copilot_round_instructions(mode: CopilotMode, result_path: Path) -> str:
         "(`findings` non-empty); use `\"qualified\"` for a completed review with no "
         "material finding (`findings` empty); use `null` with non-empty `limitations` "
         "when the review cannot be completed.\n"
-        f"6. Write ONLY the UTF-8 JSON result file to `{result_path}` using the file "
+        "6. When a Run has a non-null `manual_qualification`, an operator already "
+        "reviewed the first-pass AI issue(s) and accepted the Run as Manually confirmed "
+        "qualified for the recorded `reason` / `resolved_items`. Do NOT fail the Run "
+        "again merely by repeating an already-resolved first-pass finding covered by "
+        "`manual_qualification`. Instead, check whether the operator's explanation "
+        "contradicts the Run's own recorded text/numbers/context, and independently "
+        "look for any other material defect, calculation error, missing observation, "
+        "or rule violation not covered by `manual_qualification`.\n"
+        f"7. Write ONLY the UTF-8 JSON result file to `{result_path}` using the file "
         "creation tool. Do not modify any other file.\n"
     )
 
@@ -470,19 +546,59 @@ def _manifest_sort_key(manifest_path: Path, manifest: dict[str, Any]) -> tuple[s
     return (created_raw, batch_index, manifest_path.parent.name)
 
 
-def _batch_unique_rejected_count(modes: dict[str, dict[str, Any]]) -> int:
-    rejected_ids: set[int] = set()
+def _batch_unique_mode_id_count(
+    modes: dict[str, dict[str, Any]],
+    id_key: str,
+    count_key: str,
+) -> int:
+    unique_ids: set[int] = set()
     has_id_lists = False
     for state in modes.values():
-        ids = state.get("rejected_result_ids")
+        ids = state.get(id_key)
         if isinstance(ids, list):
             has_id_lists = True
             for item in ids:
                 if isinstance(item, int):
-                    rejected_ids.add(item)
+                    unique_ids.add(item)
     if has_id_lists:
-        return len(rejected_ids)
-    return max((int(state.get("rejected") or 0) for state in modes.values()), default=0)
+        return len(unique_ids)
+    return max((int(state.get(count_key) or 0) for state in modes.values()), default=0)
+
+
+def _classify_copilot_rejections(
+    db: Session,
+    workspace_id: int | None,
+    report: CopilotRoundReport,
+) -> tuple[list[int], list[int]]:
+    unqualified_ids = [
+        item.review_result_id
+        for item in report.results
+        if item.outcome.verdict == "unqualified"
+    ]
+    if not unqualified_ids:
+        return [], []
+    run_ids = select(ReviewResult.run_id).where(ReviewResult.id.in_(unqualified_ids))
+    runs = list(db.scalars(
+        select(AlmRun).where(
+            AlmRun.workspace_id == workspace_id,
+            AlmRun.run_id.in_(run_ids),
+        )
+    ))
+    policy_key = current_review_policy_key(db, workspace_id)
+    active = {
+        review.result.id: review
+        for review in current_reviews(db, runs, policy_key).values()
+        if review.result is not None
+    }
+    rejected_ids: list[int] = []
+    manual_review_ids: list[int] = []
+    for result_id in unqualified_ids:
+        review = active.get(result_id)
+        if review is not None and review.copilot_disputed_manual:
+            manual_review_ids.append(result_id)
+        else:
+            rejected_ids.append(result_id)
+    return rejected_ids, manual_review_ids
 
 
 def _launch_batch_rounds(
@@ -527,6 +643,7 @@ def launch_local_copilot_batch(
     _initial_total_runs: int | None = None,
     _prior_completed_runs: int = 0,
     _prior_rejected_runs: int = 0,
+    _prior_manual_review_runs: int = 0,
 ) -> dict[str, Any]:
     requested_modes = _normalize_modes(modes)
     if _series_id is None:
@@ -550,7 +667,9 @@ def launch_local_copilot_batch(
         if any(mode in run["modes"] for run in task["runs"])
     ]
     if not active_modes:
-        raise ValueError("No eligible first-pass Qualified runs for the selected round.")
+        raise _NoEligibleCopilotRunsError(
+            "No eligible Qualified runs for the selected round."
+        )
 
     batch_id = f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}-{uuid4().hex[:6]}"
     batch_dir = COPILOT_RUNS_DIR / batch_id
@@ -576,6 +695,8 @@ def launch_local_copilot_batch(
             "imported": 0,
             "rejected": 0,
             "rejected_result_ids": [],
+            "manual_review": 0,
+            "manual_review_result_ids": [],
             "error": "",
             "last_checked_mtime": None,
             "completed_at": None,
@@ -603,8 +724,10 @@ def launch_local_copilot_batch(
         "initial_total_runs": initial_total_runs,
         "prior_completed_runs": max(0, int(_prior_completed_runs)),
         "prior_rejected_runs": max(0, int(_prior_rejected_runs)),
+        "prior_manual_review_runs": max(0, int(_prior_manual_review_runs)),
         "completed_runs_total": max(0, int(_prior_completed_runs)),
         "rejected_runs_total": max(0, int(_prior_rejected_runs)),
+        "manual_review_runs_total": max(0, int(_prior_manual_review_runs)),
         "remaining_runs": remaining_runs,
         "continuation_state": "waiting" if auto_continue else "none",
         "next_batch_id": None,
@@ -693,12 +816,20 @@ def _continue_batch_if_ready(
         return False
 
     batch_imported_entries = sum(int(state.get("imported") or 0) for state in modes.values())
-    batch_rejected_unique = _batch_unique_rejected_count(modes)
+    batch_rejected_unique = _batch_unique_mode_id_count(
+        modes, "rejected_result_ids", "rejected"
+    )
+    batch_manual_review_unique = _batch_unique_mode_id_count(
+        modes, "manual_review_result_ids", "manual_review"
+    )
     total_completed_runs = int(manifest.get("prior_completed_runs") or 0) + int(
         manifest.get("run_count") or 0
     )
     total_rejected_runs = (
         int(manifest.get("prior_rejected_runs") or 0) + batch_rejected_unique
+    )
+    total_manual_review_runs = (
+        int(manifest.get("prior_manual_review_runs") or 0) + batch_manual_review_unique
     )
 
     batch_workspace_id = manifest.get("workspace_id")
@@ -714,6 +845,7 @@ def _continue_batch_if_ready(
                 "continuation_state": "stopped",
                 "completed_runs_total": total_completed_runs,
                 "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
                 "continuation_error": "工作区不存在或已归档，已停止自动续跑。",
             },
         )
@@ -731,6 +863,7 @@ def _continue_batch_if_ready(
                 "continuation_state": "completed",
                 "completed_runs_total": total_completed_runs,
                 "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
                 "remaining_runs": 0,
                 "continuation_error": "",
             },
@@ -744,6 +877,7 @@ def _continue_batch_if_ready(
                 "continuation_state": "stopped",
                 "completed_runs_total": total_completed_runs,
                 "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
                 "remaining_runs": len(remaining_entries),
                 "continuation_error": "本批未写入新的复核结果，为避免重复拉起已自动停止续跑。",
             },
@@ -780,30 +914,33 @@ def _continue_batch_if_ready(
             ),
             _prior_completed_runs=total_completed_runs,
             _prior_rejected_runs=total_rejected_runs,
+            _prior_manual_review_runs=total_manual_review_runs,
         )
+    except _NoEligibleCopilotRunsError:
+        _update_manifest_fields(
+            manifest_path,
+            {
+                "continuation_state": "completed",
+                "completed_runs_total": total_completed_runs,
+                "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
+                "remaining_runs": 0,
+                "continuation_error": "",
+            },
+        )
+        return False
     except ValueError as exc:
-        if "No eligible first-pass Qualified runs" in str(exc):
-            _update_manifest_fields(
-                manifest_path,
-                {
-                    "continuation_state": "completed",
-                    "completed_runs_total": total_completed_runs,
-                    "rejected_runs_total": total_rejected_runs,
-                    "remaining_runs": 0,
-                    "continuation_error": "",
-                },
-            )
-        else:
-            _update_manifest_fields(
-                manifest_path,
-                {
-                    "continuation_state": "stopped",
-                    "completed_runs_total": total_completed_runs,
-                    "rejected_runs_total": total_rejected_runs,
-                    "remaining_runs": len(remaining_entries),
-                    "continuation_error": str(exc)[:300],
-                },
-            )
+        _update_manifest_fields(
+            manifest_path,
+            {
+                "continuation_state": "stopped",
+                "completed_runs_total": total_completed_runs,
+                "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
+                "remaining_runs": len(remaining_entries),
+                "continuation_error": str(exc)[:300],
+            },
+        )
         return False
     except Exception as exc:
         logger.warning("Failed to launch next Copilot batch: %s", exc)
@@ -813,6 +950,7 @@ def _continue_batch_if_ready(
                 "continuation_state": "stopped",
                 "completed_runs_total": total_completed_runs,
                 "rejected_runs_total": total_rejected_runs,
+                "manual_review_runs_total": total_manual_review_runs,
                 "remaining_runs": len(remaining_entries),
                 "continuation_error": str(exc)[:300],
             },
@@ -826,6 +964,7 @@ def _continue_batch_if_ready(
             "next_batch_id": next_manifest["batch_id"],
             "completed_runs_total": total_completed_runs,
             "rejected_runs_total": total_rejected_runs,
+            "manual_review_runs_total": total_manual_review_runs,
             "remaining_runs": next_manifest.get("remaining_runs", 0),
             "continuation_error": "",
         },
@@ -846,6 +985,7 @@ def sync_pending_copilot_batches(
         "imported_rounds": 0,
         "imported_runs": 0,
         "rejected_runs": 0,
+        "manual_review_runs": 0,
         "continued_batches": 0,
     }
     with _SYNC_LOCK:
@@ -920,12 +1060,11 @@ def sync_pending_copilot_batches(
                         },
                     )
                 else:
-                    rejected_ids = [
-                        item.review_result_id
-                        for item in report.results
-                        if item.outcome.verdict == "unqualified"
-                    ]
+                    rejected_ids, manual_review_ids = _classify_copilot_rejections(
+                        db, batch_workspace_id, report
+                    )
                     rejected = len(rejected_ids)
+                    manual_review = len(manual_review_ids)
                     _update_mode_state(
                         manifest_path,
                         mode,
@@ -934,6 +1073,8 @@ def sync_pending_copilot_batches(
                             "imported": imported,
                             "rejected": rejected,
                             "rejected_result_ids": rejected_ids,
+                            "manual_review": manual_review,
+                            "manual_review_result_ids": manual_review_ids,
                             "error": "",
                             "last_checked_mtime": stat.st_mtime,
                             "completed_at": datetime.now(UTC).isoformat(),
@@ -942,6 +1083,7 @@ def sync_pending_copilot_batches(
                     summary["imported_rounds"] += 1
                     summary["imported_runs"] += imported
                     summary["rejected_runs"] += rejected
+                    summary["manual_review_runs"] += manual_review
 
             if _continue_batch_if_ready(
                 db,
@@ -991,11 +1133,17 @@ def latest_copilot_batch(workspace_id: int) -> dict[str, Any] | None:
     run_count = int(manifest.get("run_count") or 0)
     completed_runs_total = int(manifest.get("completed_runs_total") or 0)
     rejected_runs_total = int(manifest.get("rejected_runs_total") or 0)
+    manual_review_runs_total = int(manifest.get("manual_review_runs_total") or 0)
     if not auto_continue and all(
         state.get("status") == "imported" for state in modes.values()
     ) and modes:
         completed_runs_total = run_count
-        rejected_runs_total = _batch_unique_rejected_count(modes)
+        rejected_runs_total = _batch_unique_mode_id_count(
+            modes, "rejected_result_ids", "rejected"
+        )
+        manual_review_runs_total = _batch_unique_mode_id_count(
+            modes, "manual_review_result_ids", "manual_review"
+        )
     return {
         "batch_id": manifest["batch_id"],
         "workspace_id": workspace_id,
@@ -1009,6 +1157,7 @@ def latest_copilot_batch(workspace_id: int) -> dict[str, Any] | None:
         "initial_total_runs": int(manifest.get("initial_total_runs") or run_count),
         "completed_runs_total": completed_runs_total,
         "rejected_runs_total": rejected_runs_total,
+        "manual_review_runs_total": manual_review_runs_total,
         "remaining_runs": int(manifest.get("remaining_runs") or 0),
         "continuation_state": continuation_state,
         "continuation_error": str(manifest.get("continuation_error") or ""),
@@ -1018,6 +1167,7 @@ def latest_copilot_batch(workspace_id: int) -> dict[str, Any] | None:
                 "status": state.get("status", "pending"),
                 "imported": state.get("imported", 0),
                 "rejected": state.get("rejected", 0),
+                "manual_review": state.get("manual_review", 0),
                 "error": state.get("error", ""),
                 "result_file": Path(str(state.get("result_path") or "")).name,
             }

@@ -62,10 +62,11 @@ def _sync_copilot_batches() -> None:
             summary = sync_pending_copilot_batches(db)
             if summary["imported_rounds"] or summary.get("continued_batches"):
                 logger.info(
-                    "Auto-imported Copilot rounds=%s runs=%s rejected=%s continued_batches=%s",
+                    "Auto-imported Copilot rounds=%s runs=%s rejected=%s manual_review=%s continued_batches=%s",
                     summary["imported_rounds"],
                     summary["imported_runs"],
                     summary["rejected_runs"],
+                    summary.get("manual_review_runs", 0),
                     summary.get("continued_batches", 0),
                 )
         except Exception:

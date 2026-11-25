@@ -19,7 +19,11 @@ _HAS_WARNING = func.length(func.coalesce(ReviewResult.warnings_json, "")) > 2
 
 def is_force_qualified(review: CurrentReview) -> bool:
     manual = review.manual_decision
-    return manual is not None and manual.decision in FORCE_QUALIFIED_DECISIONS
+    return (
+        review.final_status == "qualified"
+        and manual is not None
+        and manual.decision in FORCE_QUALIFIED_DECISIONS
+    )
 
 
 def review_update_reasons(
