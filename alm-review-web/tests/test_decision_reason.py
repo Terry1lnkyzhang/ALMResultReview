@@ -1154,6 +1154,286 @@ def test_structured_answers_are_saved_with_items(client_and_engine) -> None:
     assert "AI 原始结论（非最终裁决）：不合格" in detail.text
 
 
+def test_copilot_remaps_same_content_rereview_and_isolates_true_stale_runs(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    from app.services import copilot_review
+    from app.services.manual_decisions import current_review
+
+    _, engine = client_and_engine
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-remap")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    q1 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=401)
+    q2 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=402)
+    q3 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=403)
+
+    launched: list[tuple[str, Path, Path, str]] = []
+
+    def sync_launcher(code_bin, instr, task, mode):
+        launched.append((code_bin, instr, task, mode))
+
+    with Session(engine) as db:
+        workspace = db.get(Workspace, workspace_id)
+        assert workspace is not None
+        manifest = copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            2,
+            modes=("skill", "open"),
+            auto_continue=True,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        batch1_dir = Path(manifest["task_path"]).parent
+        task1 = json.loads(Path(manifest["task_path"]).read_text(encoding="utf-8"))
+        assert [r["review_result_id"] for r in task1["runs"]] == [q1, q2]
+
+        # Check compact task.json trimming and instruction checklists / typo guidance.
+        first_content = task1["runs"][0]["content"]
+        assert "review_capabilities" not in first_content
+        assert "external_evidence_phase" not in first_content
+        for step in first_content["steps"]:
+            assert "numbered_comparison" not in step
+            assert "layout_text" not in (step.get("actual_format") or {})
+        open_instr = (batch1_dir / "open-instructions.md").read_text(encoding="utf-8")
+        assert f"`review_result_id`: `{q1}`" in open_instr
+        assert f"`review_result_id`: `{q2}`" in open_instr
+        assert "200.00mmm" in open_instr
+
+        hashes = {r["review_result_id"]: r["source_hash"] for r in task1["runs"]}
+
+        # Simulate same-content background re-review on run 401 (creates newer ReviewResult ID)
+        # AND genuine ALM content edit on run 402 (changes source_hash).
+        old_rr1 = db.get(ReviewResult, q1)
+        assert old_rr1 is not None
+        new_job1 = ReviewJob(
+            workspace_id=workspace_id,
+            run_id=401,
+            revision_id=old_rr1.revision_id,
+            status="completed",
+        )
+        db.add(new_job1)
+        db.flush()
+        new_rr1 = ReviewResult(
+            workspace_id=workspace_id,
+            job_id=new_job1.id,
+            run_id=401,
+            revision_id=old_rr1.revision_id,
+            prompt_version_id=1,
+            source_hash=old_rr1.source_hash,
+            review_policy_key=old_rr1.review_policy_key,
+            model_name="test-model",
+            verdict="qualified",
+            issue_summary="Re-reviewed with identical content",
+        )
+        db.add(new_rr1)
+        run402 = db.get(AlmRun, 402)
+        assert run402 is not None
+        run402.source_hash = "f" * 64
+        db.commit()
+        new_q1_id = new_rr1.id
+        assert new_q1_id != q1
+
+        # Copilot writes results citing the original batch IDs (q1 and q2).
+        for mode_name in ("skill", "open"):
+            (batch1_dir / f"{mode_name}-results.json").write_text(
+                json.dumps({
+                    "mode": mode_name,
+                    "results": [
+                        {
+                            "review_result_id": q1,
+                            "source_hash": hashes[q1],
+                            "outcome": {"verdict": "qualified", "findings": []},
+                        },
+                        {
+                            "review_result_id": q2,
+                            "source_hash": hashes[q2],
+                            "outcome": {"verdict": "qualified", "findings": []},
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+        summary = copilot_review.sync_pending_copilot_batches(
+            db,
+            workspace_id,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        # Run 401 remapped onto new_q1_id, Run 402 skipped as truly stale, Batch 2 auto-launched for q3!
+        assert summary["imported_rounds"] == 2
+        assert summary["imported_runs"] == 2
+        assert summary["continued_batches"] == 1
+
+        rev401 = current_review(db, db.get(AlmRun, 401))
+        assert rev401.result is not None and rev401.result.id == new_q1_id
+        assert set(rev401.copilot_reports.keys()) == {"skill", "open"}
+
+        batch1_manifest = json.loads((batch1_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert batch1_manifest["modes"]["skill"]["skipped_stale"] == 1
+        assert batch1_manifest["modes"]["open"]["skipped_stale"] == 1
+        assert batch1_manifest["completed_runs_total"] == 1
+
+        latest = copilot_review.latest_copilot_batch(workspace_id)
+        assert latest is not None
+        assert latest["batch_index"] == 2
+        assert latest["completed_runs_total"] == 1
+        batch2_task = json.loads(launched[2][2].read_text(encoding="utf-8"))
+        assert [r["review_result_id"] for r in batch2_task["runs"]] == [q3]
+
+
+def test_copilot_partial_omission_requeues_missed_run_and_retires_old_error_batches(
+    client_and_engine, monkeypatch, tmp_path
+) -> None:
+    from pathlib import Path
+
+    from app.services import copilot_review
+
+    _, engine = client_and_engine
+    monkeypatch.setattr(copilot_review, "COPILOT_RUNS_DIR", tmp_path / "copilot_runs")
+    monkeypatch.setattr(copilot_review, "find_vscode_cli", lambda: "code.cmd")
+
+    with Session(engine) as db:
+        workspace = Workspace(name="Workspace", slug="workspace-partial")
+        db.add(workspace)
+        db.commit()
+        workspace_id = workspace.id
+
+    q1 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=501)
+    q2 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=502)
+    q3 = _prepare_run(engine, "qualified", workspace_id=workspace_id, run_id=503)
+
+    launched: list[tuple[str, Path, Path, str]] = []
+
+    def sync_launcher(code_bin, instr, task, mode):
+        launched.append((code_bin, instr, task, mode))
+
+    with Session(engine) as db:
+        workspace = db.get(Workspace, workspace_id)
+        assert workspace is not None
+
+        # Create an errored batch first, then launch a fresh batch and verify the old error batch retires.
+        err_manifest = copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            1,
+            modes=("open",),
+            auto_continue=True,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        err_dir = Path(err_manifest["task_path"]).parent
+        (err_dir / "open-results.json").write_text("{not valid json", encoding="utf-8")
+        copilot_review.sync_pending_copilot_batches(
+            db, workspace_id, settle_seconds=0.0, launcher=sync_launcher, run_async=False
+        )
+        assert json.loads((err_dir / "manifest.json").read_text(encoding="utf-8"))["modes"]["open"]["status"] == "error"
+
+        launched.clear()
+        manifest = copilot_review.launch_local_copilot_batch(
+            db,
+            workspace,
+            2,
+            modes=("skill", "open"),
+            auto_continue=True,
+            launcher=sync_launcher,
+            run_async=False,
+            delay_seconds=0.0,
+        )
+        assert json.loads((err_dir / "manifest.json").read_text(encoding="utf-8"))["cancelled"] is True
+
+        batch1_dir = Path(manifest["task_path"]).parent
+        task1 = json.loads(Path(manifest["task_path"]).read_text(encoding="utf-8"))
+        hashes = {r["review_result_id"]: r["source_hash"] for r in task1["runs"]}
+        assert [r["review_result_id"] for r in task1["runs"]] == [q1, q2]
+
+        # Open covers q1 & q2, but Skill omits q2.
+        (batch1_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [
+                    {"review_result_id": q1, "source_hash": hashes[q1], "outcome": {"verdict": "qualified", "findings": []}},
+                    {"review_result_id": q2, "source_hash": hashes[q2], "outcome": {"verdict": "qualified", "findings": []}},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        (batch1_dir / "skill-results.json").write_text(
+            json.dumps({
+                "mode": "skill",
+                "results": [
+                    {"review_result_id": q1, "source_hash": hashes[q1], "outcome": {"verdict": "qualified", "findings": []}},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        sync1 = copilot_review.sync_pending_copilot_batches(
+            db, workspace_id, launcher=sync_launcher, run_async=False, delay_seconds=0.0
+        )
+        assert sync1["imported_rounds"] == 2
+        assert sync1["continued_batches"] == 1
+
+        # Only q1 finished both rounds in Batch 1; Batch 2 picks up q2 (skill-only) + q3 (both).
+        batch2_task = json.loads(launched[2][2].read_text(encoding="utf-8"))
+        batch2_dir = launched[2][2].parent
+        assert [(r["review_result_id"], r["modes"]) for r in batch2_task["runs"]] == [
+            (q2, ["skill"]),
+            (q3, ["skill", "open"]),
+        ]
+        # Verify open-instructions only lists q3 while skill-instructions lists q2 and q3.
+        b2_open_instr = (batch2_dir / "open-instructions.md").read_text(encoding="utf-8")
+        b2_skill_instr = (batch2_dir / "skill-instructions.md").read_text(encoding="utf-8")
+        assert f"`review_result_id`: `{q2}`" not in b2_open_instr
+        assert f"`review_result_id`: `{q3}`" in b2_open_instr
+        assert f"`review_result_id`: `{q2}`" in b2_skill_instr
+        assert f"`review_result_id`: `{q3}`" in b2_skill_instr
+
+        b2_hashes = {r["review_result_id"]: r["source_hash"] for r in batch2_task["runs"]}
+        (batch2_dir / "skill-results.json").write_text(
+            json.dumps({
+                "mode": "skill",
+                "results": [
+                    {"review_result_id": q2, "source_hash": b2_hashes[q2], "outcome": {"verdict": "qualified", "findings": []}},
+                    {"review_result_id": q3, "source_hash": b2_hashes[q3], "outcome": {"verdict": "qualified", "findings": []}},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        (batch2_dir / "open-results.json").write_text(
+            json.dumps({
+                "mode": "open",
+                "results": [
+                    {"review_result_id": q3, "source_hash": b2_hashes[q3], "outcome": {"verdict": "qualified", "findings": []}},
+                ],
+            }),
+            encoding="utf-8",
+        )
+        sync2 = copilot_review.sync_pending_copilot_batches(
+            db, workspace_id, launcher=sync_launcher, run_async=False, delay_seconds=0.0
+        )
+        assert sync2["imported_rounds"] == 2
+        assert sync2["continued_batches"] == 0
+        final_batch = copilot_review.latest_copilot_batch(workspace_id)
+        assert final_batch is not None
+        assert final_batch["continuation_state"] == "completed"
+        assert final_batch["completed_runs_total"] == 3
+        assert copilot_review.has_pending_copilot_batches() is False
+
+
 def test_existing_structured_decision_still_displays_legacy_fields(client_and_engine) -> None:
     client, engine = client_and_engine
     result_id = _prepare_run(engine)

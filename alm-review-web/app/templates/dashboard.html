@@ -401,7 +401,7 @@
           <div class="copilot-round-badges" data-copilot-rounds>
             {% for mode_key, state in copilot_batch.modes.items() %}
             <span class="copilot-badge copilot-badge-{{ state.status }}">
-              {{ state.label }}：{% if state.status == 'launching' %}正在打开 VS Code...{% elif state.status == 'pending' %}复核中（写完自动导入）{% elif state.status == 'imported' %}已导入 {{ state.imported }} 条{% if state.rejected or state.manual_review %}（{% if state.rejected %}{{ state.rejected }} 条转不合格{% endif %}{% if state.rejected and state.manual_review %} · {% endif %}{% if state.manual_review %}{{ state.manual_review }} 条转人工复核{% endif %}）{% endif %}{% elif state.status == 'launch_failed' %}启动失败：{{ state.error }}{% else %}导入异常：{{ state.error }}{% endif %}
+              {{ state.label }}：{% if state.status == 'launching' %}正在打开 VS Code...{% elif state.status == 'pending' %}复核中（写完自动导入）{% elif state.status == 'imported' %}已导入 {{ state.imported }} 条{% if state.rejected or state.manual_review or state.skipped_stale %}（{% if state.rejected %}{{ state.rejected }} 条转不合格{% endif %}{% if state.rejected and state.manual_review %} · {% endif %}{% if state.manual_review %}{{ state.manual_review }} 条转人工复核{% endif %}{% if (state.rejected or state.manual_review) and state.skipped_stale %} · {% endif %}{% if state.skipped_stale %}跳过 {{ state.skipped_stale }} 条已变更{% endif %}）{% endif %}{% elif state.status == 'launch_failed' %}启动失败：{{ state.error }}{% else %}导入异常：{{ state.error }}{% endif %}
             </span>
             {% endfor %}
             {% if copilot_batch.manual_review_runs_total or (copilot_batch.modes.values()|selectattr('manual_review', 'gt', 0)|list) %}
